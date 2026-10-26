@@ -27,4 +27,12 @@ place?: string | null,
 /**
  * Part number / model (optional, a table column).
  */
-model?: string | null, };
+model?: string | null, 
+/**
+ * The node reports the active step of every program it runs, as one
+ * word per program (`<program>.step`, rule ⑧): the ST export writes
+ * the step's flat index into it on every transition, and the plant
+ * records the word as the program's step bands — the controller's
+ * own SFC on the dock, the way the cell's internal programs show.
+ */
+monitor?: boolean, };

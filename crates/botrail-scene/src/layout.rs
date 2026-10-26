@@ -2029,6 +2029,7 @@ mod tests {
                     },
                     watch: SensorWatch::All,
                     mount: None,
+                    ids: None,
                 })
                 .unwrap();
         }
@@ -2109,6 +2110,7 @@ mod tests {
                 zone_size: Vector3::new(2.0, 0.4, 0.2),
                 velocity: Vector3::new(0.2, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene
@@ -2121,6 +2123,7 @@ mod tests {
                 },
                 watch: SensorWatch::All,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.add_frame("env/World/mount", Isometry3::translation(0.0, 1.0, 0.0));

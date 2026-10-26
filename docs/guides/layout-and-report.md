@@ -91,9 +91,13 @@ derived.
 Pass the cycles as a `{name: timeline}` dict, a list, or a single
 `SequenceTimeline`; a `ScenarioRuns` passed as `scenarios=` fills the matrix
 and, when no timelines are given, supplies the cycles too. The matrix is
-the FAT sheet's verdict column: a fault authored as a scenario (a stuck
-switch, an open wire, the E-stop in) either lets the cycle through or
-stalls it, and the row says which and at what step. Every section is
+the coarse form of a FAT: a fault authored as a scenario (a stuck switch,
+an open wire, the E-stop in) either lets the cycle through or stalls it,
+and the row says which and at what step. The FAT sheet proper — test
+cases with expectations, the rows derived from the interlock table — is
+`bt.vc.run_fat`, and lands in the report as a section
+(`sections=[fat.section()]`; see [the FAT](virtual-commissioning.md#tests-as-a-table-the-fat)).
+Every section is
 a plain dict or list — `report.cycles[0]["duration"]`,
 `report.footprint["area"]`, `report.io["unbound"]` — and the report renders
 the same data as Markdown (`to_markdown()` / `save("…md")`) or JSON

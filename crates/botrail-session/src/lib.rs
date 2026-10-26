@@ -124,6 +124,15 @@ pub trait SessionHost {
     /// The hand lets go (`release`).
     fn release(&self) {}
 
+    /// A hand on the live plant session (`plant`): the host queues it for
+    /// the session's loop (`bt.vc.Session`), which applies it before its
+    /// next scan. The default has no session and logs the command.
+    fn plant_command(&self, command: wire::PlantCommandMsg) {
+        self.log(&format!(
+            "no plant session listens for {command:?} — run the cell as a plant (bt.vc.Session) with this studio open"
+        ));
+    }
+
     /// Called before any bake this host is asked for, so a streaming bake
     /// in flight can be wound up first and its last chunk lands before the
     /// new result.
@@ -505,6 +514,10 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         }
         ClientMessage::Release => {
             host.release();
+            Ok(())
+        }
+        ClientMessage::Plant { command } => {
+            host.plant_command(command);
             Ok(())
         }
         ClientMessage::SimulatePhysics { duration, scenario } => {
@@ -954,6 +967,17 @@ pub fn set_obstacle_walkable(
     walkable: bool,
 ) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.set_obstacle_walkable(name, walkable))?;
+    emit_obstacles_and_state(host);
+    Ok(())
+}
+
+/// Marks an obstacle a stopper for conveyed parts and rebroadcasts.
+pub fn set_obstacle_stopper(
+    host: &impl SessionHost,
+    name: &str,
+    stopper: bool,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.set_obstacle_stopper(name, stopper))?;
     emit_obstacles_and_state(host);
     Ok(())
 }
@@ -1505,6 +1529,60 @@ pub fn add_spin(
         host.emit(&msg);
     }
     Ok(())
+}
+
+/// Declares (or replaces) an indicator lamp and rebroadcasts the effects
+/// list.
+pub fn add_lamp(
+    host: &impl SessionHost,
+    name: &str,
+    signal: &str,
+    obstacle: &str,
+    color: [f32; 3],
+) -> Result<(), botrail_scene::SceneError> {
+    host.with_scene(|scene| scene.add_lamp(name, signal, obstacle, color))?;
+    if host.has_listeners() {
+        let msg = host.with_scene(|scene| wire::effects_message(scene));
+        host.emit(&msg);
+    }
+    Ok(())
+}
+
+/// One window of a live plant session (`bt.vc.Session`) to the connected
+/// studios: the tracks after `sent` as a `bake_chunk` that is live from
+/// the start, so the dock follows its head. Returns the clock the window
+/// reached — the `sent` of the next call. With nobody listening nothing
+/// is built and the window is skipped (a studio that connects later gets
+/// the whole bands and lanes with its first window anyway).
+pub fn emit_live_window(
+    host: &impl SessionHost,
+    scene: &Scene,
+    live: &botrail_scene::rollout::LiveRollout,
+    sent: f64,
+    done: bool,
+) -> f64 {
+    if !host.has_listeners() {
+        return live.t();
+    }
+    let window = live.timeline_since(sent);
+    let chunk = timeline_window_msg(scene, &window, sent);
+    let reached = window.duration;
+    // A window with nothing sampled yet (less than a lattice step since
+    // the last) waits for the next, as a streaming bake's does.
+    let has_samples = chunk.robots.iter().any(|r| !r.trajectory.times.is_empty())
+        || chunk.objects.iter().any(|o| !o.poses.is_empty())
+        || chunk.vehicles.iter().any(|v| !v.poses.is_empty());
+    if !done && !has_samples {
+        return sent;
+    }
+    host.emit(&ServerMessage::BakeChunk {
+        stream: None,
+        from: sent,
+        done,
+        live_from: Some(0.0),
+        timeline: chunk,
+    });
+    reached
 }
 
 /// Places a vehicle at one of its stations as if authored there — its
@@ -2415,6 +2493,17 @@ fn timeline_msg_on(
                 kind: s.kind.as_str().to_string(),
             })
             .collect(),
+        words: timeline
+            .words
+            .iter()
+            .map(|w| wire::WordTrackMsg {
+                name: w.name.clone(),
+                times: w.samples.iter().map(|(t, _)| *t).collect(),
+                values: w.samples.iter().map(|(_, v)| *v).collect(),
+                kind: w.kind.as_str().to_string(),
+                integer: w.integer,
+            })
+            .collect(),
         contacts: timeline
             .contacts
             .iter()
@@ -2812,6 +2901,7 @@ mod tests {
                     ServerMessage::Bom { .. } => "bom",
                     ServerMessage::RecordingResult { .. } => "recording_result",
                     ServerMessage::UsdDocument { .. } => "usd_document",
+                    ServerMessage::Plant { .. } => "plant",
                 })
                 .collect()
         }

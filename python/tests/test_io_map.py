@@ -72,10 +72,10 @@ def test_step_refs_carry_flat_indices(pick_cell) -> None:
     # `await part` is the second step of `pick`; the tuple is
     # (sequence, flat index, name) — index first, name for display.
     assert table[("part_at_pick", "input")].readers == [("pick", 1, "await part")]
-    # Branch arms read at the branching step: `judge` is flat step 5.
+    # Branch arms read at the branching step: `judge` is flat step 6.
     (seq, index, name), = table[("spec_ok", "input")].readers
     assert (seq, name) == ("pick", "judge")
-    assert index == 5
+    assert index == 6
 
 
 def test_io_list_formats(pick_cell, tmp_path: Path) -> None:
@@ -361,8 +361,8 @@ def test_inverted_wire_flips_tests_and_writes_only_in_the_script() -> None:
     script = runs.to_script()
     assert "if (not get_standard_digital_in(3)):" in script  # branch guard, inverted
     assert "if (get_standard_digital_in(3)):" in plain_script
-    assert "set_standard_digital_out(1, False)" in script.split("# step 4")[1].split("# step 5")[0]
-    assert "set_standard_digital_out(1, True)" in plain_script.split("# step 4")[1].split("# step 5")[0]
+    assert "set_standard_digital_out(1, False)" in script.split("# step 5")[1].split("# step 6")[0]
+    assert "set_standard_digital_out(1, True)" in plain_script.split("# step 5")[1].split("# step 6")[0]
 
 
 def test_own_robot_done_lowers_to_nothing() -> None:
@@ -651,7 +651,14 @@ def test_golden_weld_line_three_stages() -> None:
     assert ("st1_lh.start", "output", "PLC1") in stage2 and ("st1_lh.start", "input", "ST1") in stage2
     assert ("st1_lh.done", "input", "PLC1") in stage2 and ("st1_lh.done", "output", "ST1") in stage2
     assert stage2[("st1_done", "output", "PLC1")].status == "internal"
-    assert len(stage2) == 24
+    # Each arm takes a dozen ramp commands from the PLC: a program word per
+    # arm selects among them (the exchange's robot entries, VC1).
+    for arm in ("st1_lh", "st1_rh", "st2_lh", "st2_rh"):
+        assert stage2[(f"{arm}.program", "output", "PLC1")].kind == "Word"
+        # … and lands on the arm's own controller as its program-select
+        # word (where a vendor template binds PNS / PGNO).
+        assert stage2[(f"{arm}.program", "input", f"ST{arm[2]}")].kind == "Word"
+    assert len(stage2) == 32
 
     # Stage 3 — the stations run their own programs: the arm handshakes
     # vanish, `st*_done` becomes ST → PLC wires and `moving` fans out

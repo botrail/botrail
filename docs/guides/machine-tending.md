@@ -299,20 +299,34 @@ handed over with in particular:
   its two limit switches at the ends of the stroke — the envelope a plan
   keeps clear of the stand and the stocker.
 
-And the **FAT rows**: the faults a control designer would test for are
-authored as scenarios and run with the matrix —
+And the **FAT sheet**: the faults a control designer would test for are
+written as test cases — the fault, and what must follow — and run as a
+sheet, each case a run of the same cell
+([the FAT](virtual-commissioning.md#tests-as-a-table-the-fat)):
 
 ```python
-scene.add_scenario("door_switch_stuck", faults=[bt.io.stuck(hs.signal("door_closed"), False)])
-scene.add_scenario("clamp_button_open", faults=[bt.io.open("vmc/panel/clamp")])
-scene.add_scenario("estop_pressed", faults=[bt.io.stuck(hs.signal("estop"), True)])
-runs = scene.simulate_scenarios(["tend", "vmc"], max_duration=160.0)
-report = scene.cell_report({"baseline": tl}, scenarios=runs, deliverables=files)
+cases = [
+    bt.vc.TestCase("nominal cycle", expect=[bt.vc.cycle_within(tl.duration + 1.0)]),
+    bt.vc.TestCase("door switch stuck", faults=[bt.io.stuck(hs.signal("door_closed"), False)],
+                   expect=[bt.vc.stalls(hs.program, at="wait_start")]),
+    bt.vc.TestCase("clamp button open", faults=[bt.io.open("vmc/panel/clamp")],
+                   expect=[bt.vc.stalls(hs.program, at="wait_clamp")]),
+    bt.vc.TestCase("E-stop pressed", faults=[bt.io.stuck(hs.signal("estop"), True)],
+                   expect=[bt.vc.stalls(hs.program, at="wait_start")]),
+    *bt.vc.interlock_tests(scene, hs.program),      # a row per row of the interlock table
+]
+fat = bt.vc.run_fat(scene, cases, ["tend", hs.program])
+fat.save("machine_tending_fat.md")
+report = scene.cell_report({"baseline": tl}, scenarios=runs, deliverables=files, sections=[fat.section()])
 ```
 
-— and the report's scenario matrix shows the baseline through and each
-fault **refused**: the closed switch that never makes and the E-stop in
-stall the machine at `wait_start`, the open wire on CLAMP at
-`wait_clamp`. The report's *Machines* section lists the machine with its
-door (drive, stroke, the lanes), its buttons and the controller hosting
-its program.
+— and the sheet shows the nominal cycle through and each fault
+**refused** where it should be: the closed switch that never makes and
+the E-stop in stall the machine at `wait_start`, the open wire on CLAMP
+at `wait_clamp`. The same faults authored as scenarios
+(`scene.add_scenario(..., faults=[...])`) fill the report's scenario
+matrix, which says only that the cycle stalled; the sheet says at which
+guard, and carries the interlock table's own rows beside the authored
+ones. The report's *Machines* section lists the machine with its door
+(drive, stroke, the lanes), its buttons and the controller hosting its
+program.

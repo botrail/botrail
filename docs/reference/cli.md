@@ -83,6 +83,44 @@ Besides the `simulate` bake options, accepts `--dt` (scan interval, default
 kinematic. A program that cannot compile to the robot dialect (a 7-axis arm,
 an uncovered branch) is a warning on stderr, not an export failure.
 
+## `botrail commission <cell> --link HOST=TARGET`
+
+Runs the cell as the **plant** of a controller
+([virtual commissioning](../guides/virtual-commissioning.md)): `--link
+PLC1=modbus://0.0.0.0:5020` serves the host's exchange to a PLC that polls
+it, `PLC1=opcua://host:4840` reads the controller's OPC UA server,
+`PLC1=replay:inputs.csv` feeds a recorded input stream back, `PLC1=loopback`
+lets botrail run the host itself. `--for S` runs that many plant seconds
+(`--cycle` restarts the plant's own programs), `--record DIR` writes the
+input recording, the emulated USD and the exchange tables, and `--diff`
+bakes the design and compares the run against it (`--tolerance`,
+`--align-on`), exit 1 on a mismatch. Output is JSON: the hosts, the
+clock, `stats` (scans, lag, overruns) and the diff.
+
+## `botrail fat <cell> [--cases FILE] [--interlocks [PROGRAM …]] [--safety] [--link …]`
+
+Runs the **FAT sheet**
+([tests as a table](../guides/virtual-commissioning.md#tests-as-a-table-the-fat))
+and prints it as JSON (`--markdown` for the sheet itself; `--out FILE`
+writes `.md`, `.csv` or `.json`). Without arguments every row is derived:
+one per interlock-table row — the condition pinned false, the program
+must reach the gate and never enter the step — and one per safety input
+the programs read. `--cases FILE` adds authored rows from a `.yaml` /
+`.json` file (`bt.vc.cases_from_data` describes the shape; a row may also
+say `interlock_tests: PROGRAM` or `safety_tests: true` to splice the
+derived rows in). The cases run offline, in loopback, unless `--link`
+names a controller as for `commission`. `--horizon S` caps each case's
+plant time after its moment (default 1.5 × the bake + 1 s). Exit codes:
+0 every row passed or was n/a, 1 a row failed or errored, 2 nothing to
+run.
+
+```text
+botrail fat cell.py                                   # derived rows, JSON
+botrail fat cell.py --cases fat.yaml --out fat.md     # + your rows, the sheet as Markdown
+botrail fat cell.py --interlocks pick --markdown      # one program's interlock rows, printed
+botrail export cell.py --out deliverables/ --all --fat   # the sheet in the document set
+```
+
 ## `botrail schema [--out FILE]`
 
 The JSON Schema (draft 2020-12) of the `.botrail` project file. See below.

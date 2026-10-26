@@ -100,6 +100,12 @@ pub struct InputRef {
     pub written_by: Vec<String>,
     /// `node.channel [address]` where the row's host has the point bound.
     pub address: Option<String>,
+    /// The level that denies this contact on its own — `false` for a
+    /// level test on high or a rising edge, `true` for a test on low or a
+    /// falling edge — when the input is a lane a fault can pin (a sensor
+    /// or an internal signal); `None` for device feedback, a robot's idle
+    /// test, or a lane the condition reads both ways.
+    pub pin: Option<bool>,
 }
 
 /// One row: an output of a step and the condition guarding the step.
@@ -120,6 +126,16 @@ pub struct InterlockRow {
     /// The steps whose transition the condition is (the predecessors).
     pub after: Vec<String>,
     pub inputs: Vec<InputRef>,
+    /// Lanes to pin, and at what level, so the condition can never hold —
+    /// the negative test of the row (`bt.vc.interlock_tests`): with these
+    /// stuck, the step must never be entered. One pin per AND term is
+    /// enough; every OR alternative needs one. Empty when the condition
+    /// cannot be denied by pinning lanes (`undeniable` says why).
+    pub denial: Vec<(String, bool)>,
+    /// Why no pinning denies the condition: a timer, motion completion,
+    /// device or robot feedback, `TRUE`, a first step (entered at start
+    /// regardless), or a lane the condition needs both low and high.
+    pub undeniable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -225,21 +241,32 @@ fn trim_num(v: f64) -> String {
     }
 }
 
-/// Every lane, device or robot a condition reads, in order, deduplicated.
-fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool)>) {
-    // (name, is_device_done, is_robot_done)
-    let push = |out: &mut Vec<(String, bool, bool)>, item: (String, bool, bool)| {
-        if !out.contains(&item) {
-            out.push(item);
+/// Every lane, device or robot a condition reads, in order, deduplicated,
+/// with the level that denies the contact (`None` for feedback, or for a
+/// lane the condition reads both ways).
+fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool, Option<bool>)>) {
+    // (name, is_device_done, is_robot_done, pin)
+    let push = |out: &mut Vec<(String, bool, bool, Option<bool>)>,
+                item: (String, bool, bool, Option<bool>)| {
+        match out
+            .iter_mut()
+            .find(|(n, d, r, _)| *n == item.0 && *d == item.1 && *r == item.2)
+        {
+            Some(seen) => {
+                if seen.3 != item.3 {
+                    seen.3 = None;
+                }
+            }
+            None => out.push(item),
         }
     };
     match c {
-        Condition::Signal { name, .. }
-        | Condition::Rising { name }
-        | Condition::Falling { name } => push(out, (name.clone(), false, false)),
-        Condition::DeviceDone { device } => push(out, (device.clone(), true, false)),
+        Condition::Signal { name, value } => push(out, (name.clone(), false, false, Some(!value))),
+        Condition::Rising { name } => push(out, (name.clone(), false, false, Some(false))),
+        Condition::Falling { name } => push(out, (name.clone(), false, false, Some(true))),
+        Condition::DeviceDone { device } => push(out, (device.clone(), true, false, None)),
         Condition::RobotDone { robot } | Condition::GroupDone { robot, .. } => {
-            push(out, (robot.clone(), false, true))
+            push(out, (robot.clone(), false, true, None))
         }
         Condition::All(cs) | Condition::Any(cs) => {
             for c in cs {
@@ -248,6 +275,77 @@ fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool)>) {
         }
         Condition::Immediately | Condition::Done | Condition::Elapsed { .. } => {}
     }
+}
+
+/// The lanes to pin so `c` can never hold: one deniable term of an AND,
+/// every alternative of an OR, the contact itself for a level or an edge.
+/// `pinnable` says whether a name is a lane a fault can pin (a sensor or
+/// an internal signal), or why not. `Err` carries why the condition
+/// cannot be denied.
+fn deny(
+    c: &Condition,
+    pinnable: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<Vec<(String, bool)>, String> {
+    match c {
+        Condition::Immediately => Err("always true".to_string()),
+        Condition::Done => Err("motion completion (no lane to pin)".to_string()),
+        Condition::RobotDone { robot } | Condition::GroupDone { robot, .. } => {
+            Err(format!("the idle test of `{robot}` (no lane to pin)"))
+        }
+        Condition::Elapsed { seconds } => Err(format!("a timer ({} s)", trim_num(*seconds))),
+        Condition::DeviceDone { device } => {
+            Err(format!("the in-position of `{device}` (no lane to pin)"))
+        }
+        Condition::Signal { name, value } => {
+            pinnable(name)?;
+            Ok(vec![(name.clone(), !value)])
+        }
+        Condition::Rising { name } => {
+            pinnable(name)?;
+            Ok(vec![(name.clone(), false)])
+        }
+        Condition::Falling { name } => {
+            pinnable(name)?;
+            Ok(vec![(name.clone(), true)])
+        }
+        Condition::All(cs) => {
+            if cs.is_empty() {
+                return Err("always true".to_string());
+            }
+            let mut reasons = Vec::new();
+            for c in cs {
+                match deny(c, pinnable) {
+                    Ok(pins) => return Ok(pins),
+                    Err(why) => reasons.push(why),
+                }
+            }
+            Err(reasons.join("; "))
+        }
+        Condition::Any(cs) => {
+            if cs.is_empty() {
+                return Err("always true".to_string());
+            }
+            let mut pins: Vec<(String, bool)> = Vec::new();
+            for c in cs {
+                merge_pins(&mut pins, deny(c, pinnable)?)?;
+            }
+            Ok(pins)
+        }
+    }
+}
+
+/// Unions two pin sets; a lane needed both low and high is a conflict.
+fn merge_pins(into: &mut Vec<(String, bool)>, more: Vec<(String, bool)>) -> Result<(), String> {
+    for (lane, level) in more {
+        match into.iter().find(|(l, _)| *l == lane) {
+            Some((_, have)) if *have != level => {
+                return Err(format!("`{lane}` would have to be both low and high"));
+            }
+            Some(_) => {}
+            None => into.push((lane, level)),
+        }
+    }
+    Ok(())
 }
 
 /// The last transition(s) of a run of steps: the last step's own
@@ -562,6 +660,21 @@ impl Scene {
                 .find(|d| name.starts_with(&format!("{}/", d.name)))
                 .map(|d| d.name.clone())
         };
+        // What a fault can pin: a sensor or an internal signal (what
+        // `Scenario.faults` accepts) — not a device's lane, which the
+        // plant drives.
+        let pinnable = |name: &str| -> Result<(), String> {
+            if is_sensor(name) || is_signal(name) {
+                Ok(())
+            } else if is_stop_lane(name)
+                || device_of_lane(name).is_some()
+                || self.devices().iter().any(|d| d.name == name)
+            {
+                Err(format!("`{name}` is a device lane (the plant drives it)"))
+            } else {
+                Err(format!("`{name}` is not a lane"))
+            }
+        };
 
         let mut rows = Vec::new();
         for seq in &programs {
@@ -603,13 +716,48 @@ impl Scene {
                         after.push(s.name.clone());
                     }
                 }
-                let mut read: Vec<(String, bool, bool)> = Vec::new();
+                let mut read: Vec<(String, bool, bool, Option<bool>)> = Vec::new();
                 for (c, _) in &conditions {
                     condition_inputs(c, &mut read);
                 }
+                // The negative test: every way into the step denied by
+                // pinned lanes — or why that cannot be done.
+                let (denial, undeniable) = if entry.start {
+                    (
+                        Vec::new(),
+                        Some("a first step is entered at start regardless".to_string()),
+                    )
+                } else {
+                    let mut pins: Vec<(String, bool)> = Vec::new();
+                    let mut why: Option<String> = None;
+                    for (c, _) in &conditions {
+                        match deny(c, &pinnable) {
+                            Ok(more) => {
+                                if let Err(conflict) = merge_pins(&mut pins, more) {
+                                    why = Some(conflict);
+                                    break;
+                                }
+                            }
+                            Err(reason) => {
+                                why = Some(reason);
+                                break;
+                            }
+                        }
+                    }
+                    if conditions.is_empty() {
+                        why = Some("always true".to_string());
+                    }
+                    match why {
+                        Some(w) => (Vec::new(), Some(w)),
+                        None => (pins, None),
+                    }
+                };
                 let inputs: Vec<InputRef> = read
                     .into_iter()
-                    .map(|(name, device_done, robot_done)| {
+                    .map(|(name, device_done, robot_done, pin)| {
+                        let pinnable_lane =
+                            !device_done && !robot_done && (is_sensor(&name) || is_signal(&name));
+                        let pin = if pinnable_lane { pin } else { None };
                         let (kind, written_by, address) = if robot_done {
                             (InputKind::Robot, Vec::new(), None)
                         } else if device_done {
@@ -642,6 +790,7 @@ impl Scene {
                             kind,
                             written_by,
                             address,
+                            pin,
                         }
                     })
                     .collect();
@@ -656,6 +805,8 @@ impl Scene {
                         condition: condition.clone(),
                         after: after.clone(),
                         inputs: inputs.clone(),
+                        denial: denial.clone(),
+                        undeniable: undeniable.clone(),
                     });
                 }
             }
@@ -812,6 +963,7 @@ mod tests {
                 },
                 watch: SensorWatch::All,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         // The cell's program raises `go` once the mat reads clear; the
@@ -1005,5 +1157,116 @@ mod tests {
         );
         assert!(md.contains(&format!("attach part ({robot}/right)")), "{md}");
         assert!(md.contains(&format!("IDLE({robot}/left)")), "{md}");
+    }
+
+    #[test]
+    fn rows_say_which_pins_deny_their_condition() {
+        let mut scene = arm();
+        for name in ["ok", "go", "done"] {
+            scene.define_signal(name, false);
+        }
+        scene
+            .upsert_sensor(Sensor {
+                name: "mat".into(),
+                kind: SensorKind::Zone {
+                    pose: nalgebra::Isometry3::translation(0.5, 0.0, 0.1),
+                    size: nalgebra::Vector3::new(0.2, 0.2, 0.2),
+                },
+                watch: SensorWatch::All,
+                mount: None,
+                ids: None,
+            })
+            .unwrap();
+        let set = |signal: &str, value: bool| Action::Set {
+            signal: signal.to_string(),
+            value,
+        };
+        scene.set_sequences(vec![
+            Sequence {
+                name: "cell".to_string(),
+                steps: vec![
+                    step(
+                        "wait",
+                        vec![],
+                        Condition::Signal {
+                            name: "mat".to_string(),
+                            value: false,
+                        },
+                    ),
+                    step(
+                        "release",
+                        vec![set("go", true)],
+                        Condition::All(vec![sig("ok"), Condition::Elapsed { seconds: 1.0 }]),
+                    ),
+                    step(
+                        "report",
+                        vec![set("done", true)],
+                        Condition::Any(vec![
+                            Condition::Rising {
+                                name: "go".to_string(),
+                            },
+                            Condition::Signal {
+                                name: "ok".to_string(),
+                                value: false,
+                            },
+                        ]),
+                    ),
+                    step("end", vec![set("done", false)], Condition::Immediately),
+                    step(
+                        "both",
+                        vec![set("ok", false)],
+                        Condition::Any(vec![
+                            sig("ok"),
+                            Condition::Signal {
+                                name: "ok".to_string(),
+                                value: false,
+                            },
+                        ]),
+                    ),
+                    step("last", vec![set("go", false)], Condition::Immediately),
+                ],
+            },
+            Sequence {
+                name: "robot".to_string(),
+                steps: vec![step("idle", vec![set("ok", true)], sig("go"))],
+            },
+        ]);
+        let table = scene.interlock_table(None).unwrap();
+        let row = |step: &str| table.rows.iter().find(|r| r.step == step).unwrap();
+        // A level test on low is denied by pinning the lane high.
+        let release = row("release");
+        assert_eq!(release.denial, vec![("mat".to_string(), true)]);
+        assert_eq!(release.undeniable, None);
+        assert_eq!(release.inputs[0].pin, Some(true));
+        // One deniable term of an AND is enough; the timer is left alone.
+        let report = row("report");
+        assert_eq!(report.denial, vec![("ok".to_string(), false)]);
+        // Every alternative of an OR: the edge pinned low, the low test
+        // pinned high.
+        let end = row("end");
+        assert_eq!(
+            end.denial,
+            vec![("go".to_string(), false), ("ok".to_string(), true)]
+        );
+        // `TRUE` cannot be denied.
+        let both = row("both");
+        assert!(both.denial.is_empty());
+        assert_eq!(both.undeniable.as_deref(), Some("always true"));
+        // A lane the condition needs both low and high: a conflict, and
+        // the input's own pin is unknown.
+        let last = row("last");
+        assert!(last.denial.is_empty());
+        assert!(last
+            .undeniable
+            .as_deref()
+            .unwrap()
+            .contains("both low and high"));
+        assert_eq!(last.inputs[0].pin, None);
+        // A first step is entered at start regardless of its cycle condition.
+        let idle = row("idle");
+        assert!(idle.denial.is_empty());
+        assert!(idle.undeniable.as_deref().unwrap().contains("first step"));
+        // The fields ride along in the JSON the Python side reads.
+        assert!(table.to_json().contains("\"denial\""));
     }
 }

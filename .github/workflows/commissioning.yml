@@ -1,0 +1,105 @@
+# The cell's logic on a real IEC 61131-3 runtime, against the cell as its
+# plant (design-virtual-commissioning.md VC2): OpenPLC v3 in Docker compiles
+# the Structured Text botrail writes, polls botrail over Modbus TCP, and the
+# run is diffed against the bake, then the cell's FAT sheet runs against the
+# PLC row by row (VC4); URSim runs the pick program as the robot's own
+# controller with the cell as its plant (VC5); and OpenPLC indexes the feed
+# line by writing axis positions in millimetres and driving a cylinder
+# through its coils and switches (VC6). Nightly — it pulls images and runs
+# in wall-clock time — and on demand.
+name: commissioning
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  openplc-pick-cell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the extension
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python maturin pymodbus asyncua pyyaml
+          VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv --release
+      - name: Start OpenPLC
+        run: docker compose -f examples/commissioning/openplc_pick_cell/compose.yaml up -d
+      - name: Run the plant against the PLC and diff it against the bake
+        run: .venv/bin/python examples/commissioning/openplc_pick_cell/run_demo.py --check --out out
+      - name: Run the FAT sheet against the PLC (a row per case, the PLC restarted per row)
+        run: .venv/bin/python examples/commissioning/openplc_pick_cell/run_demo.py --fat --check --out out/fat
+      - name: Stop OpenPLC
+        if: always()
+        run: docker compose -f examples/commissioning/openplc_pick_cell/compose.yaml down
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openplc-pick-cell
+          path: out/
+
+  openplc-feed-line:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the extension
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python maturin pymodbus
+          VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv --release
+      - name: Start OpenPLC
+        run: docker compose -f examples/commissioning/openplc_feed_line/compose.yaml up -d
+      - name: Index the feed line from the PLC (positions in millimetres, the press by its coils) and diff it against the bake
+        run: .venv/bin/python examples/commissioning/openplc_feed_line/run_demo.py --check --out out
+      - name: Stop OpenPLC
+        if: always()
+        run: docker compose -f examples/commissioning/openplc_feed_line/compose.yaml down
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openplc-feed-line
+          path: out/
+
+  ursim-pick-cell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Build the extension
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python maturin
+          VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH .venv/bin/maturin develop --uv --release
+      - name: Start URSim
+        run: docker compose -f examples/commissioning/ursim_pick_cell/compose.yaml up -d
+      - name: Run the pick program on the controller with the cell as its plant
+        run: .venv/bin/python examples/commissioning/ursim_pick_cell/run_demo.py --check --out out
+      - name: Stop URSim
+        if: always()
+        run: docker compose -f examples/commissioning/ursim_pick_cell/compose.yaml down
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ursim-pick-cell
+          path: out/

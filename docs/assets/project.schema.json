@@ -72,6 +72,13 @@
         "$ref": "#/$defs/FrameMsg"
       }
     },
+    "grasps": {
+      "description": "Grasps that follow coils (`bind_grasp`; absent in older files).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/GraspBindingMsg"
+      }
+    },
     "io": {
       "description": "The I/O map's assignment layer — controller nodes, point → channel\nbindings, declarations (absent in older files). The points\nthemselves are derived, never stored.",
       "$ref": "#/$defs/IoMap",
@@ -651,6 +658,21 @@
           "description": "Robot program-number word.",
           "type": "string",
           "const": "program"
+        },
+        {
+          "description": "A program's active step, reported by the controller that runs it\n(a monitoring node, word).",
+          "type": "string",
+          "const": "step"
+        },
+        {
+          "description": "A device's encoder / position feedback (REAL word, plant → host):\nan axis's actual position, a belt's travel.",
+          "type": "string",
+          "const": "encoder"
+        },
+        {
+          "description": "An identification reader's word (INT, plant → host): the id of\nthe carrier it sees, 0 for none.",
+          "type": "string",
+          "const": "id"
         }
       ]
     },
@@ -1292,6 +1314,22 @@
       },
       "additionalProperties": false
     },
+    "CoilMsg": {
+      "description": "A solenoid coil of a cylinder-like axis and the stop it drives to.",
+      "type": "object",
+      "properties": {
+        "coil": {
+          "type": "string"
+        },
+        "stop": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "coil",
+        "stop"
+      ]
+    },
     "Compatibility": {
       "type": "object",
       "properties": {
@@ -1836,6 +1874,10 @@
           "description": "Advects unattached obstacles whose origin lies inside the zone.",
           "type": "object",
           "properties": {
+            "encoder": {
+              "description": "Records the belt's travel as the word lane `<name>.encoder`.",
+              "type": "boolean"
+            },
             "kind": {
               "type": "string",
               "const": "conveyor"
@@ -1885,6 +1927,17 @@
               },
               "maxItems": 3,
               "minItems": 3
+            },
+            "coils": {
+              "description": "Solenoid coils `(coil, stop)`: an output `<axis>/<coil>` that\ndrives the axis to the named stop (a cylinder's valve).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CoilMsg"
+              }
+            },
+            "encoder": {
+              "description": "Records the actual position as the word lane `<name>.encoder`.",
+              "type": "boolean"
             },
             "kind": {
               "type": "string",
@@ -2371,6 +2424,11 @@
           "description": "The bound link spun while the signal is on, nothing drawn.",
           "type": "string",
           "const": "spin"
+        },
+        {
+          "description": "An obstacle lit in its colour while the signal is on: an indicator\nlamp on a panel, a tower light.",
+          "type": "string",
+          "const": "lamp"
         }
       ]
     },
@@ -2378,6 +2436,19 @@
       "description": "A weld-flash binding: while `signal` is true, draw an arc flash at\n`robot`'s TCP.",
       "type": "object",
       "properties": {
+        "color": {
+          "description": "The lamp's lit colour, linear RGB (lamp effects only).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
         "cone": {
           "description": "Spray-cone size, `[length, radius]` in meters (spray effects only).",
           "type": [
@@ -2398,6 +2469,13 @@
         },
         "name": {
           "type": "string"
+        },
+        "obstacle": {
+          "description": "The obstacle a lamp lights (lamp effects only).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "robot": {
           "type": "string"
@@ -2749,6 +2827,56 @@
         }
       ]
     },
+    "GraspBindingMsg": {
+      "description": "A grasp that follows a coil (`bind_grasp`) as a project carries it:\nthe declaration by names, re-resolved on load.",
+      "type": "object",
+      "properties": {
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reach_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "robot": {
+          "type": "string"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "touch_links": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "signal",
+        "robot"
+      ]
+    },
     "GripperDriveMsg": {
       "description": "A gripper drive as a project carries it: the declaration, re-resolved\nagainst the model on load (empty `joints` = derived from the tool\nmount, `None` numbers = the kind-scaled defaults).",
       "type": "object",
@@ -2920,6 +3048,23 @@
         "threaded"
       ]
     },
+    "IdEntryMsg": {
+      "description": "One row of an identification reader's table.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "obstacle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "obstacle",
+        "id"
+      ]
+    },
     "InterfacePair": {
       "type": "object",
       "properties": {
@@ -3050,6 +3195,13 @@
           ],
           "format": "uint32",
           "minimum": 0
+        },
+        "unit": {
+          "description": "The engineering unit a word channel carries a measurement in\n(`\"mm\"`, `\"0.01mm\"`, `\"mm/s\"`): a REAL point bound here is\nexchanged as an INT scaled to that unit — a 16-bit register\ncannot carry a REAL, and a drive's position is an integer in\nincrements anyway. See [`unit_scale`]. Absent, a word channel\ncarries whatever type the point has.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3061,6 +3213,13 @@
       "description": "An exception to the derivation, or an unmodelled point.",
       "type": "object",
       "properties": {
+        "host": {
+          "description": "The controller the point belongs to when no program of the set\nreads or writes it — a point a hand-written PLC program will read\n(an identification reader's word, an encoder on another host).\nNames a node. Without it an unused declared point has no host and\nsits on no exchange.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "kind": {
           "anyOf": [
             {
@@ -3156,6 +3315,10 @@
             "string",
             "null"
           ]
+        },
+        "monitor": {
+          "description": "The node reports the active step of every program it runs, as one\nword per program (`<program>.step`, rule ⑧): the ST export writes\nthe step's flat index into it on every transition, and the plant\nrecords the word as the program's step bands — the controller's\nown SFC on the dock, the way the cell's internal programs show.",
+          "type": "boolean"
         },
         "name": {
           "type": "string"
@@ -4488,6 +4651,10 @@
         "pose": {
           "description": "World pose.",
           "$ref": "#/$defs/PoseMsg"
+        },
+        "stopper": {
+          "description": "A stopper for conveyed parts: the belt advection stops a part\nshort of it. Files written before this existed have none.",
+          "type": "boolean"
         },
         "visible": {
           "description": "Invisible obstacles still collide; they are simply not drawn. Files\nwritten before this existed have every obstacle visible, which is\nwhat they meant.",
@@ -5994,6 +6161,16 @@
       "description": "A pseudo-sensor: geometric test published as a read-only input signal.",
       "type": "object",
       "properties": {
+        "ids": {
+          "description": "An identification reader's table, `(obstacle, id)`: the sensor\nthen records the word lane `<name>.id`. Absent for a plain\npresence sensor.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/IdEntryMsg"
+          }
+        },
         "kind": {
           "$ref": "#/$defs/SensorKindMsg"
         },

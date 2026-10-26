@@ -146,6 +146,7 @@ nav:
       - Standard parts and CAD geometry: guides/standard-parts.md
       - Working with agents and automation: guides/agents.md
       - Offline commissioning (PLCopen XML, trace diff): guides/offline-commissioning.md
+      - Virtual commissioning (the cell as a PLC's plant): guides/virtual-commissioning.md
       - Spray painting: guides/painting.md
       - Machine tending: guides/machine-tending.md
       - Assembly and fastening: guides/assembly.md
@@ -177,6 +178,7 @@ nav:
       - Gaits (bt.Gait): reference/api/gait.md
       - Wheels (bt.Wheels): reference/api/wheels.md
       - Traces (bt.trace): reference/api/trace.md
+      - Virtual commissioning (bt.vc): reference/api/vc.md
       - Parameter studies (bt.sweep / bt.optimize): reference/api/study.md
       - Studio: reference/api/studio.md
   - License: license.md

@@ -86,7 +86,7 @@ def test_saved_project_validates_against_the_schema(tmp_path: Path) -> None:
 def test_check_reads_python_cells_and_projects(capsys, tmp_path: Path) -> None:
     code, out = run(capsys, "check", str(DEMO))
     assert code == 0 and out["ok"] and out["robots"] == ["simple_arm"]
-    assert out["counts"]["sequences"] == 1 and out["counts"]["parts"] == 11
+    assert out["counts"]["sequences"] == 1 and out["counts"]["parts"] == 15
     # The demo's hand-typed parts carry no specs: what the cell asks of them
     # is a warning each, never an error.
     assert {f["severity"] for f in out["findings"]} <= {"warning", "info"}
@@ -149,7 +149,8 @@ def test_simulate_prints_the_report_and_writes_files(capsys, tmp_path: Path) -> 
     assert code == 0
     assert [c["name"] for c in report["cycles"]] == ["pick"]
     # 2026-10-01: 11.75 → 8.79 when the timing stopped stretching multi-joint moves down their whole length (botrail-traj).
-    assert report["cycles"][0]["duration"] == pytest.approx(8.79, abs=0.05)
+    # 2026-10-30: 8.79 → 11.35 when the cell was re-taught by IK (hover and set-down at every station).
+    assert report["cycles"][0]["duration"] == pytest.approx(11.35, abs=0.05)
     assert report["cycles"][0]["clearance"]["distance"] > 0
     assert (tmp_path / "r.md").read_text().startswith("# ")
     assert (tmp_path / "c.usda").exists()
@@ -168,10 +169,15 @@ def test_simulate_prints_the_report_and_writes_files(capsys, tmp_path: Path) -> 
 def test_export_writes_the_document_set(capsys, tmp_path: Path) -> None:
     code, out = run(capsys, "export", str(DEMO), "--out", str(tmp_path / "docs"), "--all", "--scenarios", "--name", "pick")
     assert code == 0 and out["ok"]
-    # A USD's meshes ride beside it (`<stem>_assets/meshes/*.usdc`) and are
-    # listed as its assets; the documents themselves are these.
+    # A USD's meshes ride beside it (`<stem>_assets/meshes/*.usdc`), and so
+    # do the shape-library layers its trays and bins are drawn with
+    # (`<stem>_assets/appearances/*/*.usda`); both are listed as its assets,
+    # and the documents themselves are these.
     assets = [p for p in out["files"] if "_assets/" in p]
-    assert assets and all(p.endswith(".usdc") and "_assets/meshes/" in p for p in assets)
+    assert assets and all(
+        (p.endswith(".usdc") and "_assets/meshes/" in p) or (p.endswith(".usda") and "_assets/appearances/" in p)
+        for p in assets
+    )
     names = sorted(Path(p).name for p in out["files"] if "_assets/" not in p)
     assert names == sorted(
         [

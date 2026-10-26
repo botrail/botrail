@@ -77,12 +77,20 @@ def channels(
     logic: Optional[str] = None,
     radix: int = 10,
     word_bits: Optional[int] = 8,
+    unit: Optional[str] = None,
 ) -> list:
     """`count` channels of `kind` (`"di"`, `"do"`, `"ai"`, `"ao"`,
     `"safe_di"`, `"safe_do"`, `"word"`), ids `{prefix}{n}` (prefix defaults
     to the kind in upper case), addresses counted up from `base` (see
     `address` for the dialects `radix` / `word_bits` select), ports from
-    `port_from`."""
+    `port_from`.
+
+    `unit` (word channels) is the engineering unit the register carries a
+    measurement in — `"mm"`, `"0.01mm"`, `"mm/s"`: a REAL point bound to
+    the channel (an axis position, a speed, an encoder) is exchanged as an
+    INT scaled to it, which is what a 16-bit register holds and how a
+    drive takes a position anyway. Without a unit the word carries the
+    point's own type."""
     prefix = prefix if prefix is not None else kind.upper().replace("SAFE_", "S")
     out = []
     for n in range(count):
@@ -95,6 +103,8 @@ def channels(
             ch["voltage"] = voltage
         if logic is not None:
             ch["logic"] = logic
+        if unit is not None:
+            ch["unit"] = unit
         out.append(ch)
     return out
 
@@ -119,8 +129,10 @@ def safe_di8(base: Optional[str] = None, **kw) -> list:
     return channels("safe_di", 8, "SDI", base, **kw)
 
 
-def word(count: int = 4, base: Optional[str] = None, **kw) -> list:
-    return channels("word", count, "W", base, **kw)
+def word(count: int = 4, base: Optional[str] = None, unit: Optional[str] = None, **kw) -> list:
+    """`count` word (register) channels `W0…`; `unit="mm"` makes them
+    carry measurements as scaled INTs (see `channels`)."""
+    return channels("word", count, "W", base, unit=unit, **kw)
 
 
 def ao(count: int = 2, base: Optional[str] = None, **kw) -> list:
@@ -160,6 +172,73 @@ def ur_standard() -> list:
     — the numbers `set_standard_digital_out` / `get_standard_digital_in`
     take."""
     return channels("di", 8, "DI", port_from=0) + channels("do", 8, "DO", port_from=0)
+
+
+def fanuc_uop() -> list:
+    """A FANUC controller's **UOP** (user operator panel) interface: the
+    standard assignment UI[1]–UI[18] / UO[1]–UO[20] as channels `UI1`…`UO20`,
+    plus `PNS` — the program-number byte PNS1–8 (UI[9]–UI[16]) as one word
+    channel — and `SNO` (UO[11]–UO[18]) echoing it. Names, polarity and
+    edges are the template's (`bt.vc.interfaces.fanuc_uop_pns`); the
+    numbers are the controller's standard UOP map — check them against the
+    controller's I/O configuration screen."""
+    ins = channels("di", 18, "UI", port_from=1)
+    outs = channels("do", 20, "UO", port_from=1)
+    # `channels` numbers ids from 0; the UOP numbering starts at 1.
+    for ch in ins + outs:
+        ch["id"] = ch["id"][:2] + str(ch["port"])
+    return ins + [{"id": "PNS", "kind": "word"}] + outs + [{"id": "SNO", "kind": "word"}]
+
+
+def kuka_automatic_external() -> list:
+    """A KUKA controller's **Automatic External** interface (KRC4 / KRC5)
+    as channels named after its signals: inputs `PGNO_VALID`, `EXT_START`,
+    `MOVE_ENABLE`, `CONF_MESS`, `DRIVES_ON`, `DRIVES_OFF`, `I_O_ACT`, the
+    program number `PGNO` as a word, and outputs `RC_RDY1`, `ALARM_STOP`,
+    `USER_SAF`, `PERI_RDY`, `ROB_CAL`, `I_O_ACTCONF`, `STOPMESS`, `PGNO_REQ`,
+    `APPL_RUN`, `PRO_ACT`, `IN_HOME`, `ON_PATH`, `EXT`. The addresses are
+    the integrator's (`$IN[n]` / `$OUT[n]` in the WorkVisual mapping)."""
+    ins = ["PGNO_VALID", "EXT_START", "MOVE_ENABLE", "CONF_MESS", "DRIVES_ON", "DRIVES_OFF", "I_O_ACT"]
+    outs = ["RC_RDY1", "ALARM_STOP", "USER_SAF", "PERI_RDY", "ROB_CAL", "I_O_ACTCONF", "STOPMESS", "PGNO_REQ",
+            "APPL_RUN", "PRO_ACT", "IN_HOME", "ON_PATH", "EXT"]
+    return ([{"id": n, "kind": "di"} for n in ins] + [{"id": "PGNO", "kind": "word"}]
+            + [{"id": n, "kind": "do"} for n in outs])
+
+
+def abb_system_io() -> list:
+    """An ABB controller's **System I/O** (IRC5 / OmniCore) as channels
+    named after the system actions and statuses: inputs `MotorsOn`,
+    `MotorsOff`, `Start`, `StartAtMain`, `Stop`, `QuickStop`,
+    `StopAtEndOfCycle`, `ResetEmergencyStop`, `ResetExecutionError`,
+    `PPToMain`, the program number `ProgNo` as a word (a group input the
+    RAPID main reads — not a system I/O), and outputs `AutoOn`, `CycleOn`,
+    `EmergencyStop`, `ExecutionError`, `MotorsOnState`, `MotorsOffState`,
+    `RunChainOk`, `TaskExecuting`, `MotionSupervisionTriggered`. Each is a
+    signal the integrator ties to a system action in the controller's I/O
+    configuration."""
+    ins = ["MotorsOn", "MotorsOff", "Start", "StartAtMain", "Stop", "QuickStop", "StopAtEndOfCycle",
+           "ResetEmergencyStop", "ResetExecutionError", "PPToMain"]
+    outs = ["AutoOn", "CycleOn", "EmergencyStop", "ExecutionError", "MotorsOnState", "MotorsOffState",
+            "RunChainOk", "TaskExecuting", "MotionSupervisionTriggered"]
+    return ([{"id": n, "kind": "di"} for n in ins] + [{"id": "ProgNo", "kind": "word"}]
+            + [{"id": n, "kind": "do"} for n in outs])
+
+
+def ur_registers(first: int = 64, count: int = 32) -> list:
+    """A UR controller's general-purpose **bit registers** as channels —
+    the ones an external RTDE client reads and writes (`first` from 64:
+    registers 0-63 belong to the fieldbus interfaces). Input registers
+    `IR64…` are what the robot program reads (`read_input_boolean_register`,
+    the plant's sensors and handshakes), output registers `OR64…` what it
+    writes (`write_output_boolean_register`, its coils). Bind the cell's
+    points on them and export the program with `rtde=True`; a
+    `bt.vc.ursim` link then carries them over RTDE."""
+    if first < 0 or first + count > 128:
+        raise ValueError("ur_registers: bit registers run 0-127 (64-127 for RTDE clients)")
+    out = channels("di", count, "IR", port_from=first) + channels("do", count, "OR", port_from=first)
+    for ch in out:  # ids carry the register number, not a count from zero
+        ch["id"] = ch["id"][:2] + str(ch["port"])
+    return out
 
 
 def merge(*groups: Iterable[Channel]) -> list:

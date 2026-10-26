@@ -30,6 +30,23 @@ checked against the environment, excused against its `touch_links`.
 In sequences the same pair exists as actions: `bt.seq.attach(...)` /
 `bt.seq.detach(...)`.
 
+### A grasp that follows a coil
+
+`attach` is the authored grasp: the step says which part, and the part is
+in hand from that scan. When a controller outside the cell is to drive the
+pick — [virtual commissioning](virtual-commissioning.md) — the grasp is
+bound to its coil instead, because a PLC has no attach command:
+
+```python
+scene.define_signal("vacuum")
+scene.bind_grasp("vacuum", parts=["part"])   # high takes the part, low releases it
+```
+
+The sequence then writes the coil and never attaches; the plant takes the
+nearest candidate part (within `reach_m` of the tool when given) while the
+coil is high and releases it when the coil falls, whoever wrote the coil —
+a step, a controller on the wire, a force.
+
 ### A carried part that is meant to meet something
 
 A grasped object collides with the environment as part of the robot —

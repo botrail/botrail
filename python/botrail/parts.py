@@ -4963,6 +4963,222 @@ BUTTON_TRAVEL = 0.0026
 BUTTON_FORCE_N = 3.8
 ESTOP_CAP = 0.040
 ESTOP_FORCE_N = 44.0
+# The 22 mm pilot light: its lens, and the colour it shows lit (linear RGB,
+# bright — what the studio's lamp effect paints while the signal is on).
+LAMP_CAP = 0.0285
+LAMP_LIT: dict[str, Color] = {
+    "green": (0.10, 1.00, 0.20),
+    "red": (1.00, 0.06, 0.04),
+    "yellow": (1.00, 0.70, 0.05),
+    "blue": (0.10, 0.30, 1.00),
+    "white": (1.00, 1.00, 0.95),
+}
+
+
+# ---------------------------------------------------------------------------
+# Pneumatics and signal towers: the vocabulary a PLC drives a cell with.
+
+CYLINDER_BODY: Color = (0.68, 0.70, 0.72)
+CYLINDER_ROD: Color = (0.82, 0.83, 0.85)
+TOWER_POLE: Color = (0.30, 0.31, 0.33)
+TOWER_LENS: dict[str, Color] = {
+    "red": (0.80, 0.08, 0.06),
+    "yellow": (0.85, 0.65, 0.05),
+    "green": (0.05, 0.55, 0.12),
+    "blue": (0.05, 0.15, 0.65),
+    "white": (0.85, 0.85, 0.82),
+}
+SOLENOIDS = ("single", "double")
+
+
+def cylinder(
+    scene,
+    name: str,
+    position: Point3,
+    *,
+    axis: Point3 = (0.0, 0.0, 1.0),
+    stroke: float = 0.05,
+    time: float = 0.4,
+    solenoid: str = "double",
+    bore: float = 0.025,
+    body_length: Optional[float] = None,
+    pad: Optional[Point3] = None,
+    stopper: bool = False,
+    extended: bool = False,
+    encoder: bool = False,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    color: Color = CYLINDER_BODY,
+    category: str = "actuator.cylinder",
+    **attributes,
+) -> Built:
+    """A pneumatic cylinder: a barrel fixed behind `position` (the rod's
+    exit on the front face), a rod of `stroke` metres that runs out along
+    `axis` in `time` seconds — a linear axis `<name>` with the stops
+    `retracted` (0) and `extended` (`stroke`), each a limit-switch lane
+    `<name>/retracted` / `<name>/extended` — and the valve's coils:
+
+    - `solenoid="double"`: `<name>/extend` and `<name>/retract`, one per
+      stop; a coil dropped holds the position.
+    - `solenoid="single"`: `<name>/extend` alone; dropped, the spring
+      returns the rod to `retracted`.
+
+    `bt.seq.move_to(name, "extended")` drives it and `bt.seq.device_done(
+    name)` waits for the switch; the I/O map derives exactly the coils and
+    the two switches (no position word), the PLCopen / ST exports write the
+    coil levels, and a PLC under test drives the cylinder through the same
+    four points. `pad=(w, d, h)` puts a plate on the rod's tip — with
+    `stopper=True` it is a stopper for conveyed parts (see
+    `scene.set_obstacle_stopper`), which is what `stopper()` builds.
+    `extended=True` authors it out; `encoder=True` records the rod's
+    position as the word lane `<name>.encoder`. The rod and the pad ride
+    the axis (never a belt); the barrel is pinned as an
+    `actuator.cylinder` part."""
+    if solenoid not in SOLENOIDS:
+        raise ValueError(f"cylinder: solenoid must be one of {SOLENOIDS}, not {solenoid!r}")
+    if stroke <= 0 or time <= 0 or bore <= 0:
+        raise ValueError("cylinder: stroke, time and bore must be positive")
+    ax, ay, az = (float(v) for v in axis)
+    norm = math.sqrt(ax * ax + ay * ay + az * az)
+    if norm <= 0:
+        raise ValueError("cylinder: axis must not be zero")
+    ux, uy, uz = ax / norm, ay / norm, az / norm
+    x, y, z = (float(v) for v in position)
+    length = float(body_length) if body_length is not None else stroke + 0.03
+    rod_r = max(bore * 0.3, 0.004)
+    at = stroke if extended else 0.0
+
+    def along(d: float) -> Point3:
+        return (x + ux * d, y + uy * d, z + uz * d)
+
+    # A cylinder's +Z onto the axis direction.
+    if abs(uz) > 0.999:
+        q = (0.0, 0.0, 0.0, 1.0) if uz > 0 else (1.0, 0.0, 0.0, 0.0)
+    else:
+        q = _axis_quat(ux, uy) if abs(uz) < 1e-9 else _axis_quat(ux, uy)
+    built = Built(name)
+    barrel = scene.add_cylinder(f"{name}/barrel", radius=bore / 2 + 0.004, length=length,
+                                position=along(-length / 2), quaternion=q, color=color)
+    _finish(scene, barrel, _MACHINED_METAL)
+    built.obstacles.append(barrel)
+    rod = scene.add_cylinder(f"{name}/rod", radius=rod_r, length=stroke + 0.01,
+                             position=along(at + (stroke + 0.01) / 2 - stroke), quaternion=q, color=CYLINDER_ROD)
+    _finish(scene, rod, _MACHINED_METAL)
+    built.obstacles.append(rod)
+    objects = [rod]
+    if pad is not None:
+        pw, pd, ph = (float(v) for v in pad)
+        if min(pw, pd, ph) <= 0:
+            raise ValueError("cylinder: pad sizes must be positive")
+        if abs(uz) > 0.999:
+            size, pq = (pw, pd, ph), None
+            centre = along(at + 0.01 + ph / 2)
+        else:
+            size, pq = (ph, pw, pd), _yaw_quat(math.atan2(uy, ux))
+            centre = along(at + 0.01 + ph / 2)
+        plate = scene.add_box(f"{name}/pad", size=size, position=centre, quaternion=pq, color=DARK_STEEL)
+        _finish(scene, plate, _MACHINED_METAL)
+        built.obstacles.append(plate)
+        objects.append(plate)
+        if stopper:
+            scene.set_obstacle_stopper(plate, True)
+    coils = {"extend": "extended", "retract": "retracted"} if solenoid == "double" else {"extend": "extended"}
+    scene.add_linear_axis(name, objects=objects, axis=(ux, uy, uz), speed=stroke / time, range=(0.0, stroke),
+                          position=at, stops={"retracted": 0.0, "extended": stroke}, coils=coils, encoder=encoder)
+    built.devices.append(name)
+    scene.set_part(
+        barrel, kind="obstacle", category=category,
+        **_identity(model, manufacturer, {
+            "bore_mm": round(bore * 1000.0, 1), "stroke_mm": round(stroke * 1000.0, 1),
+            "solenoid": solenoid, **attributes,
+        }),
+    )
+    return built
+
+
+def stopper(
+    scene,
+    name: str,
+    position: Point3,
+    *,
+    stroke: float = 0.03,
+    time: float = 0.3,
+    blade: Point3 = (0.02, 0.12, 0.04),
+    solenoid: str = "single",
+    yaw: float = 0.0,
+    raised: bool = False,
+    **kw,
+) -> Built:
+    """A conveyor stopper: a vertical cylinder under the belt at `position`
+    (the blade's top face when lowered) whose blade — `blade = (thickness
+    along the belt, width across it, height)` turned by `yaw` — rises
+    `stroke` into the parts' path and holds them there; parts queue behind
+    it (`scene.set_obstacle_stopper`). Single-solenoid by default: the one
+    coil `<name>/extend` raises it, dropped it falls back. `bt.seq.move_to(
+    name, "extended")` raises, `"retracted"` lowers, and `<name>/extended` /
+    `<name>/retracted` are its switches. `raised=True` authors it up. The
+    rest is `cylinder()`'s (`bore`, `encoder`, `model`, …)."""
+    bw, bd, bh = (float(v) for v in blade)
+    x, y, z = (float(v) for v in position)
+    kw.setdefault("category", "actuator.stopper")
+    built = cylinder(
+        scene, name, (x, y, z - bh - 0.01), axis=(0.0, 0.0, 1.0), stroke=stroke, time=time,
+        solenoid=solenoid, pad=(bw, bd, bh), stopper=True, extended=raised, **kw,
+    )
+    if abs(yaw) > 1e-12:
+        scene.set_obstacle_pose(f"{name}/pad", scene.obstacle_pose(f"{name}/pad")[0], _yaw_quat(yaw))
+    return built
+
+
+def tower_lamp(
+    scene,
+    name: str,
+    position: Point3,
+    *,
+    tiers: Mapping[str, str],
+    pole: float = 0.25,
+    diameter: float = 0.05,
+    tier_height: float = 0.045,
+    model: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    **attributes,
+) -> Built:
+    """A signal tower (stack light) standing on `position`: a pole, then
+    one lens per entry of `tiers` — `{"red": "fault", "yellow": "warning",
+    "green": "running"}`, bottom to top in the order given — each lit in
+    its colour while its signal (an internal signal or a sensor, defined
+    before the tower) is on (`scene.add_lamp`), and pinned as an
+    `hmi.tower_lamp`. Colours: red, yellow, green, blue, white."""
+    lights = {str(k): str(v) for k, v in tiers.items()}
+    if not lights:
+        raise ValueError("tower_lamp: at least one tier")
+    for colour in lights:
+        if colour not in TOWER_LENS:
+            raise ValueError(f"tower_lamp: colour {colour!r} is not one of {sorted(TOWER_LENS)}")
+    if min(pole, diameter, tier_height) <= 0:
+        raise ValueError("tower_lamp: sizes must be positive")
+    x, y, z = (float(v) for v in position)
+    built = Built(name)
+    base = scene.add_cylinder(f"{name}/base", radius=diameter * 0.8, length=0.02,
+                              position=(x, y, z + 0.01), color=TOWER_POLE)
+    _finish(scene, base, _PAINT)
+    built.obstacles.append(base)
+    _trim_cylinder(scene, built, f"{name}/pole", diameter * 0.2, pole,
+                   (x, y, z + 0.02 + pole / 2), None, TOWER_POLE, finish=_PAINT)
+    top = z + 0.02 + pole
+    for k, (colour, signal) in enumerate(lights.items()):
+        lens = f"{name}/{colour}"
+        _trim_cylinder(scene, built, lens, diameter / 2, tier_height * 0.9,
+                       (x, y, top + tier_height * (k + 0.5)), None, TOWER_LENS[colour], finish=_PLASTIC)
+        scene.add_lamp(f"{name}/{signal}", signal=signal, obstacle=lens, color=LAMP_LIT[colour])
+    _trim_cylinder(scene, built, f"{name}/cap", diameter * 0.45, 0.01,
+                   (x, y, top + tier_height * len(lights) + 0.005), None, TOWER_POLE, finish=_PAINT)
+    scene.set_part(
+        base, kind="obstacle", category="hmi.tower_lamp",
+        **_identity(model, manufacturer, {"tiers": len(lights), "colors": "/".join(lights), **attributes}),
+    )
+    return built
+
 
 # A CNC lathe as the envelopes a tending cell verifies against: the Haas
 # ST-10 of the public spec pages is the default (machinetoolindex.com and
@@ -5060,6 +5276,7 @@ def operator_panel(
     travel: float = BUTTON_TRAVEL,
     proud: float = 0.010,
     watch_robots: Optional[list[str]] = None,
+    lamps: Optional[Mapping[str, str]] = None,
     catalog: Optional["CatalogRef"] = None,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
@@ -5070,7 +5287,11 @@ def operator_panel(
 ) -> Built:
     """An operator panel: a plate `size = (width, height)` centred at
     `position`, its face toward -Y before `yaw`, tilted up toward the
-    operator by `tilt`, with a grid of 22 mm pushbuttons on it.
+    operator by `tilt`, with a grid of 22 mm pushbuttons on it — and, with
+    `lamps={"fault": "red", "running": "green"}`, a row of 22 mm pilot
+    lights above them, one per signal named (an internal signal or a
+    sensor, defined before the panel), each lit in its colour while the
+    signal is on (`scene.add_lamp`) and pinned as an `hmi.lamp`.
 
     A button is three things. A cap (decoration — drawn, never collided),
     a **zone sensor** `<name>/<button>` the size of the cap and as deep as
@@ -5131,12 +5352,21 @@ def operator_panel(
         raise ValueError("operator_panel: sizes must be positive")
     cols = int(columns) if columns is not None else min(len(names), 4)
     rows_ = -(-len(names) // cols)
-    if (cols - 1) * pitch + cap > w + 1e-9 or (rows_ - 1) * pitch + cap > h + 1e-9:
+    lights = {str(k): str(v) for k, v in (lamps or {}).items()}
+    for signal, colour in lights.items():
+        if colour not in LAMP_LIT:
+            raise ValueError(
+                f"operator_panel: lamp {signal!r} colour {colour!r} is not one of {sorted(LAMP_LIT)}"
+            )
+    lamp_rows = 1 if lights else 0
+    if (cols - 1) * pitch + cap > w + 1e-9 or (rows_ + lamp_rows - 1) * pitch + cap > h + 1e-9:
         raise ValueError(
-            f"operator_panel: {len(names)} buttons at {pitch * 1e3:.0f} mm pitch need a face "
-            f"{((cols - 1) * pitch + cap) * 1e3:.0f} x {((rows_ - 1) * pitch + cap) * 1e3:.0f} mm; "
-            f"the panel is {w * 1e3:.0f} x {h * 1e3:.0f}"
+            f"operator_panel: {len(names)} buttons{' and a lamp row' if lights else ''} at {pitch * 1e3:.0f} mm "
+            f"pitch need a face {((cols - 1) * pitch + cap) * 1e3:.0f} x "
+            f"{((rows_ + lamp_rows - 1) * pitch + cap) * 1e3:.0f} mm; the panel is {w * 1e3:.0f} x {h * 1e3:.0f}"
         )
+    if (len(lights) - 1) * pitch + LAMP_CAP > w + 1e-9:
+        raise ValueError(f"operator_panel: {len(lights)} lamps do not fit a {w * 1e3:.0f} mm face")
 
     x, y, z = (float(v) for v in position)
     # Local: the face is the -Y side of the plate; tilt turns it upward
@@ -5194,10 +5424,21 @@ def operator_panel(
             role = "estop" if button == "estop" else "button"
             if spec.has_component(role):
                 models.setdefault(button, spec.part_number(role, **params))
+    # The lamp row sits above the buttons; the whole grid stays centred.
+    v_shift = -lamp_rows * pitch / 2
+    for j, (signal, colour) in enumerate(lights.items()):
+        u = (j - (len(lights) - 1) / 2) * pitch
+        v = ((rows_ - 1) / 2 + 1) * pitch + v_shift
+        lens = f"{name}/{signal}/lens"
+        _trim_cylinder(scene, built, lens, LAMP_CAP / 2, proud * 0.6,
+                       world(u, face - proud * 0.3, v), q_cap, BUTTON_COLORS[colour], finish=_PLASTIC)
+        scene.add_lamp(f"{name}/{signal}", signal=signal, obstacle=lens, color=LAMP_LIT[colour])
+        scene.set_part(lens, kind="obstacle", category="hmi.lamp",
+                       **_identity(None, None, {"head_mm": 22.0, "color": colour}))
     for i, button in enumerate(names):
         col, row = i % cols, i // cols
         u = (col - (cols - 1) / 2) * pitch
-        v = ((rows_ - 1) / 2 - row) * pitch
+        v = ((rows_ - 1) / 2 - row) * pitch + v_shift
         estop = button == "estop"
         radius = (ESTOP_CAP if estop else cap) / 2
         height = proud * 2.5 if estop else proud

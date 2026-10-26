@@ -684,6 +684,25 @@ pub struct GripperDriveMsg {
     pub finger_mass: Option<f64>,
 }
 
+/// A grasp that follows a coil (`bind_grasp`) as a project carries it:
+/// the declaration by names, re-resolved on load.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GraspBindingMsg {
+    pub signal: String,
+    pub robot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach_m: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch_links: Option<Vec<String>>,
+}
+
 /// A dynamic-robot declaration as a project carries it: the servo
 /// overrides (`None` = the kind-scaled defaults), the mass floor and the
 /// reflected drive inertia.
@@ -1025,6 +1044,9 @@ pub struct ProjectFile {
     /// Weld-flash bindings (absent in older files).
     #[serde(default)]
     pub flashes: Vec<crate::wire::FlashMsg>,
+    /// Grasps that follow coils (`bind_grasp`; absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grasps: Vec<GraspBindingMsg>,
     /// Scenarios — named initial-state deltas (absent in older files).
     #[serde(default)]
     pub scenarios: Vec<crate::wire::ScenarioMsg>,
@@ -1184,6 +1206,7 @@ impl ProjectFile {
                     cameras: Vec::new(),
                     lidars: Vec::new(),
                     flashes: Vec::new(),
+                    grasps: Vec::new(),
                     scenarios: Vec::new(),
                     toolpaths: Vec::new(),
                     allowed_contacts: Vec::new(),
@@ -1334,6 +1357,7 @@ impl Scene {
                     enabled: o.enabled,
                     visible: o.visible,
                     walkable: o.walkable,
+                    stopper: o.stopper,
                     color: o.color,
                     material: o.material.map(Into::into),
                     legend: o.legend.as_ref().map(Into::into),
@@ -1358,8 +1382,23 @@ impl Scene {
                     signal: f.signal.clone(),
                     robot: f.robot.clone(),
                     kind: crate::wire::flash_kind_msg(f.kind),
+                    obstacle: f.obstacle.clone(),
+                    color: f.color,
                     spin_link: f.spin_link.clone(),
                     cone: f.cone.map(|c| [c.length, c.radius]),
+                })
+                .collect(),
+            grasps: self
+                .grasp_bindings()
+                .iter()
+                .map(|b| GraspBindingMsg {
+                    signal: b.signal.clone(),
+                    robot: self.robots()[b.robot].name.clone(),
+                    link: b.link_name.clone(),
+                    group: b.group.clone(),
+                    parts: b.parts.clone(),
+                    reach_m: b.reach_m,
+                    touch_links: b.touch_links.clone(),
                 })
                 .collect(),
             scenarios: self
@@ -1500,6 +1539,7 @@ impl Scene {
                 o.enabled,
                 o.visible,
                 o.walkable,
+                o.stopper,
                 o.legend.as_ref().map(Into::into),
                 o.physics.as_ref().map(Into::into),
             ));
@@ -1509,7 +1549,7 @@ impl Scene {
             self.remove_obstacle(&existing)
                 .expect("existing obstacle is removable");
         }
-        for (spec, enabled, visible, walkable, legend, physics) in obstacles {
+        for (spec, enabled, visible, walkable, stopper, legend, physics) in obstacles {
             let final_name = self
                 .add_obstacle(&spec.name, spec.geometry, spec.pose)
                 .map_err(|e| ProjectError::Scene(e.to_string()))?;
@@ -1537,6 +1577,10 @@ impl Scene {
             if walkable {
                 self.set_obstacle_walkable(&final_name, true)
                     .map_err(|e| ProjectError::Scene(e.to_string()))?;
+            }
+            if stopper {
+                self.set_obstacle_stopper(&final_name, true)
+                    .expect("obstacle was just added");
             }
         }
         for (i, robot_msg) in project.robots.iter().enumerate() {
@@ -1755,9 +1799,30 @@ impl Scene {
                     cone: f
                         .cone
                         .map(|[length, radius]| crate::seq::SprayCone { length, radius }),
+                    obstacle: f.obstacle.clone(),
+                    color: f.color,
                 })
                 .collect(),
         );
+        for g in &project.grasps {
+            let robot = self.robot_index(&g.robot).ok_or_else(|| {
+                ProjectError::Incompatible(format!(
+                    "grasp on `{}`: unknown robot `{}`",
+                    g.signal, g.robot
+                ))
+            })?;
+            let parts = (!g.parts.is_empty()).then_some(g.parts.as_slice());
+            self.bind_grasp(
+                &g.signal,
+                robot,
+                g.link.as_deref(),
+                g.group.as_deref(),
+                parts,
+                g.reach_m,
+                g.touch_links.as_deref(),
+            )
+            .map_err(|e| ProjectError::Incompatible(format!("grasp on `{}`: {e}", g.signal)))?;
+        }
         self.set_io_map(project.io.clone())
             .map_err(|e| ProjectError::Incompatible(format!("I/O map: {e}")))?;
         // Parts last: they pin to everything above by name.
@@ -2203,6 +2268,9 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 o.name
             ));
         }
+        if o.stopper {
+            out.push_str(&format!("scene.set_obstacle_stopper({:?}, True)\n", o.name));
+        }
         if let Some([r, g, b]) = o.color {
             out.push_str(&format!(
                 "scene.set_obstacle_color({:?}, ({r}, {g}, {b}))\n",
@@ -2312,14 +2380,16 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 zone_size,
                 velocity,
                 running,
+                encoder,
             } => out.push_str(&format!(
-                "scene.add_conveyor({:?}, zone_position={}, zone_size={}, velocity={}, zone_quaternion={}, running={})\n",
+                "scene.add_conveyor({:?}, zone_position={}, zone_size={}, velocity={}, zone_quaternion={}, running={}{})\n",
                 device.name,
                 py_tuple(&zone_pose.position),
                 py_tuple(zone_size),
                 py_tuple(velocity),
                 py_tuple(&zone_pose.quaternion),
                 if *running { "True" } else { "False" },
+                if *encoder { ", encoder=True" } else { "" },
             )),
             crate::wire::DeviceKindMsg::LinearAxis {
                 objects,
@@ -2328,6 +2398,8 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 position,
                 range,
                 stops,
+                coils,
+                encoder,
             } => {
                 let items: Vec<String> = objects.iter().map(|n| format!("{n:?}")).collect();
                 let stops = if stops.is_empty() {
@@ -2337,8 +2409,18 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                         stops.iter().map(|s| format!("{:?}: {}", s.name, s.at)).collect();
                     format!(", stops={{{}}}", entries.join(", "))
                 };
+                let coils = if coils.is_empty() {
+                    String::new()
+                } else {
+                    let entries: Vec<String> = coils
+                        .iter()
+                        .map(|c| format!("{:?}: {:?}", c.coil, c.stop))
+                        .collect();
+                    format!(", coils={{{}}}", entries.join(", "))
+                };
+                let encoder = if *encoder { ", encoder=True" } else { "" };
                 out.push_str(&format!(
-                    "scene.add_linear_axis({:?}, objects=[{}], axis={}, speed={speed}, range={}, position={position}{stops})\n",
+                    "scene.add_linear_axis({:?}, objects=[{}], axis={}, speed={speed}, range={}, position={position}{stops}{coils}{encoder})\n",
                     device.name,
                     items.join(", "),
                     py_tuple(axis),
@@ -2645,9 +2727,16 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             }
             crate::wire::SensorWatchMsg::All => ", watch_robot=True".to_string(),
         };
+        let ids = sensor.ids.as_ref().map_or_else(String::new, |ids| {
+            let entries: Vec<String> = ids
+                .iter()
+                .map(|e| format!("{:?}: {}", e.obstacle, e.id))
+                .collect();
+            format!(", ids={{{}}}", entries.join(", "))
+        });
         match &sensor.kind {
             crate::wire::SensorKindMsg::Zone { pose, size } => out.push_str(&format!(
-                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch}{mount})\n",
+                "scene.add_zone_sensor({:?}, position={}, size={}, quaternion={}{watch}{mount}{ids})\n",
                 sensor.name,
                 py_tuple(&pose.position),
                 py_tuple(size),
@@ -2728,7 +2817,41 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                     flash.name, flash.signal, flash.robot
                 ));
             }
+            crate::wire::FlashKindMsg::Lamp => {
+                let obstacle = flash.obstacle.clone().unwrap_or_default();
+                let [r, g, b] = flash.color.unwrap_or([1.0, 0.0, 0.0]);
+                out.push_str(&format!(
+                    "scene.add_lamp({:?}, signal={:?}, obstacle={obstacle:?}, color=({r}, {g}, {b}))\n",
+                    flash.name, flash.signal
+                ));
+            }
         }
+    }
+    for g in &project.grasps {
+        let quoted = |names: &[String]| {
+            names
+                .iter()
+                .map(|n| format!("{n:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut args = vec![format!("{:?}", g.signal), format!("robot={:?}", g.robot)];
+        if !g.parts.is_empty() {
+            args.push(format!("parts=[{}]", quoted(&g.parts)));
+        }
+        if let Some(reach) = g.reach_m {
+            args.push(format!("reach_m={reach}"));
+        }
+        if let Some(link) = &g.link {
+            args.push(format!("link={link:?}"));
+        }
+        if let Some(group) = &g.group {
+            args.push(format!("group={group:?}"));
+        }
+        if let Some(touch) = &g.touch_links {
+            args.push(format!("touch_links=[{}]", quoted(touch)));
+        }
+        out.push_str(&format!("scene.bind_grasp({})\n", args.join(", ")));
     }
     for a in &project.applicators {
         // The applicator as the dict `bt.paint.applicator` builds — the
@@ -3011,6 +3134,9 @@ fn py_io_map(out: &mut String, io: &crate::iomap::IoMap) {
         if let Some(model) = &node.model {
             kwargs.push_str(&format!(", model={model:?}"));
         }
+        if node.monitor {
+            kwargs.push_str(", monitor=True");
+        }
         out.push_str(&format!("scene.add_io_node({:?}, {kwargs})\n", node.name));
     }
     for b in &io.bindings {
@@ -3071,6 +3197,9 @@ fn py_io_map(out: &mut String, io: &crate::iomap::IoMap) {
         }
         if let Some(note) = &d.note {
             kwargs.push_str(&format!(", note={note:?}"));
+        }
+        if let Some(host) = &d.host {
+            kwargs.push_str(&format!(", host={host:?}"));
         }
         out.push_str(&format!("scene.declare_io({:?}{kwargs})\n", d.name));
     }
@@ -3416,9 +3545,11 @@ mod tests {
                     port: None,
                     address: Some("%QX0.0".into()),
                     electrical: None,
+                    unit: None,
                 }],
                 place: Some("panel".into()),
                 model: Some("S7-1200".into()),
+                monitor: false,
             })
             .unwrap();
         scene
@@ -3439,9 +3570,11 @@ mod tests {
                         voltage: Some(24.0),
                         logic: Some(crate::iomap::Logic::Pnp),
                     }),
+                    unit: None,
                 }],
                 place: None,
                 model: None,
+                monitor: false,
             })
             .unwrap();
         scene
@@ -3466,6 +3599,7 @@ mod tests {
             safety: true,
             pair: None,
             note: None,
+            host: None,
         });
 
         let json = scene.to_project().to_json();
@@ -3848,6 +3982,7 @@ mod tests {
                 },
                 watch: crate::seq::SensorWatch::AllObjects,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.upsert_sequence(crate::seq::Sequence {
@@ -4307,6 +4442,7 @@ mod tests {
             },
             watch: crate::seq::SensorWatch::All,
             mount: None,
+            ids: None,
         }]);
         scene.rename_robot(0, "left");
         let camera = scene

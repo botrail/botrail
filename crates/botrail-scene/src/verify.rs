@@ -310,6 +310,7 @@ mod tests {
                 zone_size: Vector3::new(1.6, 0.3, 0.2),
                 velocity: Vector3::new(0.25, 0.0, 0.0),
                 running,
+                encoder: false,
             },
         }
     }

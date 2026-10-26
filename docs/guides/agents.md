@@ -18,19 +18,26 @@ a CI job, or you in a shell) runs, and where each piece lives.
 4. **Read the numbers, change the cell, go to 2.** The bake is
    bit-identical for the same input, so a number that moved was moved by
    the edit — there is nothing to average, nothing to re-run.
-5. **Hand it over** — `botrail export cell.py --out deliverables/ --all` writes
-   the [document set](../tutorials/hand-over.md) with the report's digests.
+5. **Test it** — `botrail fat cell.py` runs the FAT sheet: a row per
+   interlock-table row (the condition pinned false, the output must not
+   switch) and per safety input, plus your own cases from a `.yaml` /
+   `.json` file (`--cases`). Exit code 1 means a row failed, and the JSON
+   says which check saw what.
+6. **Hand it over** — `botrail export cell.py --out deliverables/ --all` writes
+   the [document set](../tutorials/hand-over.md) with the report's digests
+   (`--fat` adds the sheet).
 
 ```bash
 botrail check cell.py                                    # {"ok": true, "counts": {...}, "findings": []}
 botrail simulate cell.py --scenarios --report r.json     # the report as JSON on stdout too
-botrail export cell.py --out deliverables/ --all         # project, python, bom, io, topology, layout, usd, script, report
+botrail fat cell.py --cases fat.yaml --out fat.md        # the FAT sheet: derived rows + your cases
+botrail export cell.py --out deliverables/ --all --fat   # project, python, bom, io, topology, layout, usd, script, report, fat
 ```
 
 The same loop from Python is the API these commands call —
 `bt.Scene.load_project`, `scene.io_report()`, `scene.simulate_scenarios()`,
-`scene.cell_report()`, the `export_*` methods — so an agent that prefers to
-stay in Python loses nothing.
+`bt.vc.run_fat()`, `scene.cell_report()`, the `export_*` methods — so an
+agent that prefers to stay in Python loses nothing.
 
 ## What to read, in what order
 

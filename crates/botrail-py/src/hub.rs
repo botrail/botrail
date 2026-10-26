@@ -69,6 +69,10 @@ pub struct SceneHub {
     /// (design-physics-pick.md): what the message loop last asked for,
     /// taken by the stream thread before its next tick.
     hand: Mutex<Hand>,
+    /// The studio's hands on the live plant session (`bt.vc.Session`):
+    /// queued by the message loop, drained by the session's own loop
+    /// before each scan.
+    plant_commands: Mutex<Vec<botrail_scene::wire::PlantCommandMsg>>,
     /// This hub's own `Arc`, for the stream thread to hold.
     self_weak: Weak<SceneHub>,
     /// The cloths every bake of this cell is followed by (`bt.cloth.add`):
@@ -329,6 +333,13 @@ impl SessionHost for SceneHub {
         self.hand.lock().expect("hand mutex poisoned").pending = Some(HandCommand::Release);
     }
 
+    fn plant_command(&self, command: botrail_scene::wire::PlantCommandMsg) {
+        self.plant_commands
+            .lock()
+            .expect("plant commands mutex poisoned")
+            .push(command);
+    }
+
     fn stop_bake_stream(&self) {
         if let Some(stream) = self
             .bake_stream
@@ -425,6 +436,7 @@ impl SceneHub {
             studio_physics: Mutex::new(Some(botrail_scene::rollout::PhysicsOptions::world())),
             bake_stream: Mutex::new(None),
             hand: Mutex::new(Hand::default()),
+            plant_commands: Mutex::new(Vec::new()),
             self_weak: weak.clone(),
             cloths: Mutex::new(Vec::new()),
             cloth_errors: Mutex::new(Vec::new()),
@@ -888,6 +900,10 @@ impl SceneHub {
         botrail_session::set_obstacle_walkable(self, name, walkable)
     }
 
+    pub fn set_obstacle_stopper(&self, name: &str, stopper: bool) -> Result<(), SceneError> {
+        botrail_session::set_obstacle_stopper(self, name, stopper)
+    }
+
     pub fn set_obstacle_material(
         &self,
         name: &str,
@@ -1062,6 +1078,32 @@ impl SceneHub {
         self.with_scene(|scene| {
             scene.set_gripper_drive(robot, joints, max_force, stiffness, damping, finger_mass)
         })
+    }
+
+    /// A grasp bound to a coil — plant behaviour, nothing visual: no
+    /// broadcast.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_grasp(
+        &self,
+        signal: &str,
+        robot: usize,
+        link: Option<&str>,
+        group: Option<&str>,
+        parts: Option<&[String]>,
+        reach_m: Option<f64>,
+        touch_links: Option<&[String]>,
+    ) -> Result<(), SceneError> {
+        self.with_scene(|scene| {
+            scene.bind_grasp(signal, robot, link, group, parts, reach_m, touch_links)
+        })
+    }
+
+    pub fn unbind_grasp(&self, signal: &str) -> Result<(), SceneError> {
+        self.with_scene(|scene| scene.unbind_grasp(signal))
+    }
+
+    pub fn grasp_bindings(&self) -> Vec<botrail_scene::grasp::GraspBinding> {
+        self.with_scene(|scene| scene.grasp_bindings().to_vec())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1511,6 +1553,27 @@ impl SceneHub {
         botrail_session::add_spin(self, name, signal, robot, link)
     }
 
+    pub fn add_lamp(
+        &self,
+        name: &str,
+        signal: &str,
+        obstacle: &str,
+        color: [f32; 3],
+    ) -> Result<(), SceneError> {
+        botrail_session::add_lamp(self, name, signal, obstacle, color)
+    }
+
+    /// The studio's commands for the live plant session since the last
+    /// call, in arrival order.
+    pub fn take_plant_commands(&self) -> Vec<botrail_scene::wire::PlantCommandMsg> {
+        std::mem::take(
+            &mut *self
+                .plant_commands
+                .lock()
+                .expect("plant commands mutex poisoned"),
+        )
+    }
+
     pub fn add_spray_cone(
         &self,
         name: &str,
@@ -1909,6 +1972,7 @@ impl SceneHub {
                         .collect(),
                     step_spans: Vec::new(),
                     signals: Vec::new(),
+                    words: Vec::new(),
                     branches: Vec::new(),
                 };
                 let msg = ServerMessage::RecordingResult {

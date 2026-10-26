@@ -32,6 +32,12 @@ pub struct Sensor {
     /// eye on a deck, or a protective field that travels with the machine).
     /// `None` — the usual case — is a fixture bolted to the floor.
     pub mount: Option<String>,
+    /// An identification reader (RFID, code reader): the identifier of
+    /// each watched obstacle, `(obstacle, id)`. Besides its presence lane
+    /// the sensor then records a word lane `<name>.id` — the smallest id
+    /// among the watched bodies it sees, `0` when it sees none — for a
+    /// controller to branch on. `None` is a plain presence sensor.
+    pub ids: Option<Vec<(String, i64)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +219,10 @@ pub struct WeldFlash {
     /// The spray cone's size for [`FlashKind::Spray`]: length along the
     /// TCP's -Z (the standoff, roughly) and base radius (the pattern's).
     pub cone: Option<SprayCone>,
+    /// The obstacle a [`FlashKind::Lamp`] lights.
+    pub obstacle: Option<String>,
+    /// The lamp's lit colour, linear RGB.
+    pub color: Option<[f32; 3]>,
 }
 
 /// What a signal-bound TCP effect renders as.
@@ -232,6 +242,10 @@ pub enum FlashKind {
     /// The bound link spun about its own Z while the signal is on, and
     /// nothing drawn (a screwdriver's bit, a nutrunner's socket).
     Spin,
+    /// An obstacle lit in its colour while the signal is on — an indicator
+    /// lamp on an operator panel, a tower light. The one effect that is
+    /// not at a robot's TCP: `robot` is empty.
+    Lamp,
 }
 
 /// A spray cone's size, meters.
@@ -254,11 +268,23 @@ pub enum DeviceKind {
     /// Advects any *unattached* obstacle whose origin lies inside the zone
     /// box by `velocity` while running. Its running state is recorded as an
     /// output-signal lane under the device name.
+    ///
+    /// A conveyed part stops short of a *stopper* ahead of it — an
+    /// obstacle flagged [`crate::Obstacle::stopper`] whose bounds lie
+    /// across the part's path — and short of a part ahead that stopped,
+    /// so parts queue (accumulate) behind a raised blade, deterministically
+    /// and from the front. Objects a device drives (a blade on its
+    /// cylinder) never ride the belt.
+    ///
+    /// With `encoder` the belt's travel is recorded as a word lane
+    /// `<name>.encoder` (metres run since t = 0, REAL) the commanding
+    /// controller reads.
     Conveyor {
         zone_pose: Isometry3<f64>,
         zone_size: Vector3<f64>,
         velocity: Vector3<f64>,
         running: bool,
+        encoder: bool,
     },
     /// Moves the listed obstacles along `axis` at `speed`, positioned by
     /// `MoveTo` commands within `range`; `DeviceDone` means in-position.
@@ -267,6 +293,18 @@ pub enum DeviceKind {
     /// read-only input lane `<axis>/<stop>` — ON while the axis stands at
     /// it, the limit switch a door interlock is written from. Between
     /// stops every lane is off (MTConnect's UNLATCHED).
+    ///
+    /// `coils` make the axis a solenoid-driven cylinder: each `(coil,
+    /// stop)` is an output coil `<axis>/<coil>` that drives the axis to
+    /// the named stop when energised. A stop no coil names is the
+    /// spring-return position — the axis goes there when its one coil
+    /// drops (single solenoid); with a coil per stop (double solenoid)
+    /// a dropped coil holds. The controller then sees the cylinder as
+    /// coils and limit switches, never as a position word.
+    ///
+    /// With `encoder` the actual position is recorded as a word lane
+    /// `<name>.encoder` (metres along `axis`, REAL) the commanding
+    /// controller reads as feedback.
     LinearAxis {
         objects: Vec<String>,
         axis: Unit<Vector3<f64>>,
@@ -274,6 +312,8 @@ pub enum DeviceKind {
         position: f64,
         range: (f64, f64),
         stops: Vec<(String, f64)>,
+        coils: Vec<(String, String)>,
+        encoder: bool,
     },
     /// Feeds parked objects onto the line, one every `interval` seconds
     /// while running. Its running state is recorded as an output-signal
@@ -1608,6 +1648,8 @@ impl Scene {
             kind: FlashKind::Flash,
             spin_link: None,
             cone: None,
+            obstacle: None,
+            color: None,
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,
@@ -1647,6 +1689,8 @@ impl Scene {
             kind: FlashKind::Trace,
             spin_link: spin_link.map(str::to_string),
             cone: None,
+            obstacle: None,
+            color: None,
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,
@@ -1688,6 +1732,8 @@ impl Scene {
             kind: FlashKind::Spray,
             spin_link: None,
             cone: Some(SprayCone { length, radius }),
+            obstacle: None,
+            color: None,
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,
@@ -1726,6 +1772,50 @@ impl Scene {
             kind: FlashKind::Spin,
             spin_link: Some(link.to_string()),
             cone: None,
+            obstacle: None,
+            color: None,
+        };
+        match self.weld_flashes.iter_mut().find(|f| f.name == name) {
+            Some(slot) => *slot = flash,
+            None => self.weld_flashes.push(flash),
+        }
+        Ok(())
+    }
+
+    /// Binds an indicator lamp to `signal`: `obstacle` is lit in `color`
+    /// (linear RGB) while the signal — an internal signal or a sensor's
+    /// lane — is on, and drawn as authored otherwise. Presentation only,
+    /// like [`Scene::add_weld_flash`]: the lamp a PLC drives with an
+    /// output, shown the way the operator sees it.
+    pub fn add_lamp(
+        &mut self,
+        name: &str,
+        signal: &str,
+        obstacle: &str,
+        color: [f32; 3],
+    ) -> Result<(), SceneError> {
+        if !self.signals.iter().any(|s| s.name == signal)
+            && !self.sensors.iter().any(|s| s.name == signal)
+        {
+            return Err(SceneError::UnknownSignal(signal.to_string()));
+        }
+        if !self.obstacles.iter().any(|o| o.name == obstacle) {
+            return Err(SceneError::UnknownObstacle(obstacle.to_string()));
+        }
+        if color.iter().any(|c| !(0.0..=1.0).contains(c)) {
+            return Err(SceneError::BadEffect(format!(
+                "lamp `{name}`: colour components must be within 0..1, got {color:?}"
+            )));
+        }
+        let flash = WeldFlash {
+            name: name.to_string(),
+            signal: signal.to_string(),
+            robot: String::new(),
+            kind: FlashKind::Lamp,
+            spin_link: None,
+            cone: None,
+            obstacle: Some(obstacle.to_string()),
+            color: Some(color),
         };
         match self.weld_flashes.iter_mut().find(|f| f.name == name) {
             Some(slot) => *slot = flash,
@@ -1871,7 +1961,7 @@ impl Scene {
     /// *wire* — a sensor, or a signal some program reads without also
     /// writing it on the same controller — and takes the polarity of the
     /// point's binding (`invert`), `false` unbound.
-    fn resolve_faults(
+    pub(crate) fn resolve_faults(
         &self,
         scenario: &str,
         faults: &[Fault],
@@ -2267,6 +2357,7 @@ impl Scene {
         for device in &self.devices {
             self.validate_vehicle(device).map_err(|m| (None, m))?;
             self.validate_lift(device).map_err(|m| (None, m))?;
+            self.validate_axis(device).map_err(|m| (None, m))?;
         }
         // A gait is checked against the model at mount time; what it cannot
         // know then is how fast the vehicle it rides will drive.
@@ -2936,6 +3027,45 @@ impl Scene {
         })
     }
 
+    /// A coil-driven axis the exchange can carry: every coil names one of
+    /// the stops, no two coils share a name, and at most one stop is left
+    /// without a coil (the spring-return position).
+    fn validate_axis(&self, device: &Device) -> Result<(), String> {
+        let DeviceKind::LinearAxis { stops, coils, .. } = &device.kind else {
+            return Ok(());
+        };
+        let dev = &device.name;
+        for (coil, stop) in coils {
+            if coil.is_empty() || coil.contains('/') {
+                return Err(format!(
+                    "axis `{dev}` coil name {coil:?} must be non-empty and contain no `/`"
+                ));
+            }
+            if coils.iter().filter(|(c, _)| c == coil).count() > 1 {
+                return Err(format!("axis `{dev}` has two coils named `{coil}`"));
+            }
+            if !stops.iter().any(|(n, _)| n == stop) {
+                let known: Vec<String> = stops.iter().map(|(n, _)| format!("`{n}`")).collect();
+                return Err(format!(
+                    "axis `{dev}` coil `{coil}` drives to unknown stop `{stop}` (stops: {})",
+                    known.join(", ")
+                ));
+            }
+        }
+        if !coils.is_empty() {
+            let uncoiled = stops
+                .iter()
+                .filter(|(n, _)| !coils.iter().any(|(_, s)| s == n))
+                .count();
+            if uncoiled > 1 {
+                return Err(format!(
+                    "axis `{dev}`: {uncoiled} stops have no coil — a cylinder has one spring-return stop at most"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// A lift definition the scan engine can honour: a real car, resolvable
     /// stops, positive rates.
     fn validate_lift(&self, device: &Device) -> Result<(), String> {
@@ -3104,6 +3234,17 @@ impl Scene {
                     .resolve_group(r, group.as_deref(), link_index)
                     .map_err(|e| e.to_string())?;
                 let anchor = link_index.unwrap_or_else(|| self.group_tip(r, g));
+                // A grasp bound to a coil is the plant's effect, not a
+                // step's command: the two would attach twice and release
+                // out of step.
+                if let Some(b) = self.grasp_binding_at(r, anchor) {
+                    return Err(format!(
+                        "`{}` grasps by its coil `{}` (bind_grasp): set the signal and the plant \
+                         takes the part — drop the attach",
+                        self.robots()[r].name,
+                        b.signal
+                    ));
+                }
                 // One carrier at a time; a handover is written as
                 // "detach → (place) → attach" (§design-multi-robot 6).
                 if let Some((carrier, _)) = held.get(object) {

@@ -16,4 +16,13 @@ port?: number | null,
  * PLC address as the controller spells it (`"%IX0.2"`, `"X02"`) —
  * a string; dialects live in the Python templates.
  */
-address?: string | null, electrical?: Electrical | null, };
+address?: string | null, electrical?: Electrical | null, 
+/**
+ * The engineering unit a word channel carries a measurement in
+ * (`"mm"`, `"0.01mm"`, `"mm/s"`): a REAL point bound here is
+ * exchanged as an INT scaled to that unit — a 16-bit register
+ * cannot carry a REAL, and a drive's position is an integer in
+ * increments anyway. See [`unit_scale`]. Absent, a word channel
+ * carries whatever type the point has.
+ */
+unit?: string | null, };

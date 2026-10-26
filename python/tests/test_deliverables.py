@@ -141,7 +141,7 @@ def pick_cell():
     scene = pick.build_cell()
     pick.author_sequence(scene)
     pick.wire_cell(scene)
-    scene.set_part("conv", manufacturer="MISUMI", model="GVL-900", mass_kg=32)
+    scene.set_part("conv", kind="device", category="conveyor", manufacturer="MISUMI", model="GVL-1400", mass_kg=32)
     scene.add_scenario("beam_stuck", faults=[bt.io.stuck("part_at_pick", False)])
     return scene
 
@@ -186,9 +186,14 @@ def test_cell_report_gathers_cycles_io_scenarios_bom_and_hashes(tmp_path: Path) 
     assert rows["baseline"]["ok"] and rows["ng_part"]["ok"] and not rows["beam_stuck"]["ok"]
     assert "timed out" in rows["beam_stuck"]["error"]
     # BOM totals and the footprint.
-    assert report.bom["rows"] == 4 and report.bom["totals"] == {"mass_kg": 32.0}
-    assert report.bom["by_category"] == {"conveyor": 1, "robot": 1, "robot_controller": 1, "sensor.photoelectric": 1}
-    assert report.bom["unidentified"] == 3  # the arm, the eye and the controller still need numbers
+    assert report.bom["rows"] == 9 and report.bom["totals"] == {"mass_kg": 32.0}
+    assert report.bom["by_category"] == {
+        "bin": 1, "conveyor": 1, "robot": 1, "robot_controller": 1, "sensor.photoelectric": 1,
+        "structure.pedestal": 1, "structure.table": 2, "tray": 1,
+    }
+    # The arm, the eye, the controller and the stands the cell's generators
+    # built still need numbers; the bin's generator names its size.
+    assert report.bom["unidentified"] == 7
     assert report.footprint["area"] > 0 and report.footprint == scene.footprint()
     # Deliverables: the file, its size, its digest.
     (d,) = report.deliverables
@@ -259,7 +264,7 @@ def test_a_layout_edit_changes_exactly_the_deliverables_it_touches(tmp_path: Pat
 
     moved = pick_cell()
     moved.remove_sensor("part_at_pick")
-    moved.add_beam_sensor("part_at_pick", frm=(0.35, 0.25, 0.03), to=(0.35, 0.45, 0.03), watch=["part"])
+    moved.add_beam_sensor("part_at_pick", frm=(0.08, 0.59, 0.83), to=(0.08, 0.25, 0.83), watch=["part"])
     after = deliverable_set(moved, tmp_path / "after")
     changed = sorted(name for name in before if before[name] != after[name])
     assert changed == ["cell.py", "layout.dxf", "layout.svg"]
@@ -302,8 +307,11 @@ def test_deliverables_demo_writes_the_document_set(tmp_path: Path) -> None:
         "cell_topology.mmd",
         "pick_cell.script",
     ]
-    meshes = list((tmp_path / "cell_cycle_assets" / "meshes").glob("*.usdc"))
-    assert meshes and len(report.deliverables) == 12 + len(meshes)
+    # The cycle's meshes and the shape-library layers its trays and bins
+    # are drawn with ride beside it, and the report hashes every one.
+    assets = [p for p in (tmp_path / "cell_cycle_assets").rglob("*") if p.is_file()]
+    assert any(p.parent.name == "meshes" for p in assets) and any(p.suffix == ".usda" for p in assets)
+    assert len(report.deliverables) == 12 + len(assets)
     assert report.bom["unidentified"] == 0
     # 2.4 + 1.6 + 2.4 + 1.6 m of fence at 1 m pitch: 2+2+2+2 panels, one of
     # them the door.

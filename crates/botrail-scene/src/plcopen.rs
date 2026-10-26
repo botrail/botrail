@@ -143,12 +143,14 @@ pub fn ident(name: &str) -> String {
         out.insert(0, '_');
     }
     if RESERVED.contains(&out.to_ascii_lowercase().as_str()) {
-        out.push('_');
+        // A keyword gets a suffix a compiler accepts: IEC identifiers may
+        // not end in an underscore (matiec rejects `return_`).
+        out.push_str("_1");
     }
     out
 }
 
-fn st_string(text: &str) -> String {
+pub(crate) fn st_string(text: &str) -> String {
     format!("'{}'", text.replace('$', "$$").replace('\'', "$'"))
 }
 
@@ -167,7 +169,7 @@ fn st_body(text: &str) -> String {
     format!("<ST><xhtml:p>{}</xhtml:p></ST>", cdata(text))
 }
 
-fn st_time(seconds: f64) -> String {
+pub(crate) fn st_time(seconds: f64) -> String {
     let ms = (seconds * 1000.0).round().max(0.0) as u64;
     if ms.is_multiple_of(1000) {
         format!("T#{}s", ms / 1000)
@@ -176,7 +178,7 @@ fn st_time(seconds: f64) -> String {
     }
 }
 
-fn st_real(v: f64) -> String {
+pub(crate) fn st_real(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e12 {
         format!("{:.1}", v)
     } else {
@@ -198,30 +200,44 @@ struct GlobalVar {
 }
 
 /// The variable a derived point is known by in the program.
-fn point_var(p: &iomap::IoPoint) -> String {
+pub(crate) fn point_var(p: &iomap::IoPoint) -> String {
     let base = ident(&p.id.name);
-    match p.source {
-        IoSource::DeviceRun => format!("{base}_run"),
-        IoSource::DeviceDone => format!("{base}_done"),
-        IoSource::DeviceCommand => format!(
-            "{base}_{}",
-            p.id.aspect.map(|a| a.as_str()).unwrap_or("cmd")
-        ),
-        IoSource::RobotStart => format!("{base}_start"),
-        IoSource::RobotDone => format!("{base}_done"),
-        IoSource::RobotProgram => format!("{base}_program"),
+    match (p.source, p.id.aspect) {
+        (IoSource::DeviceRun, _) => format!("{base}_run"),
+        (IoSource::DeviceDone, _) => format!("{base}_done"),
+        (IoSource::DeviceCommand, aspect) => {
+            format!("{base}_{}", aspect.map(|a| a.as_str()).unwrap_or("cmd"))
+        }
+        (IoSource::RobotStart, _) => format!("{base}_start"),
+        (IoSource::RobotDone, _) => format!("{base}_done"),
+        (IoSource::RobotProgram, _) => format!("{base}_program"),
+        (IoSource::Monitor, _) => format!("{base}_step"),
+        // A word the plant records (`feed.encoder`, `reader.id`): the
+        // aspect names it, whatever rule placed it.
+        (_, Some(aspect)) => format!("{base}_{}", aspect.as_str()),
         _ => base,
     }
 }
 
-fn point_type(p: &iomap::IoPoint) -> &'static str {
-    match (p.kind, p.id.aspect) {
-        (_, Some(Aspect::Position)) | (_, Some(Aspect::Speed)) => "REAL",
-        (_, Some(Aspect::Station)) | (_, Some(Aspect::Program)) => "INT",
-        (ChannelKind::Ai, _) | (ChannelKind::Ao, _) => "REAL",
-        (ChannelKind::Word, _) => "INT",
-        _ => "BOOL",
+/// The IEC type the program declares for a point: its natural type, or
+/// `INT` for a measurement on a word channel with a unit (the exchange
+/// scales it; a 16-bit register holds no REAL).
+pub(crate) fn point_type(d: &iomap::IoDerivation, p: &iomap::IoPoint) -> &'static str {
+    let natural = iomap::natural_type(p);
+    if natural == "REAL" && scale_of(d, p) != 1.0 {
+        return "INT";
     }
+    natural
+}
+
+/// Register counts per SI unit for a point bound to a word channel with
+/// a unit the exchange can scale by; `1.0` otherwise.
+pub(crate) fn scale_of(d: &iomap::IoDerivation, p: &iomap::IoPoint) -> f64 {
+    d.binding_of(p)
+        .filter(|(_, _, c)| c.kind == ChannelKind::Word)
+        .and_then(|(_, _, c)| c.unit.as_deref())
+        .and_then(iomap::unit_scale)
+        .unwrap_or(1.0)
 }
 
 // --------------------------------------------------------------- the POU
@@ -239,6 +255,9 @@ struct Pou<'a> {
     externals: BTreeSet<String>,
     /// FB / trigger instances: name → type.
     instances: BTreeMap<String, String>,
+    /// Plain BOOL locals: the `cmd` and `busy` flags of each remote-robot
+    /// handshake.
+    locals: BTreeSet<String>,
     /// Stub FB types used anywhere (emitted once as function block POUs).
     stubs: &'a mut BTreeSet<&'static str>,
     /// Robots for which the map says "driven from another host": start /
@@ -248,8 +267,20 @@ struct Pou<'a> {
     remote_program: BTreeSet<String>,
     /// Robot → FB instances of that robot (for `RobotDone`).
     robot_instances: BTreeMap<String, BTreeSet<String>>,
-    /// Motion name → 1-based program number per robot.
-    motion_numbers: BTreeMap<String, u32>,
+    /// The numbered robot commands of this POU's host — what a program
+    /// word selects on a robot driven from here (shared with the exchange,
+    /// [`crate::exchange::robot_entries`]).
+    entries: Vec<crate::exchange::RobotEntry>,
+    /// object → robot index: who holds what, as the walk goes (a detach
+    /// names no robot of its own).
+    held: BTreeMap<String, usize>,
+    /// Devices this POU positions (`move_to`, `goto`, `advance`): their
+    /// done waits are `<device>_busy AND done`, the latch set once the
+    /// plant reports not-done — a done still high when the command was
+    /// posted is the previous command's.
+    commanded: BTreeSet<String>,
+    /// The stop each coil-driven axis was last sent to, as the walk goes.
+    last_stop: BTreeMap<String, String>,
     y: i64,
     max_y: i64,
 }
@@ -341,6 +372,7 @@ impl<'a> Pou<'a> {
         step_ident: &str,
         started: &[String],
         edge_calls: &mut Vec<String>,
+        sent: &[(String, String)],
     ) -> String {
         match c {
             Condition::Immediately => "TRUE".to_string(),
@@ -393,13 +425,49 @@ impl<'a> Pou<'a> {
                 edge_calls.push(format!("{inst}(CLK := {v});"));
                 format!("{inst}.Q")
             }
+            // A coil-driven axis has no in-position point: its done is
+            // the limit switch of the stop this step sent it to (any
+            // stop, if the step sent it nowhere).
             Condition::DeviceDone { device } => {
-                self.var(device, None, true, &format!("{}_done", ident(device)))
+                let done = match self.axis_coils(device) {
+                    Some((stops, coils)) if !coils.is_empty() => {
+                        let last = sent
+                            .iter()
+                            .find(|(d, _)| d == device)
+                            .map(|(_, stop)| stop.clone())
+                            .or_else(|| self.last_stop.get(device).cloned());
+                        let lanes: Vec<String> = match last {
+                            Some(stop) => vec![format!("{device}/{stop}")],
+                            None => stops
+                                .iter()
+                                .map(|(stop, _)| format!("{device}/{stop}"))
+                                .collect(),
+                        };
+                        let vars: Vec<String> = lanes
+                            .iter()
+                            .map(|lane| self.var(lane, None, true, &ident(lane)))
+                            .collect();
+                        if vars.len() == 1 {
+                            vars[0].clone()
+                        } else {
+                            format!("({})", vars.join(" OR "))
+                        }
+                    }
+                    _ => self.var(device, None, true, &format!("{}_done", ident(device))),
+                };
+                if self.commanded.contains(device) {
+                    let busy = format!("{}_busy", ident(device));
+                    self.locals.insert(busy.clone());
+                    edge_calls.push(format!("IF NOT {done} THEN {busy} := TRUE; END_IF;"));
+                    format!("({busy} AND {done})")
+                } else {
+                    done
+                }
             }
             Condition::All(cs) => {
                 let parts: Vec<String> = cs
                     .iter()
-                    .map(|c| self.condition_st(c, step_ident, started, edge_calls))
+                    .map(|c| self.condition_st(c, step_ident, started, edge_calls, sent))
                     .collect();
                 if parts.len() == 1 {
                     parts[0].clone()
@@ -410,7 +478,7 @@ impl<'a> Pou<'a> {
             Condition::Any(cs) => {
                 let parts: Vec<String> = cs
                     .iter()
-                    .map(|c| self.condition_st(c, step_ident, started, edge_calls))
+                    .map(|c| self.condition_st(c, step_ident, started, edge_calls, sent))
                     .collect();
                 if parts.len() == 1 {
                     parts[0].clone()
@@ -423,42 +491,99 @@ impl<'a> Pou<'a> {
 
     // ---- actions ------------------------------------------------------
 
-    /// One step's entry actions as (inline ST statements, boolean action
-    /// references, FB instances started).
-    fn actions_st(&mut self, actions: &[Action]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    /// One step's entry actions as (entry ST statements — fired once, a
+    /// `P1` action; boolean action references; the expressions `Done`
+    /// waits on; per-scan ST statements — an `N` action — the handshakes
+    /// the step keeps watching).
+    #[allow(clippy::type_complexity)]
+    fn actions_st(
+        &mut self,
+        actions: &[Action],
+    ) -> (
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<(String, String)>,
+    ) {
         let mut st = Vec::new();
         let mut bools = Vec::new();
         let mut started = Vec::new();
+        let mut monitors = Vec::new();
+        // The stops this step sent coil-driven axes to (their done test).
+        let mut sent: Vec<(String, String)> = Vec::new();
         for action in actions {
+            // A robot this host drives from outside its controller: every
+            // robot command is the start / done handshake with the program
+            // word selecting the numbered entry — the exchange's table
+            // (design-virtual-commissioning.md §4.2). The robot's own
+            // controller calls the stub FBs below instead.
+            let remote = crate::exchange::action_robot(self.scene, action, &mut self.held)
+                .ok()
+                .flatten()
+                .map(|r| self.scene.robots()[r].name.clone())
+                .filter(|robot| self.remote_start.contains(robot));
+            if let Some(robot) = remote {
+                // The handshake a polled link needs: the command is posted
+                // by the entry and issued (`start` raised) once the robot
+                // reports ready (`done` high); `start` is held until the
+                // controller sees the robot busy (`done` low — the plant
+                // holds it low once it took the command), then dropped; the
+                // step completes on busy-then-done. A level dropped by the
+                // step's exit alone would be read as done before the
+                // command was ever taken, and a `start` raised against an
+                // input image never read yet (power-up) would be dropped as
+                // taken before it was ever sent.
+                let start = self.var(
+                    &robot,
+                    Some(Aspect::Start),
+                    false,
+                    &format!("{}_start", ident(&robot)),
+                );
+                let done = self.var(
+                    &robot,
+                    Some(Aspect::Done),
+                    true,
+                    &format!("{}_done", ident(&robot)),
+                );
+                let busy = format!("{}_busy", ident(&robot));
+                let cmd = format!("{}_cmd", ident(&robot));
+                self.locals.insert(busy.clone());
+                self.locals.insert(cmd.clone());
+                st.push(format!("{busy} := FALSE;"));
+                st.push(format!("{cmd} := TRUE;"));
+                monitors.push(format!(
+                    "IF {cmd} AND NOT {start} AND {done} THEN {start} := TRUE; {cmd} := FALSE; END_IF;"
+                ));
+                monitors.push(format!(
+                    "IF {start} AND NOT {done} THEN {start} := FALSE; {busy} := TRUE; END_IF;"
+                ));
+                started.push(format!("({busy} AND {done})"));
+                if self.remote_program.contains(&robot) {
+                    let key = crate::exchange::action_key(action).unwrap_or_default();
+                    let n = self
+                        .entries
+                        .iter()
+                        .find(|e| e.robot == robot && e.key == key)
+                        .map(|e| e.number)
+                        .unwrap_or(0);
+                    let word = self.var(
+                        &robot,
+                        Some(Aspect::Program),
+                        false,
+                        &format!("{}_program", ident(&robot)),
+                    );
+                    st.push(format!(
+                        "{word} := {n}; (* {} *)",
+                        crate::exchange::action_label(action)
+                    ));
+                }
+                continue;
+            }
             match action {
                 Action::StartMotion { motion } => {
                     let robot = self.motion_robot(motion);
-                    if self.remote_start.contains(&robot) {
-                        let start = self.var(
-                            &robot,
-                            Some(Aspect::Start),
-                            false,
-                            &format!("{}_start", ident(&robot)),
-                        );
-                        bools.push(start);
-                        if self.remote_program.contains(&robot) {
-                            let n = self.motion_numbers.get(motion).copied().unwrap_or(0);
-                            let word = self.var(
-                                &robot,
-                                Some(Aspect::Program),
-                                false,
-                                &format!("{}_program", ident(&robot)),
-                            );
-                            st.push(format!("{word} := {n}; (* {motion} *)"));
-                        }
-                        let done = self.var(
-                            &robot,
-                            Some(Aspect::Done),
-                            true,
-                            &format!("{}_done", ident(&robot)),
-                        );
-                        started.push(done);
-                    } else {
+                    {
                         let inst = self.instance(
                             format!("{}_motion", ident(&robot)),
                             "FB_StartMotion",
@@ -621,34 +746,61 @@ impl<'a> Pou<'a> {
                         st.push(format!("{v} := FALSE;"));
                     }
                     DeviceCommand::SetSpeed(speed) => {
+                        let lit = self.word_literal(device, Aspect::Speed, *speed);
                         let v = self.var(
                             device,
                             Some(Aspect::Speed),
                             false,
                             &format!("{}_speed", ident(device)),
                         );
-                        st.push(format!("{v} := {};", st_real(*speed)));
+                        st.push(format!("{v} := {lit}"));
                     }
-                    DeviceCommand::MoveTo(pos) => {
-                        let v = self.var(
-                            device,
-                            Some(Aspect::Position),
-                            false,
-                            &format!("{}_position", ident(device)),
-                        );
-                        st.push(format!("{v} := {};", st_real(*pos)));
-                    }
-                    DeviceCommand::MoveToStop(stop) => {
-                        // A lift call: the stop by name, the way the PLC
-                        // programs an elevator controller.
-                        let v = self.var(
-                            device,
-                            Some(Aspect::Position),
-                            false,
-                            &format!("{}_stop", ident(device)),
-                        );
-                        st.push(format!("{v} := '{stop}';"));
-                    }
+                    DeviceCommand::MoveTo(pos) => match self.axis_coils(device) {
+                        Some((stops, coils)) if !coils.is_empty() => {
+                            if let Some((stop, _)) =
+                                stops.iter().find(|(_, at)| (at - pos).abs() < 1e-6)
+                            {
+                                let stop = stop.clone();
+                                self.coil_writes(device, &coils, &stop, &mut st);
+                                sent.push((device.clone(), stop));
+                            } else {
+                                st.push(format!(
+                                    "(* {device}: move_to({}) names no stop of a coil-driven axis *)",
+                                    st_real(*pos)
+                                ));
+                            }
+                        }
+                        _ => {
+                            let lit = self.word_literal(device, Aspect::Position, *pos);
+                            let v = self.var(
+                                device,
+                                Some(Aspect::Position),
+                                false,
+                                &format!("{}_position", ident(device)),
+                            );
+                            let value = lit.split(';').next().unwrap_or("").to_string();
+                            st.push(self.preset_busy(device, &format!("({v} = {value})")));
+                            st.push(format!("{v} := {lit}"));
+                        }
+                    },
+                    DeviceCommand::MoveToStop(stop) => match self.axis_coils(device) {
+                        Some((_, coils)) if !coils.is_empty() => {
+                            self.coil_writes(device, &coils, stop, &mut st);
+                            sent.push((device.clone(), stop.clone()));
+                        }
+                        _ => {
+                            // A lift call: the stop by name, the way the PLC
+                            // programs an elevator controller.
+                            let v = self.var(
+                                device,
+                                Some(Aspect::Position),
+                                false,
+                                &format!("{}_stop", ident(device)),
+                            );
+                            st.push(self.preset_busy(device, &format!("({v} = '{stop}')")));
+                            st.push(format!("{v} := '{stop}';"));
+                        }
+                    },
                     DeviceCommand::Goto { station } => {
                         let word = self.var(
                             device,
@@ -669,6 +821,7 @@ impl<'a> Pou<'a> {
                             })
                             .map(|i| i as i64 + 1)
                             .unwrap_or(0);
+                        st.push(self.preset_busy(device, &format!("({word} = {index})")));
                         st.push(format!("{word} := {index}; (* {station} *)"));
                         let go = self.var(
                             device,
@@ -685,13 +838,88 @@ impl<'a> Pou<'a> {
                             false,
                             &format!("{}_index", ident(device)),
                         );
+                        st.push(self.preset_busy(device, "FALSE"));
                         st.push(format!("(* advance {} m *)", st_real(*distance)));
                         bools.push(go);
                     }
                 },
             }
         }
-        (st, bools, started)
+        (st, bools, started, monitors, sent)
+    }
+
+    /// A coil-driven axis's stops and coils, `None` for any other device.
+    #[allow(clippy::type_complexity)]
+    fn axis_coils(&self, device: &str) -> Option<(Vec<(String, f64)>, Vec<(String, String)>)> {
+        self.scene.devices().iter().find_map(|d| match &d.kind {
+            crate::seq::DeviceKind::LinearAxis { stops, coils, .. } if d.name == device => {
+                Some((stops.clone(), coils.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// The coil levels that send a coil-driven axis to `stop`.
+    fn coil_writes(
+        &mut self,
+        device: &str,
+        coils: &[(String, String)],
+        stop: &str,
+        st: &mut Vec<String>,
+    ) {
+        // Already energised this way: no motion to wait for.
+        let terms: Vec<String> = coils
+            .iter()
+            .map(|(coil, target)| {
+                let lane = format!("{device}/{coil}");
+                let v = self.var(&lane, None, false, &ident(&lane));
+                if target == stop {
+                    v
+                } else {
+                    format!("NOT {v}")
+                }
+            })
+            .collect();
+        st.push(self.preset_busy(device, &terms.join(" AND ")));
+        for (coil, target) in coils {
+            let lane = format!("{device}/{coil}");
+            let v = self.var(&lane, None, false, &ident(&lane));
+            st.push(format!(
+                "{v} := {}; (* {stop} *)",
+                if target == stop { "TRUE" } else { "FALSE" }
+            ));
+        }
+        self.last_stop.insert(device.to_string(), stop.to_string());
+    }
+
+    /// The statement that seeds a device's busy latch as a command is
+    /// posted: `already` tests that the command changes nothing.
+    fn preset_busy(&mut self, device: &str, already: &str) -> String {
+        let busy = format!("{}_busy", ident(device));
+        self.locals.insert(busy.clone());
+        format!("{busy} := {already};")
+    }
+
+    /// A measurement as the controller's register holds it: the scaled
+    /// INT of a word channel with a unit, else the REAL literal.
+    fn word_literal(&self, device: &str, aspect: Aspect, x: f64) -> String {
+        let scale = self
+            .derivation
+            .points
+            .iter()
+            .find(|p| p.id.name == device && p.id.aspect == Some(aspect))
+            .map(|p| scale_of(self.derivation, p))
+            .unwrap_or(1.0);
+        if scale != 1.0 {
+            format!(
+                "{}; (* {} {} *)",
+                (x * scale).round() as i64,
+                st_real(x),
+                if aspect == Aspect::Speed { "m/s" } else { "m" }
+            )
+        } else {
+            format!("{};", st_real(x))
+        }
     }
 
     // ---- SFC elements -------------------------------------------------
@@ -752,7 +980,8 @@ impl<'a> Pou<'a> {
                     self.y = start_y;
                     let arm_x = x + 160 * a as i64;
                     let mut edge_calls = Vec::new();
-                    let cond = self.condition_st(&arm.condition, &step_ident, &[], &mut edge_calls);
+                    let cond =
+                        self.condition_st(&arm.condition, &step_ident, &[], &mut edge_calls, &[]);
                     // `otherwise` (Immediately as the last arm) is
                     // "none of the others", so the branch is exclusive.
                     let cond = if matches!(arm.condition, Condition::Immediately)
@@ -795,12 +1024,21 @@ impl<'a> Pou<'a> {
                 continue;
             }
 
-            // Actions and the transition.
-            let (mut st, bools, started) = self.actions_st(&step.actions);
+            // Actions and the transition: the entry statements fire once
+            // (`P1`), the boolean references and the per-scan statements —
+            // edge triggers, handshake monitors — hold while the step is
+            // active (`N`).
+            let (st, bools, started, mut monitors, sent) = self.actions_st(&step.actions);
             let mut edge_calls = Vec::new();
-            let cond = self.condition_st(&step.transition, &step_ident, &started, &mut edge_calls);
-            st.extend(edge_calls);
-            if !st.is_empty() || !bools.is_empty() {
+            let cond = self.condition_st(
+                &step.transition,
+                &step_ident,
+                &started,
+                &mut edge_calls,
+                &sent,
+            );
+            monitors.extend(edge_calls);
+            if !st.is_empty() || !bools.is_empty() || !monitors.is_empty() {
                 let ab_id = self.id();
                 let position = self.pos(x + 60);
                 let mut actions = String::new();
@@ -815,9 +1053,17 @@ impl<'a> Pou<'a> {
                 if !st.is_empty() {
                     let _ = write!(
                         actions,
-                        "<action localId=\"{}\" qualifier=\"N\"><relPosition x=\"0\" y=\"0\"/><inline>{}</inline></action>",
+                        "<action localId=\"{}\" qualifier=\"P1\"><relPosition x=\"0\" y=\"0\"/><inline>{}</inline></action>",
                         self.id(),
                         st_body(&st.join("\n"))
+                    );
+                }
+                if !monitors.is_empty() {
+                    let _ = write!(
+                        actions,
+                        "<action localId=\"{}\" qualifier=\"N\"><relPosition x=\"0\" y=\"0\"/><inline>{}</inline></action>",
+                        self.id(),
+                        st_body(&monitors.join("\n"))
                     );
                 }
                 self.push_element(format!(
@@ -933,7 +1179,7 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
             }),
             _ => None,
         };
-        let initial = if point_type(p) == "BOOL" {
+        let initial = if point_type(&derivation, p) == "BOOL" {
             scene
                 .signals()
                 .iter()
@@ -950,7 +1196,7 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
         };
         globals.push(GlobalVar {
             name,
-            ty: point_type(p),
+            ty: point_type(&derivation, p),
             address,
             initial,
             doc: format!(
@@ -987,15 +1233,6 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
             .map(|p| p.id.name.clone())
             .collect()
     };
-    // Program numbers: motions numbered per robot in scene order.
-    let mut motion_numbers: BTreeMap<String, u32> = BTreeMap::new();
-    let mut per_robot: BTreeMap<usize, u32> = BTreeMap::new();
-    for m in scene.motions() {
-        let n = per_robot.entry(m.robot).or_default();
-        *n += 1;
-        motion_numbers.insert(m.name.clone(), *n);
-    }
-
     // ---- programs ----------------------------------------------------------
     let mut stubs: BTreeSet<&'static str> = BTreeSet::new();
     let mut pous = String::new();
@@ -1024,12 +1261,34 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
             step_names: BTreeSet::new(),
             externals: BTreeSet::new(),
             instances: BTreeMap::new(),
+            locals: BTreeSet::new(),
             stubs: &mut stubs,
             remote_start: remote_for(&host, IoSource::RobotStart),
             remote_done: remote_for(&host, IoSource::RobotDone),
             remote_program: remote_for(&host, IoSource::RobotProgram),
             robot_instances: BTreeMap::new(),
-            motion_numbers: motion_numbers.clone(),
+            entries: crate::exchange::robot_entries(scene, &refs, &host)
+                .map_err(PlcopenError::Derivation)?,
+            held: BTreeMap::new(),
+            commanded: {
+                let mut set = BTreeSet::new();
+                let _ = crate::seq::walk_actions(&sequence.steps, &mut |action: &Action| {
+                    if let Action::Device {
+                        device,
+                        command:
+                            DeviceCommand::MoveTo(_)
+                            | DeviceCommand::MoveToStop(_)
+                            | DeviceCommand::Goto { .. }
+                            | DeviceCommand::Advance(_),
+                    } = action
+                    {
+                        set.insert(device.clone());
+                    }
+                    Ok::<(), String>(())
+                });
+                set
+            },
+            last_stop: BTreeMap::new(),
             y: 20,
             max_y: 20,
         };
@@ -1068,6 +1327,7 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
             elements,
             externals,
             instances,
+            locals,
             ..
         } = pou;
 
@@ -1089,17 +1349,24 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
         if !externals.is_empty() {
             let _ = write!(interface, "<externalVars>{ext_vars}</externalVars>");
         }
-        if !instances.is_empty() {
-            let mut locals = String::new();
+        if !instances.is_empty() || !locals.is_empty() {
+            let mut vars = String::new();
             for (inst, ty) in &instances {
                 let _ = write!(
-                    locals,
+                    vars,
                     "<variable name=\"{}\"><type><derived name=\"{}\"/></type></variable>",
                     xml_attr(inst),
                     xml_attr(ty)
                 );
             }
-            let _ = write!(interface, "<localVars>{locals}</localVars>");
+            for name in &locals {
+                let _ = write!(
+                    vars,
+                    "<variable name=\"{}\"><type><BOOL/></type></variable>",
+                    xml_attr(name)
+                );
+            }
+            let _ = write!(interface, "<localVars>{vars}</localVars>");
         }
         let _ = write!(
             pous,
@@ -1247,6 +1514,7 @@ mod tests {
                 },
                 watch: SensorWatch::All,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.upsert_device(crate::seq::Device {
@@ -1256,6 +1524,7 @@ mod tests {
                 zone_size: nalgebra::Vector3::new(1.0, 1.0, 1.0),
                 velocity: nalgebra::Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene.define_signal("carrying", false);
@@ -1337,7 +1606,7 @@ mod tests {
         assert_eq!(ident("beam pick"), "beam_pick");
         assert_eq!(ident("/World/Conveyor/Belt"), "World_Conveyor_Belt");
         assert_eq!(ident("2nd"), "_2nd");
-        assert_eq!(ident("step"), "step_");
+        assert_eq!(ident("step"), "step_1");
         assert_eq!(ident("far.done"), "far_done");
         assert_eq!(st_time(0.5), "T#500ms");
         assert_eq!(st_time(2.0), "T#2s");

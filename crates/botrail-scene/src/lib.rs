@@ -11,6 +11,7 @@ pub mod cloth;
 pub mod coat;
 pub mod connections;
 pub mod dynamics;
+pub mod exchange;
 pub mod gait;
 pub mod gcode;
 pub mod grasp;
@@ -33,6 +34,7 @@ pub mod routing;
 pub mod scan;
 pub mod script;
 pub mod seq;
+pub mod st;
 pub mod stages;
 pub mod toolpath;
 pub mod verify;
@@ -189,6 +191,12 @@ pub struct Obstacle {
     /// no one collision-checks a floor. Only an upright box can say what
     /// its top face is, so only one can be walkable.
     pub walkable: bool,
+    /// A stopper: conveyed parts stop against it instead of flowing
+    /// through it — the end plate of a belt, the blade of a stopper
+    /// cylinder (raised into the parts' path it blocks, lowered out of it
+    /// it does not). Kinematic advection only; a physics bake stops parts
+    /// by contact anyway. Never affects collision checking or planning.
+    pub stopper: bool,
     /// Display colour, linear RGB — the authored `primvars:displayColor` for
     /// imported scenery. `None` leaves the shading to the viewer, which is
     /// what a bare `add_box` gets. Never affects collision or planning.
@@ -496,6 +504,8 @@ pub struct Scene {
     obstacles: Vec<Obstacle>,
     obstacle_colliders: Vec<ObstacleCollider>,
     attachments: Vec<Attachment>,
+    /// Grasps that follow coils (`bind_grasp`).
+    grasp_bindings: Vec<grasp::GraspBinding>,
     motions: Vec<Motion>,
     sequences: Vec<seq::Sequence>,
     signals: Vec<seq::SignalDef>,
@@ -562,6 +572,7 @@ impl Scene {
             obstacles: Vec::new(),
             obstacle_colliders: Vec::new(),
             attachments: Vec::new(),
+            grasp_bindings: Vec::new(),
             motions: Vec::new(),
             sequences: Vec::new(),
             signals: Vec::new(),
@@ -1404,6 +1415,7 @@ impl Scene {
             enabled: true,
             visible: true,
             walkable: false,
+            stopper: false,
             color: None,
             material: None,
             legend: None,
@@ -1434,6 +1446,7 @@ impl Scene {
                 enabled: true,
                 visible: true,
                 walkable: false,
+                stopper: false,
                 color: spec.color,
                 material: spec.material,
                 legend: None,
@@ -1464,6 +1477,7 @@ impl Scene {
             enabled: true,
             visible: true,
             walkable: false,
+            stopper: false,
             color: None,
             material: None,
             legend: None,
@@ -1563,6 +1577,16 @@ impl Scene {
             }
         }
         self.obstacles[index].walkable = walkable;
+        Ok(())
+    }
+
+    /// Marks an obstacle a stopper for conveyed parts (or clears it): the
+    /// kinematic belt advection stops a part short of it when its bounds
+    /// lie across the part's path, and parts queue behind one another in
+    /// front of it. Any geometry; nothing else about the obstacle changes.
+    pub fn set_obstacle_stopper(&mut self, name: &str, stopper: bool) -> Result<(), SceneError> {
+        let index = self.obstacle_index(name)?;
+        self.obstacles[index].stopper = stopper;
         Ok(())
     }
 
@@ -3066,6 +3090,7 @@ impl Scene {
             objects: Vec::new(),
             vehicles: Vec::new(),
             signals: Vec::new(),
+            words: Vec::new(),
             step_spans: Vec::new(),
             branches: Vec::new(),
         }
@@ -3506,6 +3531,7 @@ mod tests {
                 },
                 watch: seq::SensorWatch::Robots(vec!["b".into()]),
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.upsert_sequence(seq::Sequence {
@@ -3607,9 +3633,11 @@ mod tests {
                     port: Some(0),
                     address: None,
                     electrical: None,
+                    unit: None,
                 }],
                 place: None,
                 model: None,
+                monitor: false,
             })
             .expect("node");
         scene

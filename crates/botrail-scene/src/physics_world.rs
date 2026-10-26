@@ -848,6 +848,8 @@ mod tests {
                 position: 0.0,
                 range: (0.0, 1.0),
                 stops: Vec::new(),
+                coils: Vec::new(),
+                encoder: false,
             },
         });
         // Declared bodies keep their word.
@@ -923,6 +925,7 @@ mod tests {
                 },
                 watch: crate::seq::SensorWatch::AllObjects,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         pin(

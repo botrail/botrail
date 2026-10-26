@@ -334,6 +334,7 @@ pub fn merged_sequence_program(
                 None => joint_names.iter().map(|n| n.to_string()).collect(),
             },
             commands,
+            io_registers: options.io_registers,
         },
         warnings: lowering.warnings,
     })
@@ -1370,6 +1371,7 @@ mod tests {
                 },
                 watch: SensorWatch::Robots(vec!["r".into()]),
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene
@@ -1683,6 +1685,7 @@ mod tests {
                 zone_size: Vector3::new(1.0, 1.0, 0.2),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: true,
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -2183,6 +2186,7 @@ mod tests {
             objects: vec![],
             vehicles: vec![],
             signals: vec![],
+            words: Vec::new(),
             step_spans: vec![],
             branches: vec![BranchTaken {
                 sequence: "s".into(),

@@ -287,6 +287,13 @@ the [I/O map](io-map.md): bind the points on a `robot_controller` node
 them up; `inputs=` / `outputs=` dicts still override per key, `io=` projects
 a newer assignment onto an older bake.
 
+`rtde=True` moves the program's I/O from the standard digital I/O to the
+controller's general-purpose bit registers (`read_input_boolean_register` /
+`write_output_boolean_register`, registers 64–127 — the ones an external
+RTDE client drives): bind the points on `bt.io.ur_registers()` and a
+[`bt.vc.ursim` link](virtual-commissioning.md#the-robot-controller-in-the-loop)
+carries them while the program runs on the controller.
+
 A dual-arm robot exports one controller program per arm:
 `tl.export_script("left.script", sequence="left", group="left")` carries the
 left arm's six joints and its own moves; where the program waits on the other

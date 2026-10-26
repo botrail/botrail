@@ -1,0 +1,29 @@
+# URSim — the Universal Robots controller simulator — as the robot's own
+# controller of the pick cell (design-virtual-commissioning.md VC5).
+#
+#   docker compose up -d                 # PolyScope on http://127.0.0.1:6080 (noVNC), RTDE on 30004
+#   python run_demo.py                   # botrail: exports the program, sends it, mirrors the arm, diffs
+#
+# The dashboard (29999), the primary interface (30001) and RTDE (30004) are
+# published on loopback only. URSim needs a network namespace of its own
+# (its X server would collide with the host's), so unlike the OpenPLC demo
+# this one runs on a bridge — with an explicit subnet, so it does not draw
+# on Docker's default address pools (exhausted on a machine with many
+# compose projects). The arm model is the UR5; the cell's robot is
+# botrail's 6-axis test arm, whose joint-valued targets transfer verbatim.
+services:
+  ursim:
+    image: universalrobots/ursim_e-series:latest
+    container_name: botrail-ursim
+    environment:
+      - ROBOT_MODEL=UR5
+    ports:
+      - "127.0.0.1:29999:29999"
+      - "127.0.0.1:30001-30004:30001-30004"
+      - "127.0.0.1:6080:6080"
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.213.7.0/24

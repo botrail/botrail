@@ -49,6 +49,7 @@ pub fn scene_and_pass() -> (Scene, SequenceTimeline, RopePass) {
         locomotion: vec![],
     };
     let timeline = SequenceTimeline {
+        words: Vec::new(),
         duration: 2.0,
         sequences: vec!["carry".into()],
         scenario: None,

@@ -42,6 +42,7 @@ export type { StepSpanMsg } from "./generated/StepSpanMsg";
 export type { BranchTakenMsg } from "./generated/BranchTakenMsg";
 export type { ContactMsg } from "./generated/ContactMsg";
 export type { SignalTrackMsg } from "./generated/SignalTrackMsg";
+export type { WordTrackMsg } from "./generated/WordTrackMsg";
 export type { TimelineMsg } from "./generated/TimelineMsg";
 export type { SensorMsg } from "./generated/SensorMsg";
 export type { ScenarioMsg } from "./generated/ScenarioMsg";
@@ -95,6 +96,10 @@ export type { PartTargetKind } from "./generated/PartTargetKind";
 export type { CatalogRef } from "./generated/CatalogRef";
 export type { ServerMessage } from "./generated/ServerMessage";
 export type { ClientMessage } from "./generated/ClientMessage";
+export type { PlantStatusMsg } from "./generated/PlantStatusMsg";
+export type { PlantHostMsg } from "./generated/PlantHostMsg";
+export type { PlantBreakMsg } from "./generated/PlantBreakMsg";
+export type { PlantCommandMsg } from "./generated/PlantCommandMsg";
 
 export type { RopeTrack } from "./generated/RopeTrack";
 export type { RouteMsg } from "./generated/RouteMsg";

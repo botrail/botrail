@@ -83,6 +83,15 @@ pub enum Aspect {
     Done,
     /// Robot program-number word.
     Program,
+    /// A program's active step, reported by the controller that runs it
+    /// (a monitoring node, word).
+    Step,
+    /// A device's encoder / position feedback (REAL word, plant → host):
+    /// an axis's actual position, a belt's travel.
+    Encoder,
+    /// An identification reader's word (INT, plant → host): the id of
+    /// the carrier it sees, 0 for none.
+    Id,
 }
 
 impl Aspect {
@@ -96,6 +105,9 @@ impl Aspect {
             "start" => Aspect::Start,
             "done" => Aspect::Done,
             "program" => Aspect::Program,
+            "step" => Aspect::Step,
+            "encoder" => Aspect::Encoder,
+            "id" => Aspect::Id,
             _ => return None,
         })
     }
@@ -110,6 +122,9 @@ impl Aspect {
             Aspect::Start => "start",
             Aspect::Done => "done",
             Aspect::Program => "program",
+            Aspect::Step => "step",
+            Aspect::Encoder => "encoder",
+            Aspect::Id => "id",
         }
     }
 }
@@ -241,6 +256,12 @@ pub enum IoSource {
     DeviceDone,
     /// Rule ⑤: a device's numeric or indexed command.
     DeviceCommand,
+    /// Rule ⑤: a solenoid coil of a cylinder-like axis (`<axis>/<coil>`),
+    /// driving it to a named stop — the `move_to` of an axis with coils.
+    DeviceCoil,
+    /// Rule ⑤: a device's encoder / position-feedback word
+    /// (`<device>.encoder`), read by the host that commands it.
+    DeviceFeedback,
     /// Rule ⑤: a magazine (Source/Sink) — presentation, not I/O.
     Cosmetic,
     /// Rule ⑥: robot start output.
@@ -251,6 +272,10 @@ pub enum IoSource {
     RobotProgram,
     /// Rule ⑦: a declared point (assignment layer).
     Declared,
+    /// Rule ⑧: a program's active-step word, written by a node that
+    /// monitors its programs (`IoNode::monitor`) for the plant to record
+    /// the controller's step bands.
+    Monitor,
 }
 
 impl IoSource {
@@ -262,6 +287,8 @@ impl IoSource {
             IoSource::WriteOnly => "signal:write-only",
             IoSource::ReadOnly => "signal:read-only",
             IoSource::DeviceRun => "device:run",
+            IoSource::DeviceCoil => "device:coil",
+            IoSource::DeviceFeedback => "device:feedback",
             IoSource::DeviceDone => "device:done",
             IoSource::DeviceCommand => "device:command",
             IoSource::Cosmetic => "device:cosmetic",
@@ -269,6 +296,7 @@ impl IoSource {
             IoSource::RobotDone => "robot:done",
             IoSource::RobotProgram => "robot:program",
             IoSource::Declared => "declared",
+            IoSource::Monitor => "monitor",
         }
     }
 }
@@ -408,6 +436,10 @@ pub enum IoCode {
     /// Two programs of the set drive one output point (the ownership rule
     /// the bake enforces, checked without baking).
     MultipleDrivers,
+    /// A word channel's engineering unit: a REAL point on a word channel
+    /// without one (carried as a REAL no 16-bit register holds), a unit
+    /// the exchange cannot scale by, or a scaled range INT16 cannot hold.
+    Unit,
 }
 
 impl IoCode {
@@ -431,6 +463,7 @@ impl IoCode {
             IoCode::Polarity => "polarity",
             IoCode::Voltage => "voltage",
             IoCode::MultipleDrivers => "multiple_drivers",
+            IoCode::Unit => "unit",
         }
     }
 }
@@ -582,6 +615,13 @@ pub struct IoNode {
     /// Part number / model (optional, a table column).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The node reports the active step of every program it runs, as one
+    /// word per program (`<program>.step`, rule ⑧): the ST export writes
+    /// the step's flat index into it on every transition, and the plant
+    /// records the word as the program's step bands — the controller's
+    /// own SFC on the dock, the way the cell's internal programs show.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub monitor: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -647,6 +687,35 @@ pub struct IoChannel {
     pub address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub electrical: Option<Electrical>,
+    /// The engineering unit a word channel carries a measurement in
+    /// (`"mm"`, `"0.01mm"`, `"mm/s"`): a REAL point bound here is
+    /// exchanged as an INT scaled to that unit — a 16-bit register
+    /// cannot carry a REAL, and a drive's position is an integer in
+    /// increments anyway. See [`unit_scale`]. Absent, a word channel
+    /// carries whatever type the point has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// Register counts per SI unit for an engineering unit a word channel
+/// names: `mm` → 1000 (a metre is 1000 counts). `None` for a unit the
+/// exchange cannot scale by — the lint names it.
+pub fn unit_scale(unit: &str) -> Option<f64> {
+    Some(match unit.trim() {
+        "m" | "m/s" | "rad" | "rad/s" | "count" | "counts" | "1" => 1.0,
+        "dm" => 10.0,
+        "cm" | "cm/s" => 100.0,
+        "mm" | "mm/s" => 1000.0,
+        "0.1mm" | "0.1 mm" => 1e4,
+        "0.01mm" | "0.01 mm" => 1e5,
+        "um" | "µm" | "μm" => 1e6,
+        "mm/min" => 60_000.0,
+        "m/min" => 60.0,
+        "deg" | "°" => 180.0 / std::f64::consts::PI,
+        "0.1deg" | "0.1°" => 1800.0 / std::f64::consts::PI,
+        "0.01deg" | "0.01°" => 18_000.0 / std::f64::consts::PI,
+        _ => return None,
+    })
 }
 
 /// Electrical facts about a channel or a field device: what a lint can
@@ -769,6 +838,13 @@ pub struct IoDecl {
     pub pair: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The controller the point belongs to when no program of the set
+    /// reads or writes it — a point a hand-written PLC program will read
+    /// (an identification reader's word, an encoder on another host).
+    /// Names a node. Without it an unused declared point has no host and
+    /// sits on no exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1072,9 +1148,15 @@ struct ProgramUsage {
     device_cmds: BTreeMap<(String, DeviceCmd), Vec<StepRef>>,
     /// `DeviceDone` reads.
     device_done: BTreeMap<String, Vec<StepRef>>,
-    /// Robots driven by motion-class actions (start/ramp/toolpath), with
-    /// the motion / toolpath names seen (for the program-number word).
+    /// Robots this program commands (a motion, ramp, toolpath, policy,
+    /// crouch, grasp, release, track), with the distinct commands seen —
+    /// [`crate::exchange::action_label`]s, a motion's name among them —
+    /// for the program-number word: two or more commands from another
+    /// host need a number to tell them apart.
     drives: BTreeMap<usize, (Vec<StepRef>, BTreeSet<String>)>,
+    /// object → robot: who holds what as the walk goes, so a `Detach`
+    /// (which names no robot) is attributed to the robot that attached.
+    held: BTreeMap<String, usize>,
     /// Robots this program owns in the `driven_robot` sense (drives, plus
     /// attach / track / untrack) — decides the implicit host.
     owns: BTreeSet<usize>,
@@ -1137,41 +1219,29 @@ fn walk_action(
         Action::Device { device, command } => {
             push(&mut u.device_cmds, (device.clone(), cmd(command)), at)
         }
-        Action::StartMotion { motion } => {
-            let m = scene
-                .motions()
-                .iter()
-                .find(|m| &m.name == motion)
-                .ok_or_else(|| format!("unknown motion `{motion}`"))?;
-            let entry = u.drives.entry(m.robot).or_default();
-            entry.0.push(at.clone());
-            entry.1.insert(motion.clone());
-            u.owns.insert(m.robot);
+        // A release names no robot: it is the robot's that attached the
+        // part — earlier in this program, or before it started. One that
+        // cannot be attributed is nobody's command (as before).
+        Action::Detach { .. } => {
+            if let Ok(Some(r)) = crate::exchange::action_robot(scene, action, &mut u.held) {
+                let entry = u.drives.entry(r).or_default();
+                entry.0.push(at.clone());
+                entry.1.insert(crate::exchange::action_label(action));
+                u.owns.insert(r);
+            }
         }
-        Action::StartRamp { robot, .. } => {
-            let r = scene.resolve_seq_robot(robot)?;
-            u.drives.entry(r).or_default().0.push(at.clone());
-            u.owns.insert(r);
-        }
-        Action::StartToolpath { robot, toolpath } => {
-            let r = scene.resolve_seq_robot(robot)?;
+        // Every other robot action is a command another host would have
+        // to select by number: it drives the robot, and counts toward the
+        // program word.
+        robot_action => {
+            let Some(r) = crate::exchange::action_robot(scene, robot_action, &mut u.held)? else {
+                return Ok(());
+            };
             let entry = u.drives.entry(r).or_default();
             entry.0.push(at.clone());
-            entry.1.insert(toolpath.clone());
+            entry.1.insert(crate::exchange::action_label(robot_action));
             u.owns.insert(r);
         }
-        Action::Policy { robot, .. } | Action::Crouch { robot, .. } => {
-            let r = scene.resolve_seq_robot(robot)?;
-            u.drives.entry(r).or_default().0.push(at.clone());
-            u.owns.insert(r);
-        }
-        Action::Attach { robot, .. }
-        | Action::Track { robot, .. }
-        | Action::Untrack { robot, .. } => {
-            let r = scene.resolve_seq_robot(robot)?;
-            u.owns.insert(r);
-        }
-        Action::Detach { .. } => {}
     }
     Ok(())
 }
@@ -1297,6 +1367,40 @@ fn dedup(steps: &mut Vec<StepRef>) {
 
 /// Groups `(host, step)` pairs by host, preserving first-seen host order
 /// for determinism-by-sort later.
+/// The IEC type a point carries before any channel scales it: `REAL` for
+/// a position, speed or encoder word and for analog channels, `INT` for
+/// the other words (station, program, step, id), `BOOL` otherwise.
+pub fn natural_type(p: &IoPoint) -> &'static str {
+    match (p.kind, p.id.aspect) {
+        (_, Some(Aspect::Position)) | (_, Some(Aspect::Speed)) | (_, Some(Aspect::Encoder)) => {
+            "REAL"
+        }
+        (_, Some(Aspect::Station))
+        | (_, Some(Aspect::Program))
+        | (_, Some(Aspect::Step))
+        | (_, Some(Aspect::Id)) => "INT",
+        (ChannelKind::Ai, _) | (ChannelKind::Ao, _) => "REAL",
+        (ChannelKind::Word, _) => "INT",
+        _ => "BOOL",
+    }
+}
+
+/// The largest magnitude a device's measurement word can take, in SI:
+/// an axis's range for a position or encoder, its speed for a speed
+/// word. `None` where the scene does not bound it (a belt's travel).
+fn device_span(scene: &Scene, id: &IoPointId) -> Option<f64> {
+    let device = scene.devices().iter().find(|d| d.name == id.name)?;
+    match (&device.kind, id.aspect) {
+        (DeviceKind::LinearAxis { range, .. }, Some(Aspect::Position))
+        | (DeviceKind::LinearAxis { range, .. }, Some(Aspect::Encoder)) => {
+            Some(range.0.abs().max(range.1.abs()))
+        }
+        (DeviceKind::LinearAxis { speed, .. }, Some(Aspect::Speed)) => Some(*speed),
+        (DeviceKind::Conveyor { velocity, .. }, Some(Aspect::Speed)) => Some(velocity.norm()),
+        _ => None,
+    }
+}
+
 fn by_host<'a>(
     items: impl Iterator<Item = (&'a str, &'a [StepRef])>,
 ) -> BTreeMap<String, Vec<StepRef>> {
@@ -1477,7 +1581,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
 
     // ---- ① an axis's stop lanes: limit switches, read like sensors ------
     for device in scene.devices() {
-        let DeviceKind::LinearAxis { stops, .. } = &device.kind else {
+        let DeviceKind::LinearAxis { stops, coils, .. } = &device.kind else {
             continue;
         };
         for (stop, _) in stops {
@@ -1485,10 +1589,18 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             if role_of(&name) == Some(DeclRole::Exclude) {
                 continue;
             }
+            // A cylinder's in-position *is* its limit switches: a host
+            // awaiting `device_done` on a coil-driven axis reads them.
             let readers = by_host(
                 usages
                     .iter()
-                    .filter_map(|u| u.reads.get(&name).map(|s| (u.host.as_str(), s.as_slice()))),
+                    .filter_map(|u| u.reads.get(&name).map(|s| (u.host.as_str(), s.as_slice())))
+                    .chain(usages.iter().filter_map(|u| {
+                        (!coils.is_empty())
+                            .then(|| u.device_done.get(&device.name))
+                            .flatten()
+                            .map(|s| (u.host.as_str(), s.as_slice()))
+                    })),
             );
             if readers.is_empty() {
                 b.point(
@@ -1735,6 +1847,33 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             continue;
         }
         let mut commanded = false;
+        let axis_coils: &[(String, String)] = match &device.kind {
+            DeviceKind::LinearAxis { coils, .. } => coils,
+            _ => &[],
+        };
+        // A coil-driven axis: `move_to` is its coils, not a position word.
+        if !axis_coils.is_empty() {
+            let uses = cmds(DeviceCmd::MoveTo);
+            if !uses.is_empty() {
+                commanded = true;
+                let host = uses[0].0.to_string();
+                let mut writers: Vec<StepRef> =
+                    uses.iter().flat_map(|(_, s)| s.iter().cloned()).collect();
+                dedup(&mut writers);
+                for (coil, _) in axis_coils {
+                    let p = b.point(
+                        &format!("{name}/{coil}"),
+                        None,
+                        IoDirection::Output,
+                        Some(&host),
+                        ChannelKind::Do,
+                        IoSource::DeviceCoil,
+                        PointStatus::Unbound,
+                    );
+                    p.writers.extend(writers.iter().cloned());
+                }
+            }
+        }
         let table: [(DeviceCmd, Option<Aspect>, ChannelKind, IoSource); 6] = [
             (DeviceCmd::Run, None, ChannelKind::Do, IoSource::DeviceRun),
             (
@@ -1769,6 +1908,9 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             ),
         ];
         for (cmd, aspect, kind, source) in table {
+            if cmd == DeviceCmd::MoveTo && !axis_coils.is_empty() {
+                continue;
+            }
             let uses = cmds(cmd);
             if uses.is_empty() {
                 continue;
@@ -1807,18 +1949,66 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                 );
             }
         }
-        for (host, steps) in done {
+        for (host, steps) in &done {
             commanded = true;
+            if !axis_coils.is_empty() {
+                // Its limit switches are the in-position (rule ① above).
+                continue;
+            }
             let p = b.point(
                 name,
                 None,
                 IoDirection::Input,
-                Some(&host),
+                Some(host),
                 ChannelKind::Di,
                 IoSource::DeviceDone,
                 PointStatus::Unbound,
             );
-            p.readers.extend(steps);
+            p.readers.extend(steps.iter().cloned());
+        }
+        // The encoder word goes to every host that commands or awaits the
+        // device: the drive's feedback returns to the controller that
+        // drives it.
+        let encoder = matches!(
+            device.kind,
+            DeviceKind::LinearAxis { encoder: true, .. }
+                | DeviceKind::Conveyor { encoder: true, .. }
+        );
+        if encoder {
+            let mut hosts: Vec<String> = done.keys().cloned().collect();
+            for kind in [
+                DeviceCmd::Run,
+                DeviceCmd::Advance,
+                DeviceCmd::Goto,
+                DeviceCmd::MoveTo,
+                DeviceCmd::SetSpeed,
+            ] {
+                hosts.extend(cmds(kind).into_iter().map(|(h, _)| h.to_string()));
+            }
+            hosts.sort();
+            hosts.dedup();
+            if hosts.is_empty() {
+                b.point(
+                    name,
+                    Some(Aspect::Encoder),
+                    IoDirection::Input,
+                    None,
+                    ChannelKind::Word,
+                    IoSource::DeviceFeedback,
+                    PointStatus::Unbound,
+                );
+            }
+            for host in hosts {
+                b.point(
+                    name,
+                    Some(Aspect::Encoder),
+                    IoDirection::Input,
+                    Some(&host),
+                    ChannelKind::Word,
+                    IoSource::DeviceFeedback,
+                    PointStatus::Unbound,
+                );
+            }
         }
         if !commanded {
             match device.kind {
@@ -1920,14 +2110,33 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     PointStatus::Unbound,
                 );
                 p.writers.extend(steps.iter().cloned());
+                // The mirror on the robot's own controller: the program
+                // number comes in (a vendor template binds it to the
+                // controller's program-select word — PNS, PGNO).
+                if io.robot_controller(rname).is_some() {
+                    let p = b.point(
+                        rname,
+                        Some(Aspect::Program),
+                        IoDirection::Input,
+                        Some(&ctrl),
+                        ChannelKind::Word,
+                        IoSource::RobotProgram,
+                        PointStatus::Unbound,
+                    );
+                    p.readers.extend(steps.iter().cloned());
+                }
+                let mut listed: Vec<String> = motions.iter().take(4).cloned().collect();
+                if motions.len() > 4 {
+                    listed.push("…".to_string());
+                }
                 b.finding(
                     Severity::Info,
                     IoCode::WordUnexpressible,
                     format!(
-                        "`{rname}.program` selects among {} motions ({}) — a program-number word, listed \
+                        "`{rname}.program` selects among {} commands ({}) — a program-number word, listed \
                          in the table only",
                         motions.len(),
-                        motions.iter().cloned().collect::<Vec<_>>().join(", ")
+                        listed.join(", ")
                     ),
                     steps,
                 );
@@ -1964,13 +2173,97 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
         }
     }
 
+    // ---- ⑧ step monitors -----------------------------------------------------
+    // A monitoring PLC reports each program's active step in a word the
+    // plant reads: the point exists so the exchange, the ST export and the
+    // Modbus map carry it like the robot's program word.
+    for node in io.nodes.iter().filter(|n| n.monitor) {
+        if !matches!(node.kind, IoNodeKind::Plc) {
+            b.finding(
+                Severity::Warning,
+                IoCode::Unreferenced,
+                format!(
+                    "node `{}` monitors its programs but is not a PLC — only a PLC's ST export writes step words",
+                    node.name
+                ),
+                Vec::new(),
+            );
+            continue;
+        }
+        for program in &node.programs {
+            if !programs.iter().any(|s| &s.name == program) {
+                continue;
+            }
+            b.point(
+                program,
+                Some(Aspect::Step),
+                IoDirection::Output,
+                Some(&node.name),
+                ChannelKind::Word,
+                IoSource::Monitor,
+                PointStatus::Unbound,
+            );
+        }
+    }
+
     // ---- ⑦ declarations ----------------------------------------------------
     for decl in &io.decls {
-        let existing: Vec<&PointKey> = b
+        // A label with an aspect names a word lane the plant records
+        // (`reader.id`, `belt.encoder`) for a hand-written program to read.
+        let labelled = IoPointId::parse(&decl.name, IoDirection::Input);
+        let existing: Vec<PointKey> = b
             .points
             .keys()
-            .filter(|(name, aspect, _, _)| name == &decl.name && aspect.is_none())
+            .filter(|(name, aspect, _, _)| name == &labelled.name && *aspect == labelled.aspect)
+            .cloned()
             .collect();
+        if let Some(host) = &decl.host {
+            if io.node(host).is_none() {
+                b.finding(
+                    Severity::Error,
+                    IoCode::UnknownRef,
+                    format!(
+                        "declaration `{}` names host `{host}`, which is not a node",
+                        decl.name
+                    ),
+                    Vec::new(),
+                );
+            }
+        }
+        if let Some(aspect) = labelled.aspect {
+            let recorded = match aspect {
+                Aspect::Id => scene
+                    .sensors()
+                    .iter()
+                    .any(|s| s.name == labelled.name && s.ids.is_some()),
+                Aspect::Encoder => scene.devices().iter().any(|d| {
+                    d.name == labelled.name
+                        && matches!(
+                            d.kind,
+                            DeviceKind::LinearAxis { encoder: true, .. }
+                                | DeviceKind::Conveyor { encoder: true, .. }
+                        )
+                }),
+                _ => true,
+            };
+            if !recorded {
+                b.finding(
+                    Severity::Error,
+                    IoCode::UnknownRef,
+                    format!(
+                        "declaration `{}` names a word the plant does not record — {}",
+                        decl.name,
+                        match aspect {
+                            Aspect::Id => "give the zone sensor an `ids=` table",
+                            Aspect::Encoder => "give the device `encoder=True`",
+                            _ => "only `.id` and `.encoder` words can be declared",
+                        }
+                    ),
+                    Vec::new(),
+                );
+                continue;
+            }
+        }
         if existing.is_empty() {
             match decl.role {
                 Some(DeclRole::Input) | Some(DeclRole::Output) => {
@@ -1979,15 +2272,16 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     } else {
                         IoDirection::Output
                     };
-                    let kind = decl.kind.unwrap_or(match direction {
-                        IoDirection::Input => ChannelKind::Di,
-                        IoDirection::Output => ChannelKind::Do,
+                    let kind = decl.kind.unwrap_or(match (direction, labelled.aspect) {
+                        (_, Some(_)) => ChannelKind::Word,
+                        (IoDirection::Input, None) => ChannelKind::Di,
+                        (IoDirection::Output, None) => ChannelKind::Do,
                     });
                     let p = b.point(
-                        &decl.name,
-                        None,
+                        &labelled.name,
+                        labelled.aspect,
                         direction,
-                        None,
+                        decl.host.as_deref(),
                         kind,
                         IoSource::Declared,
                         PointStatus::Unbound,
@@ -2025,8 +2319,17 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                 }
             }
         } else {
-            let keys: Vec<PointKey> = existing.into_iter().cloned().collect();
-            for key in keys {
+            for key in existing {
+                // An unhosted point (nobody reads it) the declaration
+                // gives a host moves there.
+                if let (Some(host), None) = (&decl.host, &key.3) {
+                    if let Some(mut p) = b.points.remove(&key) {
+                        p.host = Some(host.clone());
+                        let moved = (key.0.clone(), key.1, key.2, Some(host.clone()));
+                        b.points.entry(moved).or_insert(p);
+                    }
+                    continue;
+                }
                 if let Some(p) = b.points.get_mut(&key) {
                     if let Some(kind) = decl.kind {
                         p.kind = kind;
@@ -2126,6 +2429,53 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
         }
         for key in matched {
             let p = b.points.get_mut(&key).unwrap();
+            // A measurement on a word register: scaled to the channel's
+            // unit, or carried as a REAL no 16-bit register holds.
+            if channel.kind == ChannelKind::Word && natural_type(p) == "REAL" {
+                match channel.unit.as_deref() {
+                    None => b.findings.push(IoFinding {
+                        severity: Severity::Warning,
+                        code: IoCode::Unit,
+                        message: format!(
+                            "`{}` is a REAL on word channel {}.{} — a 16-bit register cannot carry it; \
+                             give the channel a unit (bt.io.word(unit=\"mm\")) to exchange it as a scaled INT",
+                            binding.point.label(),
+                            node.name,
+                            channel.id
+                        ),
+                        at: Vec::new(),
+                    }),
+                    Some(unit) => match unit_scale(unit) {
+                        None => b.findings.push(IoFinding {
+                            severity: Severity::Error,
+                            code: IoCode::Unit,
+                            message: format!(
+                                "{}.{}: unit `{unit}` is not one the exchange can scale by (m, mm, 0.01mm, um, mm/s, deg, …)",
+                                node.name, channel.id
+                            ),
+                            at: Vec::new(),
+                        }),
+                        Some(scale) => {
+                            if let Some(span) = device_span(scene, &p.id) {
+                                if span * scale > i16::MAX as f64 {
+                                    b.findings.push(IoFinding {
+                                        severity: Severity::Warning,
+                                        code: IoCode::Unit,
+                                        message: format!(
+                                            "`{}` in {unit} reaches {:.0} counts, beyond INT16 (32767) — a coarser unit on {}.{}",
+                                            binding.point.label(),
+                                            span * scale,
+                                            node.name,
+                                            channel.id
+                                        ),
+                                        at: Vec::new(),
+                                    });
+                                }
+                            }
+                        }
+                    },
+                }
+            }
             if !p.kind.compatible(channel.kind) {
                 b.findings.push(IoFinding {
                     severity: Severity::Error,
@@ -2249,9 +2599,12 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     (Severity::Error, "a device start")
                 }
                 IoSource::DeviceCommand => (Severity::Info, "a numeric command (table only)"),
+                IoSource::DeviceCoil => (Severity::Error, "a solenoid coil"),
+                IoSource::DeviceFeedback => (Severity::Info, "an encoder word (table only)"),
                 IoSource::RobotStart => (Severity::Error, "a robot start"),
                 IoSource::RobotDone => (Severity::Error, "a robot done contact"),
                 IoSource::RobotProgram => (Severity::Info, "a program-number word (table only)"),
+                IoSource::Monitor => (Severity::Info, "a step-monitor word (table only)"),
                 IoSource::Declared => (Severity::Error, "a declared point"),
                 IoSource::Internal | IoSource::Cosmetic => continue,
             };
@@ -3777,6 +4130,7 @@ pub(crate) mod tests {
             },
             watch: SensorWatch::AllObjects,
             mount: None,
+            ids: None,
         }
     }
 
@@ -3788,6 +4142,7 @@ pub(crate) mod tests {
                 zone_size: Vector3::new(1.0, 1.0, 1.0),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running,
+                encoder: false,
             },
         }
     }
@@ -4313,6 +4668,7 @@ pub(crate) mod tests {
                 port: Some(i),
                 address: None,
                 electrical: None,
+                unit: None,
             })
             .chain((0..8).map(|i| IoChannel {
                 id: format!("DO{i}"),
@@ -4320,6 +4676,7 @@ pub(crate) mod tests {
                 port: Some(i),
                 address: None,
                 electrical: None,
+                unit: None,
             }))
             .collect()
     }
@@ -4338,6 +4695,7 @@ pub(crate) mod tests {
             channels,
             place: None,
             model: None,
+            monitor: false,
         }
     }
 
@@ -4620,6 +4978,7 @@ pub(crate) mod tests {
             safety: false,
             pair: None,
             note: None,
+            host: None,
         };
         // A constant flag: `spec_ok` is not an input after all.
         scene.declare_io(decl("spec_ok", Some(DeclRole::Internal)));
@@ -4635,6 +4994,7 @@ pub(crate) mod tests {
             safety: true,
             pair: Some("door_ch2".into()),
             note: None,
+            host: None,
         });
         scene.declare_io(IoDecl {
             name: "door_ch2".into(),
@@ -4643,6 +5003,7 @@ pub(crate) mod tests {
             safety: true,
             pair: Some("door_ch1".into()),
             note: None,
+            host: None,
         });
         // A declaration that names nothing and adds nothing.
         scene.declare_io(decl("nobody", None));
@@ -4863,6 +5224,7 @@ pub(crate) mod tests {
             port: None,
             address: None,
             electrical: None,
+            unit: None,
         });
         scene.upsert_io_node(ur).unwrap();
         // A 12 V NPN sensor on that module; a standard signal on the safety
@@ -4883,6 +5245,7 @@ pub(crate) mod tests {
             safety: true,
             pair: None,
             note: None,
+            host: None,
         });
         scene
             .bind_io(binding("estop_ok", IoDirection::Input, "UR", "DI4"))
@@ -4905,6 +5268,7 @@ pub(crate) mod tests {
             safety: true,
             pair: Some("door_ch2".into()),
             note: None,
+            host: None,
         });
         scene.declare_io(IoDecl {
             name: "door_ch2".into(),
@@ -4913,6 +5277,7 @@ pub(crate) mod tests {
             safety: true,
             pair: Some("door_ch1".into()),
             note: None,
+            host: None,
         });
         scene
             .bind_io(binding("door_ch1", IoDirection::Input, "UR", "DI6"))
@@ -5039,5 +5404,234 @@ pub(crate) mod tests {
         );
         let json = render_topology_json(&t, &[]);
         assert!(json.contains("\"id\":\"prog:pick\""));
+    }
+
+    fn word_channel(id: &str, address: &str, unit: Option<&str>) -> IoChannel {
+        IoChannel {
+            id: id.into(),
+            kind: ChannelKind::Word,
+            port: None,
+            address: Some(address.into()),
+            electrical: None,
+            unit: unit.map(str::to_string),
+        }
+    }
+
+    /// A positioned axis with an encoder, run from a PLC: the position word
+    /// goes out, the encoder word comes back to the same host.
+    fn feed_scene() -> Scene {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "strip",
+                botrail_model::Geometry::Box {
+                    size: Vector3::new(0.6, 0.05, 0.005),
+                },
+                Isometry3::translation(0.0, 0.0, 0.5),
+            )
+            .unwrap();
+        scene.upsert_device(Device {
+            name: "feed".into(),
+            kind: DeviceKind::LinearAxis {
+                objects: vec!["strip".into()],
+                axis: nalgebra::Unit::new_normalize(Vector3::x()),
+                speed: 0.2,
+                position: 0.0,
+                range: (0.0, 0.6),
+                stops: Vec::new(),
+                coils: Vec::new(),
+                encoder: true,
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "index".into(),
+            steps: vec![step(
+                "go",
+                vec![Action::Device {
+                    device: "feed".into(),
+                    command: DeviceCommand::MoveTo(0.1),
+                }],
+                Condition::DeviceDone {
+                    device: "feed".into(),
+                },
+            )],
+        });
+        scene
+    }
+
+    #[test]
+    fn an_encoder_word_returns_to_the_host_that_positions_the_axis() {
+        let mut scene = feed_scene();
+        scene
+            .upsert_io_node(node("PLC1", IoNodeKind::Plc, &["index"], Vec::new()))
+            .unwrap();
+        let d = derive(&scene, None).unwrap();
+        let encoder = d
+            .points
+            .iter()
+            .find(|p| p.id.aspect == Some(Aspect::Encoder))
+            .expect("encoder point");
+        assert_eq!(encoder.id.name, "feed");
+        assert_eq!(encoder.id.direction, IoDirection::Input);
+        assert_eq!(encoder.host.as_deref(), Some("PLC1"));
+        assert_eq!(encoder.source, IoSource::DeviceFeedback);
+        assert_eq!(encoder.kind, ChannelKind::Word);
+        assert_eq!(natural_type(encoder), "REAL");
+        assert_eq!(crate::plcopen::point_var(encoder), "feed_encoder");
+        // The position word is still the command; `feed` the in-position.
+        assert!(d.points.iter().any(
+            |p| p.id.aspect == Some(Aspect::Position) && p.id.direction == IoDirection::Output
+        ));
+    }
+
+    #[test]
+    fn a_measurement_on_a_word_channel_wants_a_unit_and_then_declares_an_int() {
+        let mut scene = feed_scene();
+        scene
+            .upsert_io_node(node(
+                "PLC1",
+                IoNodeKind::Plc,
+                &["index"],
+                vec![word_channel("W0", "%QW0", None)],
+            ))
+            .unwrap();
+        scene
+            .bind_io(binding("feed.position", IoDirection::Output, "PLC1", "W0"))
+            .unwrap();
+        let d = derive(&scene, None).unwrap();
+        assert!(
+            codes(&d.report, Severity::Warning).contains(&"unit"),
+            "{:?}",
+            d.report.findings
+        );
+        let position = d
+            .points
+            .iter()
+            .find(|p| p.id.aspect == Some(Aspect::Position))
+            .unwrap();
+        assert_eq!(crate::plcopen::point_type(&d, position), "REAL");
+
+        // With a unit: no complaint, an INT, and the scale on the exchange.
+        scene
+            .upsert_io_node(node(
+                "PLC1",
+                IoNodeKind::Plc,
+                &["index"],
+                vec![word_channel("W0", "%QW0", Some("mm"))],
+            ))
+            .unwrap();
+        scene
+            .bind_io(binding("feed.position", IoDirection::Output, "PLC1", "W0"))
+            .unwrap();
+        let d = derive(&scene, None).unwrap();
+        assert!(!codes(&d.report, Severity::Warning).contains(&"unit"));
+        let position = d
+            .points
+            .iter()
+            .find(|p| p.id.aspect == Some(Aspect::Position))
+            .unwrap();
+        assert_eq!(crate::plcopen::point_type(&d, position), "INT");
+        let xc = crate::exchange::derive(&scene, None, "PLC1").unwrap();
+        let word = xc
+            .by_label("feed.position", crate::exchange::PlantSide::Input)
+            .unwrap();
+        assert_eq!(word.scale, 1000.0);
+        assert_eq!(word.unit.as_deref(), Some("mm"));
+        assert_eq!(word.value, crate::exchange::ValueKind::Int);
+
+        // A unit the exchange cannot scale by is an error.
+        scene
+            .upsert_io_node(node(
+                "PLC1",
+                IoNodeKind::Plc,
+                &["index"],
+                vec![word_channel("W0", "%QW0", Some("furlong"))],
+            ))
+            .unwrap();
+        scene
+            .bind_io(binding("feed.position", IoDirection::Output, "PLC1", "W0"))
+            .unwrap();
+        let d = derive(&scene, None).unwrap();
+        assert!(codes(&d.report, Severity::Error).contains(&"unit"));
+    }
+
+    #[test]
+    fn a_declared_word_with_a_host_lands_on_that_hosts_table() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "carrier",
+                botrail_model::Geometry::Box {
+                    size: Vector3::new(0.1, 0.1, 0.05),
+                },
+                Isometry3::translation(0.0, 0.0, 0.525),
+            )
+            .unwrap();
+        let mut eye = zone("eye");
+        eye.ids = Some(vec![("carrier".into(), 4)]);
+        scene.upsert_sensor(eye).unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "run".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 1.0 })],
+        });
+        scene
+            .upsert_io_node(node("PLC1", IoNodeKind::Plc, &["run"], Vec::new()))
+            .unwrap();
+        scene.declare_io(IoDecl {
+            name: "eye.id".into(),
+            role: Some(DeclRole::Input),
+            kind: None,
+            safety: false,
+            pair: None,
+            note: None,
+            host: Some("PLC1".into()),
+        });
+        let d = derive(&scene, None).unwrap();
+        let id = d
+            .points
+            .iter()
+            .find(|p| p.id.aspect == Some(Aspect::Id))
+            .expect("the declared word");
+        assert_eq!(id.id.name, "eye");
+        assert_eq!(id.host.as_deref(), Some("PLC1"));
+        assert_eq!(id.kind, ChannelKind::Word);
+        assert_eq!(id.source, IoSource::Declared);
+        assert_eq!(natural_type(id), "INT");
+        assert_eq!(crate::plcopen::point_var(id), "eye_id");
+        assert!(!codes(&d.report, Severity::Error).contains(&"unknown_ref"));
+
+        // A host that is not a node, and a word the plant does not record.
+        scene.declare_io(IoDecl {
+            name: "eye.id".into(),
+            role: Some(DeclRole::Input),
+            kind: None,
+            safety: false,
+            pair: None,
+            note: None,
+            host: Some("PLC9".into()),
+        });
+        let d = derive(&scene, None).unwrap();
+        assert!(codes(&d.report, Severity::Error).contains(&"unknown_ref"));
+        scene.undeclare_io("eye.id").unwrap();
+        scene.declare_io(IoDecl {
+            name: "beam.encoder".into(),
+            role: Some(DeclRole::Input),
+            kind: None,
+            safety: false,
+            pair: None,
+            note: None,
+            host: Some("PLC1".into()),
+        });
+        let d = derive(&scene, None).unwrap();
+        let errors: Vec<String> = d
+            .report
+            .errors()
+            .iter()
+            .map(|f| f.message.clone())
+            .collect();
+        assert!(
+            errors.iter().any(|m| m.contains("does not record")),
+            "{errors:?}"
+        );
     }
 }

@@ -75,18 +75,18 @@ def test_plcopen_renders_the_pick_cell_as_one_sfc_program(tmp_path: Path) -> Non
     # The steps in order, the initial one marked, the cycle jump at the end.
     steps = [w for w in walk if w.startswith("step ")]
     assert steps == [
-        "step feed *", "step await_part", "step halt", "step grip", "step hold", "step judge",
-        "step place", "step release", "step to_chute", "step drop", "step return_",
+        "step feed *", "step await_part", "step halt", "step descend", "step grip", "step hold", "step judge",
+        "step place", "step release", "step to_reject", "step drop", "step return_1",
     ]
     assert walk[-1] == "jump feed"
     # Actions: coils, stub FB calls, signal writes; conditions: the FB's
     # done, the R_TRIG edge, the timer, the level test.
-    assert "action N conv_run := TRUE; simple_arm_motion(robot := 'simple_arm', name := 'to_pick', start := TRUE);" in walk
+    assert "action P1 conv_run := TRUE; simple_arm_motion(robot := 'simple_arm', name := 'to_pick', start := TRUE);" in walk
     assert "-> simple_arm_motion.done" in walk
     assert "action N part_at_pick_rise(CLK := part_at_pick);" in walk
     assert "-> part_at_pick_rise.Q" in walk
     assert "-> grip.T >= T#300ms" in walk
-    assert "action N vacuum := TRUE;" in walk
+    assert "action P1 vacuum := TRUE;" in walk
     # The branch: divergence, the two arm conditions (otherwise = NOT the
     # other), the convergence.
     i = walk.index("selectionDivergence")
@@ -129,11 +129,19 @@ def test_plcopen_uses_the_handshake_where_the_plc_drives_the_robot() -> None:
     scene.auto_assign_io()
     xml = scene.plcopen(name="two arm")
     pick = sfc_walk(xml, "pick")
-    assert "action N near_start" in pick and "action N far_start" in pick
-    assert "action N far_program := 1; (* far_go *)" in pick
-    assert "-> near_done AND far_done" in pick
+    # The handshake of a robot driven from another host: the entry action
+    # (P1) posts the command with the program word, the step's N action
+    # raises `start` once the robot reports ready, drops it once the robot
+    # reads busy, and the step completes on busy-then-done
+    # (design-virtual-commissioning.md VC2).
+    entry = [w for w in pick if w.startswith("action P1 ") and "near_cmd := TRUE;" in w]
+    assert entry and "far_cmd := TRUE;" in entry[0]
+    assert "far_program := 1; (* far_go *)" in entry[0]
+    assert any(w.startswith("action N ") and "IF near_cmd AND NOT near_start AND near_done THEN near_start := TRUE; near_cmd := FALSE; END_IF;" in w for w in pick)
+    assert any(w.startswith("action N ") and "IF near_start AND NOT near_done THEN near_start := FALSE; near_busy := TRUE; END_IF;" in w for w in pick)
+    assert "-> (near_busy AND near_done) AND (far_busy AND far_done)" in pick
     watch = sfc_walk(xml, "watch")
-    assert any(w.startswith("action N near_motion(robot := 'near', name := 'near_go'") for w in watch)
+    assert any(w.startswith("action P1 near_motion(robot := 'near', name := 'near_go'") for w in watch)
     assert "-> far_done" in watch
     belt = sfc_walk(xml, "belt")
     assert any("belt_run := TRUE;" in w and "(* magazine: feeder model, no I/O *)" in w for w in belt)
@@ -197,8 +205,8 @@ def test_trace_diff_matches_the_bake_and_names_every_deviation(tmp_path: Path) -
     d2 = tl.diff(sig, tolerance=0.05)
     assert not d2.ok
     rows = {s.name: s for s in d2.signals}
-    assert rows["part_at_pick"].missing == [(pytest.approx(5.55, abs=0.01), "rose")]
-    assert rows["part_at_pick"].extra == [(pytest.approx(5.85, abs=0.01), "rose")]
+    assert rows["part_at_pick"].missing == [(pytest.approx(5.13, abs=0.01), "rose")]
+    assert rows["part_at_pick"].extra == [(pytest.approx(5.43, abs=0.01), "rose")]
     assert [k for _, k in rows["vacuum"].missing] == ["rose", "fell"]
     assert [k for _, k in rows["conv"].extra] == ["rose", "fell"]
     codes = {f["code"] for f in d2.findings()}

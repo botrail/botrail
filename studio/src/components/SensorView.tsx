@@ -2,11 +2,16 @@ import { useMemo } from "react";
 import * as THREE from "three";
 
 import type { DeviceMsg, PoseMsg, SensorMsg } from "../protocol";
+import { isButton } from "../plant";
 import { playbackRig } from "../playbackRig";
 import { useStudioStore } from "../store";
+import { cursorEnter, cursorLeave } from "../three/cursor";
+import { sendPlant } from "../ws";
 
 const IDLE_COLOR = "#b8a24a";
 const ACTIVE_COLOR = "#e0503c";
+/** A push button the viewport presses while a plant session runs. */
+const BUTTON_COLOR = "#7fb4ff";
 
 /** Is `name`'s lane ON at `t` in the loaded timeline? Exported for the
  * camera views, which tint by their vision sensors' lanes. */
@@ -113,6 +118,7 @@ export function SensorView() {
   const overrideVehiclePoses = useStudioStore((s) => s.overrideVehiclePoses);
   const timeline = useStudioStore((s) => s.timeline);
   const playbackTime = useStudioStore((s) => s.playbackTime);
+  const plant = useStudioStore((s) => s.plant);
   const playingTimeline = timeline !== null;
 
   if (sensors.length === 0) return null;
@@ -124,6 +130,7 @@ export function SensorView() {
           <SensorShape
             sensor={sensor}
             active={playingTimeline && laneActiveAt(timeline, sensor.name, playbackTime)}
+            pressable={isButton(plant, sensor.name)}
           />
         );
         return mount ? (
@@ -155,8 +162,18 @@ export function SensorView() {
   );
 }
 
-function SensorShape({ sensor, active }: { sensor: SensorMsg; active: boolean }) {
-  const color = active ? ACTIVE_COLOR : IDLE_COLOR;
+function SensorShape({
+  sensor,
+  active,
+  pressable,
+}: {
+  sensor: SensorMsg;
+  active: boolean;
+  /** A panel button of a live plant session: a click presses it (its
+   * lane goes high for the session's hold time). */
+  pressable: boolean;
+}) {
+  const color = active ? ACTIVE_COLOR : pressable ? BUTTON_COLOR : IDLE_COLOR;
   // A vision sensor's geometry is its camera's frustum, which CameraView
   // already draws (and tints by this sensor's lane); nothing to add here.
   if (sensor.kind.kind === "vision") return null;
@@ -165,14 +182,30 @@ function SensorShape({ sensor, active }: { sensor: SensorMsg; active: boolean })
   if (sensor.kind.kind === "field") return null;
   if (sensor.kind.kind === "zone") {
     const { pose, size } = sensor.kind;
+    const press = pressable
+      ? {
+          onClick: (e: { stopPropagation: () => void }) => {
+            e.stopPropagation();
+            sendPlant({ command: "press", lane: sensor.name, hold_s: null });
+          },
+          onPointerOver: (e: { stopPropagation: () => void }) => {
+            e.stopPropagation();
+            cursorEnter();
+          },
+          onPointerOut: () => cursorLeave(),
+        }
+      : {};
+    // A button's zone is the cap's travel: a few millimetres deep, so the
+    // clickable face is drawn with a little more presence.
+    const opacity = active ? 0.3 : pressable ? 0.28 : 0.12;
     return (
       <group
         position={pose.position}
         quaternion={new THREE.Quaternion(...pose.quaternion)}
       >
-        <mesh>
+        <mesh {...press} scale={pressable ? [1.6, 1.6, 2.5] : [1, 1, 1]}>
           <boxGeometry args={size} />
-          <meshBasicMaterial color={color} transparent opacity={active ? 0.3 : 0.12} />
+          <meshBasicMaterial color={color} transparent opacity={opacity} />
         </mesh>
       </group>
     );

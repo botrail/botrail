@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "examples" / d)
                 for d in ("assembly", "basics", "export", "home", "legged", "machining", "multi_robot", "vehicles",
-                          "welding")]
+                          "welding", "commissioning/openplc_pick_cell")]
 
 import botrail as bt  # noqa: E402
 from demo import build_scene  # noqa: E402
@@ -410,10 +410,85 @@ def main() -> None:
             page.locator("select").last.select_option("beam_stuck")
             page.locator("button.plan-go").click()
             page.wait_for_selector(".timeline-diagnosis", timeout=60000)
-            page.evaluate("window.__CAM = {pos: [1.9, -1.5, 1.75], look: [0.15, 0.25, 0.6]}")
+            page.evaluate("window.__CAM = {pos: [1.6, -2.3, 2.1], look: [-0.25, 0.25, 0.55]}")
             time.sleep(1.5)
             page.screenshot(path=OUT / "io.png")
             print("wrote io.png")
+            server.stop()
+
+        # ---- 6b. the live plant: the OpenPLC demo's cell as the plant of
+        # PLC1, botrail scanning the PLC's program in loopback paced to the
+        # wall clock; the start button pressed, the beam forced low from the
+        # I/O table, the PLC's timer running out — the plant bar on the dock,
+        # the forced row, the fault lamp, the SFC token on the timeout arm.
+        if want("vc"):
+            import threading
+
+            import run_demo as openplc_demo
+
+            scene = openplc_demo.build()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            page.locator(".tab", has_text="Sequence").click()
+            time.sleep(2.0)
+            session = bt.vc.loopback(scene, ["pick"], host="PLC1", pace="realtime")
+            held = threading.Event()
+
+            def drive() -> None:
+                # The operator: start pressed half a second in, the run on
+                # past the timeout (the beam is forced from the browser
+                # meanwhile), then the plant held for the pictures — a
+                # software renderer takes its time, and a held plant is
+                # the same picture however long it takes. The loop keeps
+                # serving the studio while held; its ▶ run lets the plant
+                # go on to the end of the program.
+                session.run(for_=openplc_demo.PRESS_AT_S)
+                session.press("panel/cycle_start")
+                print(f"vc: start pressed at t = {session.t:.2f} s", flush=True)
+                session.run(for_=openplc_demo.TIMEOUT_S + 2.5)
+                session.pause()
+                print(f"vc: plant held at t = {session.t:.2f} s", flush=True)
+                held.set()
+                session.run()
+                session.finish()
+
+            thread = threading.Thread(target=drive, daemon=True)
+            thread.start()
+            page.wait_for_selector(".plant-bar", timeout=30000)
+            page.locator("button", has_text="I/O").click()
+            page.wait_for_selector(".io-force", timeout=30000)
+            # The hand on the wire: the beam forced low from the table. The
+            # row is found by its point cell — every channel select on the
+            # host lists the point's name as a taken channel, so a text
+            # match over the whole row hits the wrong one.
+            beam = page.locator("tr.io-row").filter(
+                has=page.locator("td.io-point", has_text="part_at_pick")
+            ).first
+            beam.locator("button[title='force the lane low']").click()
+            page.locator("tr.io-row.io-forced").filter(
+                has=page.locator("td.io-point", has_text="part_at_pick")
+            ).first.wait_for(timeout=10000)
+            page.evaluate("window.__CAM = {pos: [2.0, -2.1, 2.1], look: [-0.45, 0.25, 1.15]}")
+            # The PLC's timer runs out: the fault lamp is on, the arm returns,
+            # and the plant is held there.
+            if not held.wait(timeout=180):
+                raise RuntimeError(f"vc: the plant never reached its hold (t = {session.t:.2f} s)")
+            # The studio learns of the hold with the next status message; on
+            # a software renderer under load that can take a while.
+            page.locator(".plant-bar button", has_text="run").wait_for(timeout=120000)
+            time.sleep(1.0)
+            page.screenshot(path=OUT / "vc_live.png")
+            print("wrote vc_live.png")
+            # The chart of the held plant: the timeout arm entered, the pick
+            # arm dimmed, the token on the return home.
+            page.locator(".overlay-tab", has_text="SFC").click()
+            time.sleep(1.5)
+            page.screenshot(path=OUT / "vc_sfc.png")
+            print("wrote vc_sfc.png")
+            # Let the plant go from the studio, as an operator would.
+            page.locator(".plant-bar button", has_text="run").click()
+            thread.join(timeout=120)
             server.stop()
 
         # ---- 7. the topology: the weld line in its three placements —

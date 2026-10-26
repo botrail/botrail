@@ -3,61 +3,63 @@
 | | |
 |---|---|
 | Robots | simple_arm (6 DOF, cabinet UR) |
-| Cycle time | baseline: 11.75 s, ng_part: 10.97 s |
-| Min clearance | 0.175 m at 0.00 s (baseline) |
-| Footprint | 2.46 × 1.66 m (4.1 m²), height 1.80 m |
+| Cycle time | baseline: 11.35 s, ng_part: 12.22 s |
+| Min clearance | 0.000 m at 6.16 s (baseline) |
+| Footprint | 2.46 × 2.16 m (5.3 m²), height 1.80 m |
 | I/O | 4 points (2 DI, 2 DO), 0 unbound, 0 finding(s) |
-| BOM | 11 lines, 0 unidentified, cable_m 6, mass_kg 258 |
+| BOM | 15 lines, 0 unidentified, cable_m 6, mass_kg 258 |
 | Scenarios | 2/3 passed |
-| Deliverables | 12 files hashed |
+| Deliverables | 17 files hashed |
 
 ## Cycle `baseline`
 
-Programs: `pick`. Duration **11.75 s**.
+Programs: `pick`. Duration **11.35 s**.
 
 | robot | busy (s) | utilization |
 |---|---|---|
-| simple_arm | 9.38 | 80 % |
+| simple_arm | 7.08 | 62 % |
 
-Min clearance 0.175 m at 0.00 s.
+Min clearance 0.000 m at 6.16 s.
 
 Branches taken: pick/judge → arm 0.
 
 | step | start (s) | end (s) |
 |---|---|---|
-| feed | 0.00 | 3.49 |
-| await part | 3.49 | 5.55 |
-| halt | 5.55 | 5.55 |
-| grip | 5.55 | 5.85 |
-| hold | 5.85 | 5.85 |
-| judge | 5.85 | 5.85 |
-| place | 5.85 | 7.99 |
-| release | 7.99 | 7.99 |
-| return | 7.99 | 11.75 |
+| feed | 0.00 | 1.19 |
+| await part | 1.19 | 5.13 |
+| halt | 5.13 | 5.13 |
+| descend | 5.13 | 5.85 |
+| grip | 5.85 | 6.15 |
+| hold | 6.15 | 6.15 |
+| judge | 6.15 | 6.15 |
+| place | 6.15 | 9.09 |
+| release | 9.09 | 9.72 |
+| return | 9.72 | 11.35 |
 
 ## Cycle `ng_part` (scenario `ng_part`)
 
-Programs: `pick`. Duration **10.97 s**.
+Programs: `pick`. Duration **12.22 s**.
 
 | robot | busy (s) | utilization |
 |---|---|---|
-| simple_arm | 8.29 | 76 % |
+| simple_arm | 7.96 | 65 % |
 
-Min clearance 0.175 m at 0.00 s.
+Min clearance 0.000 m at 6.16 s.
 
 Branches taken: pick/judge → arm 1.
 
 | step | start (s) | end (s) |
 |---|---|---|
-| feed | 0.00 | 3.49 |
-| await part | 3.49 | 5.55 |
-| halt | 5.55 | 5.55 |
-| grip | 5.55 | 5.85 |
-| hold | 5.85 | 5.85 |
-| judge | 5.85 | 5.85 |
-| to chute | 5.85 | 6.69 |
-| drop | 6.69 | 6.99 |
-| return | 6.99 | 10.97 |
+| feed | 0.00 | 1.19 |
+| await part | 1.19 | 5.13 |
+| halt | 5.13 | 5.13 |
+| descend | 5.13 | 5.85 |
+| grip | 5.85 | 6.15 |
+| hold | 6.15 | 6.15 |
+| judge | 6.15 | 6.15 |
+| to reject | 6.15 | 9.52 |
+| drop | 9.52 | 10.70 |
+| return | 10.70 | 12.22 |
 
 ## I/O
 
@@ -77,13 +79,13 @@ Branches taken: pick/judge → arm 1.
 
 | scenario | result | cycle (s) |
 |---|---|---|
-| baseline | ok | 11.75 |
-| ng_part | ok | 10.97 |
+| baseline | ok | 11.35 |
+| ng_part | ok | 12.22 |
 | beam_stuck | **failed** — timed out after 30s waiting in step 1 (`await part`) — forced: part_at_pick=false |  |
 
 ## Bill of materials
 
-11 lines, 0 unidentified.
+15 lines, 0 unidentified.
 
 | category | qty |
 |---|---|
@@ -98,28 +100,36 @@ Branches taken: pick/judge → arm 1.
 | structure.door | 1 |
 | structure.fence | 7 |
 | structure.fence.post | 8 |
+| structure.pedestal | 1 |
+| structure.table | 2 |
+| tray | 1 |
 
 Totals: cable_m = 6, mass_kg = 258.
 
 
 ## Footprint
 
-x -1.23 … 1.23 m, y -0.63 … 1.03 m — 2.46 × 1.66 m, 4.08 m², tallest item 1.80 m.
+x -1.23 … 1.23 m, y -0.63 … 1.53 m — 2.46 × 2.16 m, 5.31 m², tallest item 1.80 m.
 
 
 ## Deliverables
 
 | file | bytes | sha256 |
 |---|---|---|
-| ../../docs/assets/deliverables/cell.botrail | 6600 | bce422b887d9d4a5927473249d7f11d1b301dc9767d2c2a1d1cf7a7b4c3623dd |
-| ../../docs/assets/deliverables/cell.py | 21199 | 0c1c698449f5213f29b7e8ca319bb864418b604b64e6fc934bf77d12758d2b71 |
-| ../../docs/assets/deliverables/cell_bom.csv | 1208 | 00ee01ac073385158d6881b43663d3bbb21199445c6138de7e2333f698b181d9 |
-| ../../docs/assets/deliverables/cell_bom.md | 1828 | 403cf7b6469b92022341d44a27996a31a999f828f4d0506c159304e2c995bd30 |
+| ../../docs/assets/deliverables/cell.botrail | 61800 | cae01c0e5207ac5ea2b61973208f7528f897206374711b38086140668fa3bb8c |
+| ../../docs/assets/deliverables/cell.py | 33380 | d4f2cd37c1f08fce4a17017ca10ff73cbeba5b4a8ca4cf74aba6507838faaa96 |
+| ../../docs/assets/deliverables/cell_bom.csv | 1427 | 1017a569718b5e53fd657e869c112f4baa24499616d471fd2ec78f61808f737d |
+| ../../docs/assets/deliverables/cell_bom.md | 2219 | 006d521078b714641ff392e267f698facc29b077c2bcce449026109819a51cd9 |
 | ../../docs/assets/deliverables/cell_io.csv | 572 | 368d863f9c1c7193a1b707b3d1bc495760f5b4de99e187e50ffad28fa5d9d47c |
 | ../../docs/assets/deliverables/cell_topology.mmd | 421 | a88549a0bb2f8ea31c57399127d4b6082016f4513b1cd58bb8bd6ff4618bd097 |
-| ../../docs/assets/deliverables/cell.plcopen.xml | 13834 | 1f120e1b7647852bf774e30f01fe28001e0c37b3f5077d4fcba38eaccda31e4c |
-| ../../docs/assets/deliverables/cell_interlocks.md | 1305 | 38251f69527bea4d4b6cb5953a63a365062f112bc35db0ec10128a64f07cfdfb |
-| ../../docs/assets/deliverables/cell_layout.svg | 7623 | 332e3eb1c6a4c633549c0c1d3a26e9eb1e5425fed8b6016b1132bb256a6468f4 |
-| ../../docs/assets/deliverables/cell_layout.dxf | 12810 | 8d45398712928abbd737885915590948b076fec60be98858d322ddd9f529621f |
-| ../../docs/assets/deliverables/cell_cycle.usda | 826009 | 6f232e08b1bfa98d2eeeb2f7d17619a38ad95af908cf9673def8f2c721d494c5 |
-| ../../docs/assets/deliverables/pick_cell.script | 1209 | 1bd8db12bf396c71610900df19f1e8bf2d1dc6b22bf30811d2fcca7e5c4264d2 |
+| ../../docs/assets/deliverables/cell.plcopen.xml | 14887 | 82f007a0c3c7447ba8120b0881667a138e58b327bd301148d5a5a3782af63282 |
+| ../../docs/assets/deliverables/cell_interlocks.md | 1577 | 265301c3fd9f2d8e8ac86409ccb09058527a61f82c6c20125fdaf61aa8e1e0a4 |
+| ../../docs/assets/deliverables/cell_layout.svg | 12781 | 5334e287fcf1d2a6886cc9b396b232ae17ad724195e1595a450bff7deb6f4d35 |
+| ../../docs/assets/deliverables/cell_layout.dxf | 23178 | 5a84117234d5acc2aa39d445085ad80d79da291fe60a10eda6e479b191d6f802 |
+| ../../docs/assets/deliverables/cell_cycle.usda | 1842276 | cd60893297a0bfb9d9c0a5ff8ba5f8e54866fe7162b19fd983140c46e489c3a2 |
+| ../../docs/assets/deliverables/cell_cycle_assets/appearances/source_0/tray.usda | 152782 | 74cee1025277247ab14a5346cd4ac06c25a2160d348d1ba92339ea816f39fef1 |
+| ../../docs/assets/deliverables/cell_cycle_assets/appearances/source_1/panel.usda | 24834 | 931b3abc41b25c875500c9d63708f3d15de02a33cbdad63a1300181920af53c7 |
+| ../../docs/assets/deliverables/cell_cycle_assets/appearances/source_2/handle.usda | 171389 | c149c6d34736fe889230a17e1e53f70a50c470b96cd4dd65da5658de9961861b |
+| ../../docs/assets/deliverables/cell_cycle_assets/appearances/source_3/tote.usda | 136637 | f71e1f939762b771e23303bfe61b8116e2c1b6d57d5a45891201f0fd517164b4 |
+| ../../docs/assets/deliverables/cell_cycle_assets/meshes/lifting_eye_lf.usdc | 9726 | 1b8d932957ba1ec0ab8f2a922ff12e94785bc02edaed53f2e380b82e7d2bbab7 |
+| ../../docs/assets/deliverables/pick_cell.script | 1877 | 82656f8024cc84975ae0a31ea9ceb484e9017ddb4a83e6d97eaf6ea0dfb9be47 |

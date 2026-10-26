@@ -36,10 +36,12 @@ spec between the arm's controller and the CNC, the PLCopen file with the
 machine's program on a resource of its own, the **interlock table** —
 every output of both programs against the condition that admits it (the
 start only with both doors confirmed shut and no E-stop) — and the cell
-report with the machine's section and the **FAT rows**: three faults a
+report with the machine's section and the **FAT sheet**: three faults a
 control designer would test for (the door's closed switch stuck, an open
-wire on the CLAMP button, the E-stop in), each a scenario whose run must
-refuse the cycle rather than let it through.
+wire on the CLAMP button, the E-stop in), each a test case whose run must
+refuse the cycle rather than let it through — and the same faults as
+scenarios, so the report's matrix shows them too — plus the rows derived
+from the machine's interlock table (`bt.vc.interlock_tests`).
 
 Run with:  python examples/machining/machine_tending_demo.py [out.usdc]
                  [--catalog] [--studio]
@@ -271,12 +273,37 @@ def build(*, catalog: bool = False) -> tuple[bt.Scene, bt.tending.Handshake]:
     teach(scene, vmc)
     program(scene, vmc, hs)
 
-    # -- the FAT rows: each fault a scenario, each run must refuse the cycle
-    # rather than let it through -----------------------------------------------
+    # -- the FAT faults as scenarios too: the report's matrix shows each one
+    # stall the cycle at its guard (the test cases are `fat_cases`) ------------
     scene.add_scenario("door_switch_stuck", faults=[bt.io.stuck(hs.signal("door_closed"), False)])
     scene.add_scenario("clamp_button_open", faults=[bt.io.open("vmc/panel/clamp")])
     scene.add_scenario("estop_pressed", faults=[bt.io.stuck(hs.signal("estop"), True)])
     return scene, hs
+
+
+def fat_cases(scene: bt.Scene, hs=None) -> list:
+    """The FAT rows as test cases (`bt.vc.TestCase`): each fault goes in
+    before the first scan, and the machine's program must stall at the
+    guard that reads the broken input — the cycle refused, never let
+    through. The same three faults `build` authors as scenarios; the sheet
+    says *where* the refusal happens, the matrix only that it does. `hs`
+    is the handshake `build` returns (the lanes are the machine's when it
+    is not given)."""
+    vc = bt.vc
+    door = hs.signal("door_closed") if hs is not None else "vmc/side_door/closed"
+    estop = hs.signal("estop") if hs is not None else "vmc/panel/estop"
+    program = hs.program if hs is not None else "vmc"
+    return [
+        vc.TestCase("door switch stuck", faults=[bt.io.stuck(door, False)],
+                    expect=[vc.stalls(program, at="wait_start")],
+                    notes="the closed switch that never makes: no start"),
+        vc.TestCase("clamp button open", faults=[bt.io.open("vmc/panel/clamp")],
+                    expect=[vc.stalls(program, at="wait_clamp")],
+                    notes="an open wire on CLAMP: the vise never closes, so no start"),
+        vc.TestCase("E-stop pressed", faults=[bt.io.stuck(estop, True)],
+                    expect=[vc.stalls(program, at="wait_start")],
+                    notes="the E-stop in: no start"),
+    ]
 
 
 # ------------------------------------------------------------------ teach
@@ -565,11 +592,11 @@ def bake(*, catalog: bool = False):
 
 
 # ------------------------------------------------------------- hand-over
-def deliver(scene: bt.Scene, tl: bt.SequenceTimeline, out: Path):
+def deliver(scene: bt.Scene, tl: bt.SequenceTimeline, out: Path, hs=None):
     """The document set, written into `out` from the one source, and the
     report that hashes it: the drawing, the bill, the I/O and the
-    handshake, the two programs as PLCopen, the interlock table, and the
-    FAT scenarios' verdicts. Returns `(report, runs)`."""
+    handshake, the two programs as PLCopen, the interlock table, the FAT
+    sheet and the scenario matrix. Returns `(report, runs)`."""
     out.mkdir(parents=True, exist_ok=True)
     files: list[Path] = []
 
@@ -594,8 +621,17 @@ def deliver(scene: bt.Scene, tl: bt.SequenceTimeline, out: Path):
     # The scenario matrix: the baseline and the three faults. A refused
     # cycle never completes, so the faults run to the cap and stall.
     runs = scene.simulate_scenarios(["tend", "vmc"], max_duration=tl.duration + 20.0)
+    # The FAT sheet: the nominal cycle, the three faults as test cases, and
+    # a row per interlock-table row of the machine's program — every case
+    # a loopback run of the same cell.
+    program = hs.program if hs is not None else "vmc"
+    cases = [bt.vc.TestCase("nominal cycle", expect=[bt.vc.cycle_within(tl.duration + 1.0)]),
+             *fat_cases(scene, hs), *bt.vc.interlock_tests(scene, program)]
+    fat = bt.vc.run_fat(scene, cases, ["tend", program], title="machine tending FAT")
+    write("machine_tending_fat.md", fat.save)
+    write("machine_tending_fat.csv", fat.save)
     report = scene.cell_report({"baseline": tl}, scenarios=runs, deliverables=files,
-                               title="machine tending")
+                               title="machine tending", sections=[fat.section()])
     report.save(out / "machine_tending_report.md")
     report.save(out / "machine_tending_report.json")
     return report, runs
@@ -626,11 +662,14 @@ def main() -> None:
     print(f"wrote {args.out}" + (f" ({warnings})" if warnings else ""))
     print(scene.bom().to_markdown())
     out_dir = Path(args.out).with_name("machine_tending_deliverables")
-    report, runs = deliver(scene, tl, out_dir)
+    report, runs = deliver(scene, tl, out_dir, hs)
     print(scene.interlocks([hs.program]).to_markdown())
     for name in ("baseline", *scene.scenario_names):
         verdict = runs.errors.get(name)
         print(f"  scenario {name:<20} {'ok' if verdict is None else 'refused — ' + verdict}")
+    fat = next(s for s in report.sections if s["title"] == "machine tending FAT")["json"]
+    for row in fat["cases"]:
+        print(f"  FAT {row['name']:<40} {row['verdict']:<5} {row['detail'] or '; '.join(c['detail'] for c in row['checks'])}")
     print(f"wrote the document set to {out_dir}/ ({len(report.deliverables)} files hashed in the report)")
     if args.studio:
         # The scenario matrix was the last thing baked; the studio should

@@ -1,0 +1,15 @@
+# OpenPLC v3 as the controller of the feed line (design-virtual-commissioning.md VC6).
+#
+#   docker compose up -d                 # the PLC: web UI on http://127.0.0.1:8080 (openplc / openplc)
+#   python run_demo.py                   # botrail: writes the ST, loads it, runs the plant, diffs
+#
+# The same container as openplc_pick_cell/compose.yaml (one PLC at a time):
+# it shares the host's network, so its Modbus master dials botrail's server
+# on 127.0.0.1:5020 — loopback both ways, nothing opened to the outside.
+services:
+  openplc:
+    image: fdamador/openplc:latest
+    container_name: botrail-openplc
+    network_mode: host
+    cap_add:
+      - SYS_NICE

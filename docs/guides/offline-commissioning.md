@@ -1,8 +1,14 @@
 # Offline commissioning: PLCopen XML and the trace diff
 
-botrail never talks to a running controller — an online loop would cost
-the determinism the rest of the toolchain stands on. What it does instead
-is the two halves of commissioning that can be done *offline*, on files:
+Three things meet at commissioning. The **bake** is the one trajectory the
+cell follows if the controller behaves as designed — deterministic, and
+unchanged by anything on this page. An **emulation** is the trajectory a
+controller actually drove the cell through. The **diff** is where the two
+part, by signal name and by second. This page is the two halves that work
+*offline*, on files; the plant side of an emulation — the cell driven
+through a controller's exchange, with the inputs recorded and replayed
+deterministically — is [`bt.vc`](../reference/api/vc.md) (loopback and
+replay today; the network links to a PLC under test follow):
 
 1. **Hand the logic over.** [`Scene.plcopen`][botrail.Scene.plcopen] writes
    the sequences as **PLCopen XML** (IEC 61131-10, TC6 v2.01) — SFC
@@ -107,16 +113,19 @@ tolerance 0.050 s, alignment shift +0.000 s, largest matched offset 0.000 s.
 
 | signal | matched | missing | extra | max offset (s) |
 |---|---|---|---|---|
+| spec_ok | 0 | 0 | 0 | 0.000 |
 | vacuum | 0 | 2 | 0 | 0.000 |
 | part_at_pick | 1 | 1 | 1 | 0.000 |
 | conv | 2 | 0 | 2 | 0.000 |
 
 Findings:
 
-- vacuum: the bake rose at 5.550 s, the trace never did
-- part_at_pick: the bake rose at 5.550 s, the trace never did
-- part_at_pick: the trace rose at 5.850 s, the bake never did
+- vacuum: the bake rose at 5.850 s, the trace never did
+- vacuum: the bake fell at 9.090 s, the trace never did
+- part_at_pick: the bake rose at 5.130 s, the trace never did
+- part_at_pick: the trace rose at 5.430 s, the bake never did
 - conv: the trace rose at 9.000 s, the bake never did
+- conv: the trace fell at 9.100 s, the bake never did
 ```
 
 [`bt.trace.from_timeline(tl)`][botrail.trace.from_timeline] is the perfect
@@ -128,9 +137,11 @@ out next to the program (`bt.trace.to_csv`).
 Any log with a timestamp, a name and a level per row will do: a PLC's
 trend export, a data logger on the I/O, URSim / the robot controller's own
 recording. The repository does not include a logger — the controllers'
-tools are better at that — and it does not include an online link on
-purpose. The comparison is the deliverable: it says, by name and by
-second, where the machine and the design parted.
+tools are better at that — and it does not yet include a network link (the
+plant side of the loop, [`bt.vc`](../reference/api/vc.md), records and
+replays a controller's inputs; the Modbus / OPC UA links come next). The
+comparison is the deliverable: it says, by name and by second, where the
+machine and the design parted.
 
 A machine tool logs in **MTConnect** rather than as a PLC trend — the
 agent's `/sample` response is an `MTConnectStreams` document of events in

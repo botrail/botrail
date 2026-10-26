@@ -12,6 +12,7 @@ import type { LidarMsg } from "./LidarMsg";
 import type { MotionMsg } from "./MotionMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
+import type { PlantStatusMsg } from "./PlantStatusMsg";
 import type { RobotStateMsg } from "./RobotStateMsg";
 import type { RouteCandidate } from "./RouteCandidate";
 import type { RouteMsg } from "./RouteMsg";
@@ -61,7 +62,7 @@ topology: TopologyMsg, } | { "type": "scan_result", ok: boolean, lidar: string, 
  * World-frame hit points, meters, rounded to 0.1 mm (display
  * data — the analysis-grade sweep stays in the Python API).
  */
-points: Array<[number, number, number]>, } | { "type": "grab", name: string, held: boolean, } | { "type": "bake_chunk", 
+points: Array<[number, number, number]>, } | { "type": "grab", name: string, held: boolean, } | { "type": "plant", status: PlantStatusMsg | null, } | { "type": "bake_chunk", 
 /**
  * The id the client started the stream under (`start_bake`'s
  * `stream`): a client that has moved on to a newer stream drops

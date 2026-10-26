@@ -119,6 +119,12 @@ pub struct HandshakeEnd {
     pub host: String,
     /// `node.channel [address]` when the point is bound.
     pub channel: Option<String>,
+    /// The binding's PLC tag — the vendor's signal name (`PROD_START`,
+    /// `$EXT_START`) when an interface template bound the point.
+    pub tag: Option<String>,
+    /// The binding's note — edge, polarity, pulse width, the vendor's
+    /// timing — printed with the line.
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,7 +164,8 @@ pub fn handshake_lines(
     // uplinked station.
     let end_of = |p: &IoPoint| {
         let host = p.host.clone().unwrap_or_else(|| "(unhosted)".to_string());
-        let channel = d.binding_of(p).map(|(_, n, c)| {
+        let bound = d.binding_of(p);
+        let channel = bound.map(|(_, n, c)| {
             let id = if n.name == host {
                 c.id.clone()
             } else {
@@ -169,7 +176,14 @@ pub fn handshake_lines(
                 None => id,
             }
         });
-        HandshakeEnd { host, channel }
+        let tag = bound.and_then(|(b, _, _)| b.tag.clone());
+        let note = bound.and_then(|(b, _, _)| b.note.clone());
+        HandshakeEnd {
+            host,
+            channel,
+            tag,
+            note,
+        }
     };
     let dedup = |mut v: Vec<StepRef>| {
         v.sort_by(|a, b| (&a.sequence, a.index).cmp(&(&b.sequence, b.index)));
@@ -249,6 +263,8 @@ pub fn handshake_lines(
                 vec![mirrors.first().map(|p| end_of(p)).unwrap_or(HandshakeEnd {
                     host: far_host.clone(),
                     channel: None,
+                    tag: None,
+                    note: None,
                 })],
             ),
             // done flows robot controller → driving host.
@@ -256,6 +272,8 @@ pub fn handshake_lines(
                 mirrors.first().map(|p| end_of(p)).unwrap_or(HandshakeEnd {
                     host: far_host.clone(),
                     channel: None,
+                    tag: None,
+                    note: None,
                 }),
                 vec![end_of(driving)],
             ),
@@ -300,6 +318,8 @@ pub fn handshake_lines(
         let device_end = HandshakeEnd {
             host: p.id.name.clone(),
             channel: None,
+            tag: None,
+            note: None,
         };
         let (from, to) = match p.id.direction {
             IoDirection::Output => (end_of(p), vec![device_end]),
@@ -396,11 +416,23 @@ fn fmt_events(events: &[(f64, String)]) -> String {
     format!("{} s", shown.join(", "))
 }
 
+/// `host · channel [address] \`TAG\` — note`: the vendor's name and its
+/// timing ride along when an interface template bound the point.
 fn fmt_end(e: &HandshakeEnd) -> String {
-    match &e.channel {
+    let mut s = match &e.channel {
         Some(c) => format!("{} · {c}", e.host),
         None => e.host.clone(),
+    };
+    if let Some(tag) = &e.tag {
+        s.push_str(&format!(" `{tag}`"));
     }
+    if let Some(note) = &e.note {
+        s.push_str(&format!(
+            " — {}",
+            note.replace('|', "\\|").replace('\n', " ")
+        ));
+    }
+    s
 }
 
 /// The specification as Markdown: a summary table, then one block per line.
@@ -720,6 +752,7 @@ mod tests {
             port: None,
             address: Some("%IX1.0".into()),
             electrical: None,
+            unit: None,
         }];
         scene.upsert_io_node(rio).unwrap();
         scene
@@ -822,6 +855,7 @@ mod tests {
                 zone_size: nalgebra::Vector3::new(1.0, 1.0, 1.0),
                 velocity: nalgebra::Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {

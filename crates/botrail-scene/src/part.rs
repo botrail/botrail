@@ -1444,6 +1444,7 @@ mod tests {
             channels: Vec::new(),
             place: None,
             model: Some("e-Series".into()),
+            monitor: false,
         }
     }
 
@@ -1660,6 +1661,7 @@ mod tests {
                     },
                     watch: SensorWatch::All,
                     mount: None,
+                    ids: None,
                 })
                 .unwrap();
         }
@@ -1705,6 +1707,7 @@ mod tests {
                 zone_size: Vector3::new(1.0, 1.0, 1.0),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         assert!(matches!(
@@ -1748,6 +1751,7 @@ mod tests {
                 zone_size: Vector3::new(1.0, 1.0, 1.0),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         for name in ["fence/0", "fence/1", "post"] {

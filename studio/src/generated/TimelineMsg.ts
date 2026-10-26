@@ -9,6 +9,7 @@ import type { RouteFindingMsg } from "./RouteFindingMsg";
 import type { SignalTrackMsg } from "./SignalTrackMsg";
 import type { StepSpanMsg } from "./StepSpanMsg";
 import type { VehicleTrackMsg } from "./VehicleTrackMsg";
+import type { WordTrackMsg } from "./WordTrackMsg";
 
 /**
  * A baked sequence rollout: each robot rides its own embedded trajectory
@@ -45,6 +46,10 @@ route_findings?: Array<RouteFindingMsg>,
  * Reference-frame track per vehicle that drove, on the same grid.
  */
 vehicles: Array<VehicleTrackMsg>, step_spans: Array<StepSpanMsg>, signals: Array<SignalTrackMsg>, 
+/**
+ * Word lanes (encoders, readers); absent from older files.
+ */
+words?: Array<WordTrackMsg>, 
 /**
  * Every selection divergence this bake resolved, in resolution order.
  */

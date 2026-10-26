@@ -11,6 +11,7 @@ use botrail_traj::JointTrajectory;
 use nalgebra::Isometry3;
 use thiserror::Error;
 
+use crate::grasp::GraspBinding;
 use crate::rl::PolicyDriver;
 use crate::seq::{
     vehicle_frame, Action, Condition, DeviceCommand, DeviceKind, SensorKind, SensorWatch, Sequence,
@@ -20,6 +21,9 @@ use crate::Scene;
 use botrail_collide::ObstacleCollider;
 use botrail_physics::PhysicsBackend;
 use nalgebra::Vector3;
+
+mod plant;
+pub use plant::{FaultAnchor, InputRecord};
 
 #[derive(Debug, Error)]
 pub enum SeqError {
@@ -498,6 +502,33 @@ impl BoolTrack {
     }
 }
 
+/// A numeric signal — a word — as a step function: `(time, value)`
+/// samples starting with `(0, initial)`, each holding until the next.
+/// Labelled like an exchange point, `name.aspect`: `feed.encoder` (an
+/// axis's or a belt's travel, REAL), `reader.id` (an identification
+/// reader's word, INT). `integer` says the lane is a count rather than a
+/// measurement; the same `f64` carries both exactly. A bool lane is a
+/// [`BoolTrack`]; the two are kept apart so everything that reads edges
+/// (the diff, the FAT, a force, a breakpoint) never meets a number.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordTrack {
+    pub name: String,
+    pub samples: Vec<(f64, f64)>,
+    pub kind: LaneKind,
+    pub integer: bool,
+}
+
+impl WordTrack {
+    pub fn value_at(&self, t: f64) -> f64 {
+        self.samples
+            .iter()
+            .take_while(|(at, _)| *at <= t + 1e-12)
+            .last()
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+    }
+}
+
 /// Piecewise world motion of one tracked object. Spans tile `[0, duration]`.
 #[derive(Debug, Clone)]
 pub enum TrackSpan {
@@ -900,6 +931,9 @@ pub struct SequenceTimeline {
     /// other vehicle-frame geometry) during playback.
     pub vehicles: Vec<ObjectTrack>,
     pub signals: Vec<BoolTrack>,
+    /// Word lanes — encoders, identification readers — sampled when they
+    /// change. Empty unless a device or sensor asked to be recorded.
+    pub words: Vec<WordTrack>,
     pub step_spans: Vec<StepSpan>,
     /// Every selection divergence this rollout resolved, in resolution
     /// order — the path the bake took. Script export replays these to
@@ -1292,7 +1326,306 @@ impl SequenceTimeline {
     }
 }
 
+/// `span` moved earlier by `by` seconds and cut to `[0, to]`: the piece of
+/// a track a clip keeps. `None` when nothing of it falls inside.
+fn clip_span(span: &TrackSpan, by: f64, to: f64) -> Option<TrackSpan> {
+    let (s0, s1) = span.range();
+    if s1 < by - 1e-9 || s0 > by + to + 1e-9 {
+        return None;
+    }
+    let shift = |t: f64| (t - by).min(to);
+    Some(match span {
+        TrackSpan::Wheel {
+            motion,
+            axis,
+            pivot,
+            angle,
+            rate,
+        } => TrackSpan::Wheel {
+            motion: Box::new(clip_span(motion, by, to)?),
+            axis: *axis,
+            pivot: *pivot,
+            angle: *angle,
+            rate: *rate,
+        },
+        // A pose that does not depend on when the span began starts at
+        // the clip's zero; a motion keeps its true origin (before zero
+        // when it was already under way) so its pose at zero is exact.
+        TrackSpan::Hold { t1, pose, .. } => TrackSpan::Hold {
+            t0: shift(s0).max(0.0),
+            t1: shift(*t1),
+            pose: *pose,
+        },
+        TrackSpan::Stowed { t1, pose, .. } => TrackSpan::Stowed {
+            t0: shift(s0).max(0.0),
+            t1: shift(*t1),
+            pose: *pose,
+        },
+        TrackSpan::Follow {
+            t1,
+            robot,
+            link,
+            offset,
+            ..
+        } => TrackSpan::Follow {
+            t0: shift(s0).max(0.0),
+            t1: shift(*t1),
+            robot: *robot,
+            link: *link,
+            offset: *offset,
+        },
+        TrackSpan::Linear {
+            t0,
+            t1,
+            from,
+            velocity,
+        } => TrackSpan::Linear {
+            t0: t0 - by,
+            t1: shift(*t1),
+            from: *from,
+            velocity: *velocity,
+        },
+        TrackSpan::Pivot {
+            t0,
+            t1,
+            from,
+            center,
+            omega,
+        } => TrackSpan::Pivot {
+            t0: t0 - by,
+            t1: shift(*t1),
+            from: *from,
+            center: *center,
+            omega: *omega,
+        },
+        TrackSpan::Sampled { t0, dt, poses } => {
+            let first = (((by - t0) / dt).floor().max(0.0) as usize).min(poses.len() - 1);
+            let last = (((by + to - t0) / dt).ceil().max(0.0) as usize).min(poses.len() - 1);
+            TrackSpan::Sampled {
+                t0: t0 + first as f64 * dt - by,
+                dt: *dt,
+                poses: poses[first..=last.max(first)].to_vec(),
+            }
+        }
+    })
+}
+
+/// The spans of `spans` a clip over `[by, by + to]` keeps, re-timed.
+fn clip_spans(spans: &[TrackSpan], by: f64, to: f64) -> Vec<TrackSpan> {
+    spans.iter().filter_map(|s| clip_span(s, by, to)).collect()
+}
+
+/// `spans` cut to `[by, by + to]` and moved earlier by `by`; those wholly
+/// outside are dropped.
+fn clip_step_spans(spans: &[StepSpan], by: f64, to: f64) -> Vec<StepSpan> {
+    spans
+        .iter()
+        .filter(|s| s.end >= by - 1e-9 && s.start <= by + to + 1e-9)
+        .map(|s| StepSpan {
+            start: (s.start - by).max(0.0),
+            end: (s.end - by).min(to),
+            ..s.clone()
+        })
+        .collect()
+}
+
 impl SequenceTimeline {
+    /// The stretch `[from, to]` of this timeline as a timeline of its own,
+    /// starting at zero: what a recording of a live run keeps when the
+    /// operator stops it (`bt.vc.Session.record`), and what cuts one cycle
+    /// out of a long run. Every sampled track is cut and re-timed (an
+    /// exact sample is placed at both ends), the step bands, moves, lanes,
+    /// decisions, grasps and touches are kept where they overlap the
+    /// stretch, and a lane's level at `from` becomes its initial level.
+    /// The sparse planned paths and the gait tracks (footfalls, sway,
+    /// locomotion) are left out — a clip is for watching and exporting,
+    /// not for script export. `to` beyond the end clips to the end.
+    pub fn clip(&self, from: f64, to: f64) -> SequenceTimeline {
+        let from = from.clamp(0.0, self.duration);
+        let to = to.clamp(from, self.duration);
+        let duration = to - from;
+        let robots = self
+            .robots
+            .iter()
+            .map(|track| {
+                let traj = &track.trajectory;
+                let mut times = Vec::new();
+                let mut positions = Vec::new();
+                let mut velocities = Vec::new();
+                if !traj.times.is_empty() {
+                    // The velocity the sampler reads at a cut: a central
+                    // difference of the curve itself.
+                    let rate_at = |t: f64| -> Vec<f64> {
+                        let h = 1e-3;
+                        let a = traj.sample((t - h).max(traj.times[0]));
+                        let b = traj.sample((t + h).min(traj.duration()));
+                        a.iter().zip(&b).map(|(x, y)| (y - x) / (2.0 * h)).collect()
+                    };
+                    times.push(0.0);
+                    positions.push(traj.sample(from));
+                    velocities.push(rate_at(from));
+                    for (k, &t) in traj.times.iter().enumerate() {
+                        if t > from + 1e-9 && t < to - 1e-9 {
+                            times.push(t - from);
+                            positions.push(traj.positions[k].clone());
+                            velocities.push(traj.velocities[k].clone());
+                        }
+                    }
+                    if duration > 1e-9 {
+                        times.push(duration);
+                        positions.push(traj.sample(to));
+                        velocities.push(rate_at(to));
+                    }
+                }
+                RobotTrack {
+                    name: track.name.clone(),
+                    trajectory: JointTrajectory {
+                        times,
+                        positions,
+                        velocities,
+                    },
+                    moves: clip_step_spans(&track.moves, from, duration),
+                    planned: Vec::new(),
+                    base: track
+                        .base
+                        .as_ref()
+                        .map(|spans| clip_spans(spans, from, duration)),
+                    footfalls: Vec::new(),
+                    sway: Vec::new(),
+                    pitch: Vec::new(),
+                    rise: Vec::new(),
+                    locomotion: Vec::new(),
+                }
+            })
+            .collect();
+        let objects = |tracks: &[ObjectTrack]| -> Vec<ObjectTrack> {
+            tracks
+                .iter()
+                .map(|t| ObjectTrack {
+                    name: t.name.clone(),
+                    spans: clip_spans(&t.spans, from, duration),
+                })
+                .filter(|t| !t.spans.is_empty())
+                .collect()
+        };
+        let signals = self
+            .signals
+            .iter()
+            .map(|lane| {
+                let mut edges = vec![(0.0, lane.value_at(from))];
+                for &(t, v) in &lane.edges {
+                    if t > from + 1e-12 && t <= to + 1e-12 && edges.last().is_some_and(|e| e.1 != v)
+                    {
+                        edges.push((t - from, v));
+                    }
+                }
+                BoolTrack {
+                    name: lane.name.clone(),
+                    edges,
+                    kind: lane.kind,
+                }
+            })
+            .collect();
+        let words = self
+            .words
+            .iter()
+            .map(|lane| {
+                let mut samples = vec![(0.0, lane.value_at(from))];
+                for &(t, v) in &lane.samples {
+                    if t > from + 1e-12
+                        && t <= to + 1e-12
+                        && samples.last().is_some_and(|s| s.1 != v)
+                    {
+                        samples.push((t - from, v));
+                    }
+                }
+                WordTrack {
+                    name: lane.name.clone(),
+                    samples,
+                    kind: lane.kind,
+                    integer: lane.integer,
+                }
+            })
+            .collect();
+        let within = |start: f64, end: f64| end >= from - 1e-9 && start <= to + 1e-9;
+        SequenceTimeline {
+            duration,
+            sequences: self.sequences.clone(),
+            scenario: self.scenario.clone(),
+            physics: self.physics.clone(),
+            physics_scope: self.physics_scope,
+            robots,
+            objects: objects(&self.objects),
+            vehicles: objects(&self.vehicles),
+            signals,
+            words,
+            step_spans: clip_step_spans(&self.step_spans, from, duration),
+            branches: self.branches.clone(),
+            grasps: self
+                .grasps
+                .iter()
+                .filter(|g| within(g.start, g.end))
+                .map(|g| GraspHold {
+                    start: (g.start - from).max(0.0),
+                    end: (g.end - from).min(duration),
+                    ..g.clone()
+                })
+                .collect(),
+            contacts: self
+                .contacts
+                .iter()
+                .filter(|c| within(c.start, c.end))
+                .map(|c| ContactSpan {
+                    start: (c.start - from).max(0.0),
+                    end: (c.end - from).min(duration),
+                    ..c.clone()
+                })
+                .collect(),
+            cloths: self
+                .cloths
+                .iter()
+                .map(|c| {
+                    let keep: Vec<usize> = (0..c.times.len())
+                        .filter(|&k| c.times[k] >= from - 1e-9 && c.times[k] <= to + 1e-9)
+                        .collect();
+                    let mut cut = c.clone();
+                    cut.times = keep.iter().map(|&k| c.times[k] - from).collect();
+                    cut.points = keep.iter().map(|&k| c.points[k].clone()).collect();
+                    cut.held = keep
+                        .iter()
+                        .filter_map(|&k| c.held.get(k).cloned())
+                        .collect();
+                    cut
+                })
+                .collect(),
+            ropes: self
+                .ropes
+                .iter()
+                .map(|r| {
+                    let keep: Vec<usize> = (0..r.times.len())
+                        .filter(|&k| r.times[k] >= from - 1e-9 && r.times[k] <= to + 1e-9)
+                        .collect();
+                    let mut cut = r.clone();
+                    cut.times = keep.iter().map(|&k| r.times[k] - from).collect();
+                    cut.points = keep.iter().map(|&k| r.points[k].clone()).collect();
+                    cut.held = keep
+                        .iter()
+                        .filter_map(|&k| r.held.get(k).cloned())
+                        .collect();
+                    for c in &mut cut.connectors {
+                        let poses = std::mem::take(&mut c.poses);
+                        c.poses = keep.iter().filter_map(|&k| poses.get(k).cloned()).collect();
+                    }
+                    if let Some(twist) = &r.twist_deg {
+                        cut.twist_deg =
+                            Some(keep.iter().filter_map(|&k| twist.get(k).copied()).collect());
+                    }
+                    cut
+                })
+                .collect(),
+        }
+    }
+
     /// When the object came to rest for good: the start of its trailing
     /// `Hold` span, or `None` while it was still in motion (or attached,
     /// or never tracked) at the horn. On a physics bake this is the
@@ -1497,6 +1830,7 @@ impl Scene {
         Ok(LiveRollout {
             inner,
             controls: Vec::new(),
+            pending_start: false,
         })
     }
 
@@ -1669,6 +2003,7 @@ impl Scene {
         Ok(LiveRollout {
             inner,
             controls: Vec::new(),
+            pending_start: false,
         })
     }
 
@@ -2434,6 +2769,9 @@ pub struct LiveRollout {
     /// its state (a TcpDelta's setpoint) — `set_control`. A cell tiled
     /// into one scene binds one control per copy of its robot.
     controls: Vec<(crate::rl::Control, crate::rl::ControlState)>,
+    /// A plant rollout opens with the world built but the first scan
+    /// still to run: the first `tick` is that scan, at `t = 0`.
+    pending_start: bool,
 }
 
 /// A read-only window on a rollout between ticks — what a controller, a
@@ -2543,6 +2881,16 @@ impl<'a> WorldView<'a> {
             .iter()
             .find(|s| s.name == name)
             .and_then(|s| s.edges.last().map(|e| e.1))
+    }
+
+    /// A word lane's current value (`feed.encoder`, `reader.id`), or
+    /// `None` for a name that is not one.
+    pub fn word(&self, name: &str) -> Option<f64> {
+        self.0
+            .words
+            .iter()
+            .find(|w| w.name == name)
+            .and_then(|w| w.samples.last().map(|s| s.1))
     }
 
     /// The body pairs in contact after the last tick (physics bakes
@@ -2729,6 +3077,10 @@ impl LiveRollout {
     /// `max_duration`, a robot-vs-robot collision, a failed plan) come
     /// back as they would from the batch bake.
     pub fn tick(&mut self) -> Result<(), SeqError> {
+        if self.pending_start {
+            self.pending_start = false;
+            return self.inner.start_scans();
+        }
         self.inner.tick()
     }
 
@@ -2955,6 +3307,11 @@ impl LiveRollout {
     /// Current level of a signal lane.
     pub fn signal(&self, name: &str) -> Option<bool> {
         self.view().signal(name)
+    }
+
+    /// A word lane's current value, or `None` for a name that is not one.
+    pub fn word(&self, name: &str) -> Option<f64> {
+        self.view().word(name)
     }
 
     /// The body pairs in contact after the last tick.
@@ -3327,6 +3684,8 @@ struct Rollout {
     robots: Vec<RobotRuntime>,
     sensors: Vec<SensorRuntime>,
     devices: Vec<DeviceRuntime>,
+    /// Word lanes (encoders, identification readers), sampled on change.
+    words: Vec<WordTrack>,
     /// Lanes the scenario's faults pin, `(lane, value)` in scenario
     /// order. A pinned lane is seeded with its value and every later
     /// write to it — sensor geometry, a program's `set` — is dropped.
@@ -3398,6 +3757,11 @@ struct Rollout {
     signals: Vec<BoolTrack>,
     step_spans: Vec<StepSpan>,
     branches: Vec<BranchTaken>,
+
+    /// Plant mode (design-virtual-commissioning.md VC1): the programs on
+    /// external hosts are not scanned, their controllers write and read
+    /// through an exchange instead. `None` is the ordinary bake.
+    plant: Option<plant::PlantState>,
 }
 
 /// A motion currently driving joints, sampled per scan tick.
@@ -3599,6 +3963,9 @@ struct SensorRuntime {
     /// otherwise trip or blind (design/design-lidar.md §9). Candidates
     /// and shadow casters alike.
     exclude: Vec<usize>,
+    /// An identification reader: `(obstacle, id)` pairs and the word
+    /// lane the smallest seen id (or 0) is written to.
+    ids: Option<(Vec<(String, i64)>, usize)>,
 }
 
 enum SensorAnchor {
@@ -3618,6 +3985,159 @@ fn inside_zone(pose: &Isometry3<f64>, half: &Vector3<f64>, point: &Isometry3<f64
     local.x.abs() <= half.x && local.y.abs() <= half.y && local.z.abs() <= half.z
 }
 
+/// A body's extent along a direction: the interval an axis-aligned box
+/// projects onto the unit vector `n`.
+fn project_aabb(aabb: &([f64; 3], [f64; 3]), n: &Vector3<f64>) -> (f64, f64) {
+    let (lo, hi) = aabb;
+    let centre = Vector3::new(
+        (lo[0] + hi[0]) / 2.0,
+        (lo[1] + hi[1]) / 2.0,
+        (lo[2] + hi[2]) / 2.0,
+    );
+    let half = Vector3::new(
+        (hi[0] - lo[0]) / 2.0,
+        (hi[1] - lo[1]) / 2.0,
+        (hi[2] - lo[2]) / 2.0,
+    );
+    let c = centre.dot(n);
+    let r = half.x * n.x.abs() + half.y * n.y.abs() + half.z * n.z.abs();
+    (c - r, c + r)
+}
+
+/// Two unit vectors completing `u` to a right-handed frame.
+fn perpendicular(u: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
+    let seed = if u.x.abs() < 0.9 {
+        Vector3::x()
+    } else {
+        Vector3::y()
+    };
+    let v = u.cross(&seed).normalize();
+    let w = u.cross(&v);
+    (v, w)
+}
+
+/// A stopper or a settled part as the queue sees it: its back face along
+/// the belt and its extents across it.
+type Wall = (f64, (f64, f64), (f64, f64));
+
+/// A body in a belt's path, measured along the belt: `front` / `back`
+/// along the travel direction, and its extents across it (`v`, `w`) — a
+/// stopper blocks a part only where the two actually overlap, so a blade
+/// lowered under the belt or a plate beside it lets the part by.
+struct BeltBody {
+    index: usize,
+    front: f64,
+    back: f64,
+    v: (f64, f64),
+    w: (f64, f64),
+}
+
+/// The stoppers a belt's riders can run into: enabled obstacles flagged
+/// [`crate::Obstacle::stopper`] whose bounds meet the zone box. Empty for
+/// the usual belt, which then advects exactly as it always has.
+fn conveyor_blockers(
+    world: &Scene,
+    zone_pose: &Isometry3<f64>,
+    zone_half: &Vector3<f64>,
+) -> Vec<([f64; 3], [f64; 3])> {
+    if !world.obstacles().iter().any(|o| o.stopper && o.enabled) {
+        return Vec::new();
+    }
+    // The zone's own world bounds.
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            for sz in [-1.0, 1.0] {
+                let corner = zone_pose.transform_point(&nalgebra::Point3::new(
+                    sx * zone_half.x,
+                    sy * zone_half.y,
+                    sz * zone_half.z,
+                ));
+                for k in 0..3 {
+                    lo[k] = lo[k].min(corner[k]);
+                    hi[k] = hi[k].max(corner[k]);
+                }
+            }
+        }
+    }
+    world
+        .obstacles()
+        .iter()
+        .zip(world.obstacle_colliders.iter())
+        .filter(|(o, _)| o.stopper && o.enabled)
+        .filter_map(|(o, collider)| collider.aabb(&o.pose))
+        .filter(|(blo, bhi)| (0..3).all(|k| blo[k] <= hi[k] + 1e-9 && bhi[k] >= lo[k] - 1e-9))
+        .collect()
+}
+
+/// How far each rider runs this tick with stoppers in the belt's path:
+/// `None` the full step (the free ride, bit for bit), `Some(d)` a shorter
+/// run that ends against a stopper or against the part ahead — parts are
+/// taken front to back so a queue packs up deterministically. A rider
+/// without bounds (no collider parts) rides free.
+fn queue_against(
+    world: &Scene,
+    riders: &[usize],
+    blockers: &[([f64; 3], [f64; 3])],
+    tick_velocity: &Vector3<f64>,
+    dt: f64,
+) -> Vec<(usize, Option<f64>)> {
+    let step = tick_velocity.norm() * dt;
+    let u = tick_velocity / tick_velocity.norm();
+    let (v, w) = perpendicular(&u);
+    let measure = |aabb: &([f64; 3], [f64; 3])| {
+        let (back, front) = project_aabb(aabb, &u);
+        (back, front, project_aabb(aabb, &v), project_aabb(aabb, &w))
+    };
+    let overlaps = |a: (f64, f64), b: (f64, f64)| a.0 < b.1 - 1e-9 && b.0 < a.1 - 1e-9;
+    let walls: Vec<Wall> = blockers
+        .iter()
+        .map(|b| {
+            let (back, _, bv, bw) = measure(b);
+            (back, bv, bw)
+        })
+        .collect();
+    let mut out = Vec::with_capacity(riders.len());
+    let mut bodies: Vec<BeltBody> = Vec::new();
+    for &i in riders {
+        let obstacle = &world.obstacles()[i];
+        match world.obstacle_colliders[i].aabb(&obstacle.pose) {
+            Some(aabb) => {
+                let (back, front, bv, bw) = measure(&aabb);
+                bodies.push(BeltBody {
+                    index: i,
+                    front,
+                    back,
+                    v: bv,
+                    w: bw,
+                });
+            }
+            None => out.push((i, None)),
+        }
+    }
+    bodies.sort_by(|a, b| {
+        b.front
+            .partial_cmp(&a.front)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.index.cmp(&b.index))
+    });
+    // The parts already placed this tick, by the back face they ended at.
+    let mut settled: Vec<Wall> = Vec::new();
+    for body in bodies {
+        let mut limit = step;
+        for (back, bv, bw) in walls.iter().chain(settled.iter()) {
+            if overlaps(body.v, *bv) && overlaps(body.w, *bw) && *back >= body.front - 1e-9 {
+                limit = limit.min(back - body.front);
+            }
+        }
+        let limit = limit.max(0.0);
+        out.push((body.index, (limit < step).then_some(limit)));
+        settled.push((body.back + limit, body.v, body.w));
+    }
+    out
+}
+
 enum DeviceRuntime {
     Conveyor {
         name: String,
@@ -3635,6 +4155,10 @@ enum DeviceRuntime {
         /// physics zone drives the very same motion, partial advance
         /// ticks included. Written every tick by the device advance.
         surface: Option<Vector3<f64>>,
+        /// The encoder's word lane, when the belt records one, and the
+        /// metres its surface has run since t = 0.
+        encoder: Option<usize>,
+        travel: f64,
     },
     Axis {
         name: String,
@@ -3647,6 +4171,8 @@ enum DeviceRuntime {
         /// Named stops: `(name, position, lane)` — the lane is ON while
         /// the axis stands within [`STOP_TOL`] of the stop.
         stops: Vec<(String, f64, usize)>,
+        /// The position-feedback word lane, when the axis records one.
+        encoder: Option<usize>,
     },
     Source {
         name: String,
@@ -4316,6 +4842,9 @@ impl Rollout {
                 kind: LaneKind::Signal,
             })
             .collect();
+        // Word lanes: an identification reader's id, a device's encoder —
+        // only where asked for (a sample per tick while moving adds up).
+        let mut words: Vec<WordTrack> = Vec::new();
         let sensors: Vec<SensorRuntime> = world
             .sensors()
             .iter()
@@ -4465,6 +4994,16 @@ impl Rollout {
                         .collect(),
                     _ => Vec::new(),
                 };
+                let ids = sensor.ids.as_ref().map(|ids| {
+                    let word = words.len();
+                    words.push(WordTrack {
+                        name: format!("{}.id", sensor.name),
+                        samples: vec![(0.0, 0.0)],
+                        kind: LaneKind::Sensor,
+                        integer: true,
+                    });
+                    (ids.clone(), word)
+                });
                 SensorRuntime {
                     collider,
                     pose,
@@ -4474,6 +5013,7 @@ impl Rollout {
                     lane,
                     occlusion,
                     exclude,
+                    ids,
                 }
             })
             .collect();
@@ -4482,12 +5022,27 @@ impl Rollout {
             .iter()
             .map(|device| {
                 let lane = signals.len();
+                // A device's encoder word, where it records one: the
+                // axis's position, the belt's travel.
+                let mut encoder_lane = |on: bool, initial: f64| {
+                    on.then(|| {
+                        let word = words.len();
+                        words.push(WordTrack {
+                            name: format!("{}.encoder", device.name),
+                            samples: vec![(0.0, initial)],
+                            kind: LaneKind::Sensor,
+                            integer: false,
+                        });
+                        word
+                    })
+                };
                 match &device.kind {
                     DeviceKind::Conveyor {
                         zone_pose,
                         zone_size,
                         velocity,
                         running,
+                        encoder,
                     } => {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
@@ -4503,6 +5058,8 @@ impl Rollout {
                             remaining: None,
                             lane,
                             surface: None,
+                            encoder: encoder_lane(*encoder, 0.0),
+                            travel: 0.0,
                         }
                     }
                     DeviceKind::LinearAxis {
@@ -4511,8 +5068,10 @@ impl Rollout {
                         speed,
                         position,
                         stops,
+                        encoder,
                         ..
                     } => {
+                        let encoder = encoder_lane(*encoder, *position);
                         signals.push(BoolTrack {
                             name: device.name.clone(),
                             edges: vec![(0.0, false)],
@@ -4541,6 +5100,7 @@ impl Rollout {
                             target: *position,
                             lane,
                             stops,
+                            encoder,
                         }
                     }
                     DeviceKind::Source {
@@ -4884,7 +5444,10 @@ impl Rollout {
                     step: 0,
                     entered_at: 0.0,
                     move_ends: Vec::new(),
-                    open_span: 0,
+                    // No span yet: `enter_step` opens the first. A program an
+                    // external controller runs never opens one, and must not
+                    // be read as owning span 0.
+                    open_span: usize::MAX,
                     prev_signals: Vec::new(),
                 })
                 .collect(),
@@ -4894,6 +5457,7 @@ impl Rollout {
             robots,
             sensors,
             devices,
+            words,
             forced,
             moving: Vec::new(),
             crouching: Vec::new(),
@@ -4929,6 +5493,7 @@ impl Rollout {
             signals,
             step_spans: Vec::new(),
             branches: Vec::new(),
+            plant: None,
         }
     }
 
@@ -5019,6 +5584,15 @@ impl Rollout {
     /// the first scan of every program. After this the world stands at
     /// `t = 0` with every program in its first step.
     fn start(&mut self) -> Result<(), SeqError> {
+        self.start_world()?;
+        self.start_scans()
+    }
+
+    /// The world half of the opening: the physics world and the startup
+    /// sensor read, before any program has scanned. A plant rollout stops
+    /// here until its first tick, so the controller sees the sensors as
+    /// they stand at `t = 0` before it writes anything.
+    fn start_world(&mut self) -> Result<(), SeqError> {
         self.init_physics()?;
         self.update_sensors();
         // Seed every program's edge memory from the evaluated startup
@@ -5028,20 +5602,32 @@ impl Rollout {
         for p in 0..self.programs.len() {
             self.close_scan(p);
         }
-        // First scan: every program enters its first step (actions fire in
-        // declaration order), then every program chains through whatever
-        // is instantaneously ready — so a signal set by program 1's first
-        // step is already visible to program 2's first transition.
+        Ok(())
+    }
+
+    /// The first scan: every program enters its first step (actions fire
+    /// in declaration order), then every program chains through whatever
+    /// is instantaneously ready — so a signal set by program 1's first
+    /// step is already visible to program 2's first transition. A program
+    /// on an external controller takes its controller's writes at its
+    /// slot instead.
+    fn start_scans(&mut self) -> Result<(), SeqError> {
         for p in 0..self.programs.len() {
             self.current = p;
+            if self.plant_skips_scan(p) {
+                self.plant_apply_pending(p)?;
+                continue;
+            }
             self.enter_step()?;
         }
         for p in 0..self.programs.len() {
             self.current = p;
-            self.advance_through_ready_steps()?;
+            if !self.plant_skips_scan(p) {
+                self.advance_through_ready_steps()?;
+            }
             self.close_scan(p);
         }
-        Ok(())
+        self.plant_end_scan()
     }
 
     /// One PLC scan: outputs advance the world through this tick, then
@@ -5056,8 +5642,10 @@ impl Rollout {
         if self.t > self.options.max_duration && self.settle_from.is_none() {
             return Err(self.timeout());
         }
+        self.plant_begin_tick();
         self.scan_policies()?;
         self.advance_world()?;
+        self.grasp_follow_tick()?;
         if self.settle_from.is_some() {
             self.rest_since = if self.world_at_rest() {
                 Some(self.rest_since.unwrap_or(self.t))
@@ -5082,11 +5670,20 @@ impl Rollout {
             });
         }
         self.update_sensors();
+        self.plant_after_sensors()?;
         for p in 0..self.programs.len() {
             self.current = p;
+            if self.plant_skips_scan(p) {
+                // An external controller's program: its writes land here,
+                // at its slot in the scan order.
+                self.plant_apply_pending(p)?;
+                self.close_scan(p);
+                continue;
+            }
             self.advance_through_ready_steps()?;
             self.close_scan(p);
         }
+        self.plant_end_scan()?;
         if self.settle_from.is_none()
             && !self.programs.is_empty()
             && self.programs.iter().all(Program::finished)
@@ -6192,6 +6789,7 @@ impl Rollout {
                 zone_size,
                 velocity,
                 running,
+                encoder: false,
             } = &device.kind
             {
                 desc.zones.push(botrail_physics::SurfaceVelocityZone {
@@ -7050,6 +7648,18 @@ impl Rollout {
         // (source device index, object) pairs a sink caught this tick.
         let mut returned: Vec<(usize, String)> = Vec::new();
         let mut lane_updates: Vec<(usize, bool)> = Vec::new();
+        let mut word_updates: Vec<(usize, f64)> = Vec::new();
+        // Objects a device drives — an axis's load, a lift's car — are
+        // never belt riders, whatever zone their origin falls in.
+        let driven: Vec<String> = self
+            .devices
+            .iter()
+            .flat_map(|d| match d {
+                DeviceRuntime::Axis { objects, .. } => objects.clone(),
+                DeviceRuntime::Lift { car, .. } => car.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
         // Per travelling vehicle: its exact sub-tick motion pieces, applied
         // to the body after this loop (span recording needs `&mut self`).
         let mut vehicle_moves: Vec<VehicleMove> = Vec::new();
@@ -7070,6 +7680,8 @@ impl Rollout {
                     remaining,
                     lane,
                     surface,
+                    encoder,
+                    travel,
                     ..
                 } => {
                     let speed = velocity.norm();
@@ -7106,25 +7718,61 @@ impl Rollout {
                     let Some(tick_velocity) = tick_velocity else {
                         continue;
                     };
-                    for obstacle in self.world.obstacles() {
-                        if attached.iter().any(|a| a == &obstacle.name) {
-                            continue;
-                        }
-                        // A physics-dynamic part is the engine's: the belt
-                        // reaches it through contact (P2), never advection.
-                        if self.dynamic_names.iter().any(|d| d == &obstacle.name) {
-                            continue;
-                        }
-                        let local = zone_pose.inverse().transform_point(&nalgebra::Point3::from(
-                            obstacle.pose.translation.vector,
-                        ));
-                        if local.x.abs() <= zone_half.x
-                            && local.y.abs() <= zone_half.y
-                            && local.z.abs() <= zone_half.z
-                        {
+                    // The belt's encoder counts what the surface ran,
+                    // whether or not a part rode it.
+                    if let Some(word) = *encoder {
+                        *travel += tick_velocity.norm() * dt;
+                        word_updates.push((word, *travel));
+                    }
+                    // The riders: unattached, engine-free parts whose
+                    // origin is in the zone — never a stopper, nor an
+                    // object a device drives (a blade raised into the zone).
+                    let riders: Vec<usize> = self
+                        .world
+                        .obstacles()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, obstacle)| {
+                            !obstacle.stopper
+                                && !attached.iter().any(|a| a == &obstacle.name)
+                                // A physics-dynamic part is the engine's: the
+                                // belt reaches it through contact (P2), never
+                                // advection.
+                                && !self.dynamic_names.iter().any(|d| d == &obstacle.name)
+                                && !driven.iter().any(|d| d == &obstacle.name)
+                                && inside_zone(zone_pose, zone_half, &obstacle.pose)
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    let blockers = conveyor_blockers(&self.world, zone_pose, zone_half);
+                    if blockers.is_empty() {
+                        for i in riders {
+                            let obstacle = &self.world.obstacles()[i];
                             let mut pose = obstacle.pose;
                             pose.translation.vector += tick_velocity * dt;
                             moved.push((obstacle.name.clone(), pose, tick_velocity));
+                        }
+                    } else {
+                        // Accumulation: front to back, each part runs the
+                        // belt's step or as far as the stopper / the part
+                        // ahead lets it, deterministically.
+                        for (i, run) in
+                            queue_against(&self.world, &riders, &blockers, &tick_velocity, dt)
+                        {
+                            let obstacle = &self.world.obstacles()[i];
+                            let mut pose = obstacle.pose;
+                            match run {
+                                None => {
+                                    pose.translation.vector += tick_velocity * dt;
+                                    moved.push((obstacle.name.clone(), pose, tick_velocity));
+                                }
+                                Some(part) if part > 0.0 => {
+                                    let u = tick_velocity / tick_velocity.norm();
+                                    pose.translation.vector += u * part;
+                                    moved.push((obstacle.name.clone(), pose, u * (part / dt)));
+                                }
+                                Some(_) => {}
+                            }
                         }
                     }
                 }
@@ -7136,6 +7784,7 @@ impl Rollout {
                     position,
                     target,
                     stops,
+                    encoder,
                     ..
                 } => {
                     let remaining = *target - *position;
@@ -7144,6 +7793,9 @@ impl Rollout {
                     }
                     let step = remaining.abs().min(*speed * dt) * remaining.signum();
                     *position += step;
+                    if let Some(word) = *encoder {
+                        word_updates.push((word, *position));
+                    }
                     for (_, at, lane) in stops.iter() {
                         lane_updates.push((*lane, (*position - at).abs() <= STOP_TOL));
                     }
@@ -7405,6 +8057,9 @@ impl Rollout {
         }
         for (lane, value) in lane_updates {
             self.set_lane(lane, t, value);
+        }
+        for (lane, value) in word_updates {
+            self.set_word(lane, t, value);
         }
         for (name, pose, velocity) in &moved {
             let rest = self
@@ -8821,6 +9476,7 @@ impl Rollout {
         let link_poses = needs_links.then(|| self.world.all_link_poses());
         let t = self.t;
         let mut edges = Vec::new();
+        let mut words = Vec::new();
         for sensor in &self.sensors {
             // An anchored sensor's geometry is authored in its anchor's
             // frame, so its world pose is re-resolved every tick — that is
@@ -8840,6 +9496,9 @@ impl Rollout {
                     .unwrap_or(sensor.pose),
             };
             let mut value = false;
+            // An identification reader keeps looking after the first hit:
+            // it reports the smallest id it sees.
+            let mut seen_id: Option<i64> = None;
             let watch_objects: Option<&[String]> = match &sensor.watch {
                 SensorWatch::Objects(names) => Some(names),
                 SensorWatch::AllObjects | SensorWatch::All => None,
@@ -8872,9 +9531,17 @@ impl Rollout {
                             continue;
                         }
                         value = true;
-                        break;
+                        let Some((ids, _)) = &sensor.ids else {
+                            break;
+                        };
+                        if let Some((_, id)) = ids.iter().find(|(n, _)| n == &obstacle.name) {
+                            seen_id = Some(seen_id.map_or(*id, |best: i64| best.min(*id)));
+                        }
                     }
                 }
+            }
+            if let Some((_, word)) = &sensor.ids {
+                words.push((*word, seen_id.unwrap_or(0) as f64));
             }
             if !value {
                 if let (Some(poses), SensorWatch::Groups(_)) = (&link_poses, &sensor.watch) {
@@ -8913,6 +9580,9 @@ impl Rollout {
         }
         for (lane, value) in edges {
             self.set_lane(lane, t, value);
+        }
+        for (lane, value) in words {
+            self.set_word(lane, t, value);
         }
     }
 
@@ -8974,6 +9644,127 @@ impl Rollout {
         }
     }
 
+    /// Records a sample on a word lane when the value changes; a second
+    /// write in the same instant replaces the first.
+    fn set_word(&mut self, lane: usize, t: f64, value: f64) {
+        let track = &mut self.words[lane];
+        match track.samples.last_mut() {
+            Some((at, v)) if (*at - t).abs() < 1e-12 => *v = value,
+            Some((_, v)) if *v == value => {}
+            _ => track.samples.push((t, value)),
+        }
+    }
+
+    /// The grasp bound to `lane`'s signal follows its level: high takes,
+    /// low releases (design-virtual-commissioning.md VC2 record). Called on
+    /// every edge the lane takes — a program's `set`, a controller's coil
+    /// write, a force — so the plant behaves the same whoever wrote it.
+    fn grasp_follow(&mut self, lane: usize) -> Result<(), SeqError> {
+        let name = self.signals[lane].name.clone();
+        let Some(binding) = self.world.grasp_binding(&name).cloned() else {
+            return Ok(());
+        };
+        if self.lane_value(lane) {
+            self.grasp_take(&binding)
+        } else {
+            self.grasp_release(&binding)
+        }
+    }
+
+    /// Whether the binding's anchor holds something: a kinematic attachment
+    /// or an open friction hold.
+    fn grasp_holding(&self, binding: &GraspBinding) -> bool {
+        self.world
+            .attachments()
+            .iter()
+            .any(|a| a.robot == binding.robot && a.link == binding.link)
+            || self
+                .friction_holds
+                .iter()
+                .any(|h| h.robot == binding.robot && h.link == binding.link && h.end.is_nan())
+    }
+
+    /// Takes the binding's target when the anchor is free and a candidate
+    /// stands within reach: the very attach an authored step would fire,
+    /// with the robot synced to its commanded configuration first. Nothing
+    /// in reach is nothing taken — the coil is energised over an empty
+    /// station, which the diff then shows as a part that never moved.
+    fn grasp_take(&mut self, binding: &GraspBinding) -> Result<(), SeqError> {
+        if self.grasp_holding(binding) {
+            return Ok(());
+        }
+        let r = binding.robot;
+        let (step, step_name) = (self.cur_step(), self.cur_step_name());
+        self.world
+            .set_joint_positions_for(r, self.robots[r].q.clone())
+            .map_err(|e| SeqError::Action {
+                step,
+                name: step_name,
+                message: e.to_string(),
+            })?;
+        let Some((object, _distance)) = self.world.grasp_target(binding) else {
+            return Ok(());
+        };
+        let robot = self.world.robots()[r].name.clone();
+        let link = self.world.robots()[r].model.links[binding.link]
+            .name
+            .clone();
+        self.fire(&Action::Attach {
+            robot: Some(robot),
+            object,
+            link: Some(link),
+            touch_links: binding.touch_links.clone(),
+            group: binding.group.clone(),
+        })
+    }
+
+    /// Releases whatever the binding's anchor holds.
+    fn grasp_release(&mut self, binding: &GraspBinding) -> Result<(), SeqError> {
+        let mut objects: Vec<String> = self
+            .world
+            .attachments()
+            .iter()
+            .filter(|a| a.robot == binding.robot && a.link == binding.link)
+            .map(|a| a.object.clone())
+            .collect();
+        objects.extend(
+            self.friction_holds
+                .iter()
+                .filter(|h| h.robot == binding.robot && h.link == binding.link && h.end.is_nan())
+                .map(|h| h.object.clone()),
+        );
+        for object in objects {
+            self.fire(&Action::Detach { object })?;
+        }
+        Ok(())
+    }
+
+    /// A grasp with a reach is a level, not an edge: every tick its coil is
+    /// high and its anchor empty, a part that came within reach is taken
+    /// — a cup energised on the way down takes the part when it touches.
+    /// Runs after the world advanced, before the sensors read it.
+    fn grasp_follow_tick(&mut self) -> Result<(), SeqError> {
+        if self.world.grasp_bindings().is_empty() {
+            return Ok(());
+        }
+        let bindings: Vec<GraspBinding> = self
+            .world
+            .grasp_bindings()
+            .iter()
+            .filter(|b| b.reach_m.is_some())
+            .cloned()
+            .collect();
+        for binding in bindings {
+            let high = self
+                .lane_index(&binding.signal)
+                .is_some_and(|l| self.lane_value(l));
+            if high && !self.grasp_holding(&binding) {
+                self.grasp_take(&binding)?;
+            }
+        }
+        Ok(())
+    }
+
     fn lane_index(&self, name: &str) -> Option<usize> {
         self.signals.iter().position(|s| s.name == name)
     }
@@ -9031,10 +9822,16 @@ impl Rollout {
                 });
             }
             self.exit_step();
+            let cycles = self.plant_cycles();
             let p = &mut self.programs[self.current];
             p.step = target;
             if p.finished() {
-                return Ok(());
+                if !cycles {
+                    return Ok(());
+                }
+                // A cycling plant: the PLCopen `jumpStep` — the program
+                // starts over in this very scan.
+                p.step = 0;
             }
             chain += 1;
             if chain > self.options.immediate_chain_limit {
@@ -9060,7 +9857,13 @@ impl Rollout {
             Condition::RobotDone { robot } => self
                 .world
                 .robot_index(robot)
-                .map(|r| self.robots[r].active.is_empty() && !self.robots[r].crouching())
+                .map(|r| {
+                    // A streamed robot's idle is its controller's word (the
+                    // mirror drive never ends on its own).
+                    self.plant_stream_idle(r).unwrap_or_else(|| {
+                        self.robots[r].active.is_empty() && !self.robots[r].crouching()
+                    })
+                })
                 .unwrap_or(true),
             Condition::GroupDone { robot, group } => match self.world.robot_index(robot) {
                 Some(r) => match self.world.robots()[r].model.group_index(group) {
@@ -9137,8 +9940,13 @@ impl Rollout {
             group: None,
         });
         let step = self.programs[self.current].step;
+        let loopback = self.plant_loopback_program(self.current);
         for action in self.programs[self.current].flat[step].actions.clone() {
-            self.fire(&action)?;
+            if loopback {
+                self.fire_through_exchange(&action)?;
+            } else {
+                self.fire(&action)?;
+            }
         }
         Ok(())
     }
@@ -9964,7 +10772,11 @@ impl Rollout {
                 let lane = self
                     .lane_index(signal)
                     .ok_or_else(|| err(format!("unknown signal `{signal}`")))?;
+                let before = self.lane_value(lane);
                 self.set_lane(lane, t, *value);
+                if self.lane_value(lane) != before {
+                    self.grasp_follow(lane)?;
+                }
             }
             Action::Device { device, command } => {
                 // A walk starts from the stance: a crouched rider is stood
@@ -10559,6 +11371,7 @@ impl Rollout {
             objects,
             vehicles,
             signals: self.signals.clone(),
+            words: self.words.clone(),
             // A program still in a step has that step's span open: in a
             // snapshot it runs to the clock (a finished bake has none).
             step_spans: {
@@ -13194,6 +14007,7 @@ pub(crate) mod tests {
                 },
                 watch: SensorWatch::AllObjects,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.define_signal("flag", false);
@@ -13320,9 +14134,11 @@ pub(crate) mod tests {
                     port: Some(0),
                     address: None,
                     electrical: None,
+                    unit: None,
                 }],
                 place: None,
                 model: None,
+                monitor: false,
             })
             .unwrap();
         wired
@@ -13801,6 +14617,317 @@ pub(crate) mod tests {
         assert!((tl.duration - 0.3).abs() < 0.011);
     }
 
+    /// A grasp bound to a coil does what the authored attach / detach did,
+    /// span for span: the coil's edges stand in for the two actions
+    /// (design-virtual-commissioning.md VC2 record).
+    #[test]
+    fn coil_grasp_matches_the_authored_attach() {
+        fn cell() -> Scene {
+            let mut scene = sample_scene();
+            scene
+                .add_obstacle(
+                    "box",
+                    Geometry::Box {
+                        size: Vector3::new(0.04, 0.04, 0.04),
+                    },
+                    nalgebra::Isometry3::from_parts(
+                        Translation3::new(0.1, 0.0, 0.5),
+                        UnitQuaternion::identity(),
+                    ),
+                )
+                .unwrap();
+            joint_motion(&mut scene, "go", 0.8);
+            scene
+        }
+        let mut by_action = cell();
+        by_action.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![
+                step(
+                    "grasp",
+                    vec![Action::Attach {
+                        robot: None,
+                        object: "box".into(),
+                        link: None,
+                        touch_links: None,
+                        group: None,
+                    }],
+                    Condition::Immediately,
+                ),
+                step(
+                    "move",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "drop",
+                    vec![Action::Detach {
+                        object: "box".into(),
+                    }],
+                    Condition::Immediately,
+                ),
+                step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
+            ],
+        });
+        let reference = by_action
+            .simulate_sequence("pick", &RolloutOptions::default())
+            .unwrap();
+
+        let mut by_coil = cell();
+        by_coil.define_signal("vacuum", false);
+        by_coil
+            .bind_grasp(
+                "vacuum",
+                0,
+                None,
+                None,
+                Some(&["box".to_string()]),
+                None,
+                None,
+            )
+            .unwrap();
+        let set = |value: bool| Action::Set {
+            signal: "vacuum".into(),
+            value,
+        };
+        by_coil.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![
+                step("grasp", vec![set(true)], Condition::Immediately),
+                step(
+                    "move",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step("drop", vec![set(false)], Condition::Immediately),
+                step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
+            ],
+        });
+        let tl = by_coil
+            .simulate_sequence("pick", &RolloutOptions::default())
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", tl.objects),
+            format!("{:?}", reference.objects)
+        );
+        assert_eq!(tl.duration, reference.duration);
+        // The coil itself is on the record: up at the grasp, down at the drop
+        // (the first entry is the lane's initial level).
+        let vacuum = tl.signals.iter().find(|s| s.name == "vacuum").unwrap();
+        let levels: Vec<bool> = vacuum.edges.iter().map(|(_, v)| *v).collect();
+        assert_eq!(levels, vec![false, true, false], "{:?}", vacuum.edges);
+    }
+
+    /// A one-axis slider: link `b` rides `a` along +x.
+    fn slider_scene() -> Scene {
+        let urdf = r#"
+        <robot name="s">
+          <link name="a">
+            <visual><geometry><box size="0.1 0.1 0.1"/></geometry></visual>
+          </link>
+          <link name="b">
+            <visual><geometry><box size="0.1 0.1 0.1"/></geometry></visual>
+          </link>
+          <joint name="j" type="prismatic">
+            <parent link="a"/><child link="b"/>
+            <origin xyz="0 0 0.5"/>
+            <axis xyz="1 0 0"/>
+            <limit lower="0" upper="1" effort="1" velocity="1"/>
+          </joint>
+        </robot>"#;
+        Scene::new(Arc::new(
+            botrail_model::RobotModel::from_urdf_str(urdf).unwrap(),
+        ))
+    }
+
+    /// With a reach the coil is a level: energised over nothing it takes
+    /// nothing, and the part is taken the tick the tool's face comes within
+    /// reach of it on the way in — then rides back out.
+    #[test]
+    fn coil_grasp_with_a_reach_takes_the_part_when_the_tool_arrives() {
+        let mut scene = slider_scene();
+        // The box's near face stands 0.40 m from the tool's face at rest; the
+        // approach stops 1 cm short of it (touching would be a collision).
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                nalgebra::Isometry3::from_parts(
+                    Translation3::new(0.47, 0.0, 0.5),
+                    UnitQuaternion::identity(),
+                ),
+            )
+            .unwrap();
+        joint_motion(&mut scene, "approach", 0.39);
+        joint_motion(&mut scene, "retract", 0.0);
+        scene.define_signal("vacuum", false);
+        scene
+            .bind_grasp("vacuum", 0, None, None, None, Some(0.02), None)
+            .unwrap();
+        let set = |value: bool| Action::Set {
+            signal: "vacuum".into(),
+            value,
+        };
+        scene.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![
+                step("on", vec![set(true)], Condition::Immediately),
+                step(
+                    "approach",
+                    vec![Action::StartMotion {
+                        motion: "approach".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step(
+                    "retract",
+                    vec![Action::StartMotion {
+                        motion: "retract".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step("off", vec![set(false)], Condition::Immediately),
+                step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("pick", &RolloutOptions::default())
+            .unwrap();
+        let track = &tl.objects[0];
+        let approach = tl.step_spans.iter().find(|s| s.name == "approach").unwrap();
+        let [TrackSpan::Hold { t1: rest_until, .. }, TrackSpan::Follow { t0, t1, .. }, TrackSpan::Hold { pose, .. }] =
+            track.spans.as_slice()
+        else {
+            panic!("expected rest → follow → rest, got {track:?}");
+        };
+        assert!(
+            *t0 > approach.start && *t0 < approach.end,
+            "taken at {t0}, approach ran {}..{}",
+            approach.start,
+            approach.end
+        );
+        assert_eq!(rest_until, t0);
+        // Released by the coil's fall, well after the retract brought it back.
+        assert!(*t1 > approach.end);
+        let x = pose.translation.x;
+        assert!(x > 0.05 && x < 0.1, "the box rode back to x = {x}");
+    }
+
+    #[test]
+    fn an_authored_attach_on_a_coil_bound_tool_is_refused() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                nalgebra::Isometry3::from_parts(
+                    Translation3::new(0.1, 0.0, 0.5),
+                    UnitQuaternion::identity(),
+                ),
+            )
+            .unwrap();
+        scene.define_signal("vacuum", false);
+        scene
+            .bind_grasp(
+                "vacuum",
+                0,
+                None,
+                None,
+                Some(&["box".to_string()]),
+                None,
+                None,
+            )
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "pick".into(),
+            steps: vec![step(
+                "grasp",
+                vec![Action::Attach {
+                    robot: None,
+                    object: "box".into(),
+                    link: None,
+                    touch_links: None,
+                    group: None,
+                }],
+                Condition::Immediately,
+            )],
+        });
+        let err = scene
+            .simulate_sequence("pick", &RolloutOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bind_grasp"), "{err}");
+    }
+
+    #[test]
+    fn bind_grasp_refuses_what_it_cannot_follow() {
+        let mut scene = sample_scene();
+        scene
+            .add_obstacle(
+                "box",
+                Geometry::Box {
+                    size: Vector3::new(0.04, 0.04, 0.04),
+                },
+                nalgebra::Isometry3::from_parts(
+                    Translation3::new(0.1, 0.0, 0.5),
+                    UnitQuaternion::identity(),
+                ),
+            )
+            .unwrap();
+        let named = ["box".to_string()];
+        assert!(matches!(
+            scene.bind_grasp("vacuum", 0, None, None, Some(&named), None, None),
+            Err(crate::SceneError::UnknownSignal(_))
+        ));
+        scene.define_signal("vacuum", false);
+        let err = scene
+            .bind_grasp("vacuum", 0, None, None, None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parts=") && err.contains("reach_m="), "{err}");
+        let err = scene
+            .bind_grasp(
+                "vacuum",
+                0,
+                None,
+                None,
+                Some(&["crate".to_string()]),
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`crate` names no obstacle"), "{err}");
+        scene
+            .bind_grasp("vacuum", 0, None, None, Some(&named), None, None)
+            .unwrap();
+        scene.define_signal("gripper", false);
+        let err = scene
+            .bind_grasp("gripper", 0, None, None, None, Some(0.01), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`vacuum` already takes the grasp"), "{err}");
+        // Re-declaring the signal replaces its binding; unbinding frees the
+        // anchor for another coil.
+        scene
+            .bind_grasp("vacuum", 0, None, None, None, Some(0.05), None)
+            .unwrap();
+        assert_eq!(scene.grasp_bindings().len(), 1);
+        assert_eq!(scene.grasp_binding("vacuum").unwrap().reach_m, Some(0.05));
+        scene.unbind_grasp("vacuum").unwrap();
+        scene
+            .bind_grasp("gripper", 0, None, None, None, Some(0.01), None)
+            .unwrap();
+    }
+
     #[test]
     fn attach_detach_object_tracks() {
         let mut scene = sample_scene();
@@ -14200,6 +15327,7 @@ mod device_tests {
                 zone_size: Vector3::new(2.0, 0.3, 0.3),
                 velocity: Vector3::new(0.4, 0.0, 0.0),
                 running: true,
+                encoder: false,
             },
         });
         scene.upsert_device(Device {
@@ -14337,6 +15465,7 @@ mod device_tests {
                 zone_size: Vector3::new(1.2, 0.3, 0.3),
                 velocity: Vector3::new(0.25, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene
@@ -14349,6 +15478,7 @@ mod device_tests {
                 },
                 watch: SensorWatch::AllObjects,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.upsert_sequence(Sequence {
@@ -14433,6 +15563,8 @@ mod device_tests {
                 position: 0.0,
                 range: (0.0, 0.4),
                 stops: Vec::new(),
+                coils: Vec::new(),
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -14504,6 +15636,8 @@ mod device_tests {
                 position: 0.0,
                 range: (0.0, 0.4),
                 stops: vec![("closed".into(), 0.0), ("open".into(), 0.3)],
+                coils: Vec::new(),
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -14599,6 +15733,8 @@ mod device_tests {
                 position: 0.0,
                 range: (0.0, 0.3),
                 stops: vec![("open".into(), 0.0), ("closed".into(), 0.3)],
+                coils: Vec::new(),
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -14646,6 +15782,7 @@ mod device_tests {
                 },
                 watch: SensorWatch::Robot,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.upsert_sequence(Sequence {
@@ -14678,6 +15815,7 @@ mod device_tests {
                 zone_size: Vector3::new(1.0, 1.0, 1.0),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: true,
+                encoder: false,
             },
         });
         // A source really has no in-position (a conveyor now does: a
@@ -14702,6 +15840,7 @@ mod device_tests {
                 },
                 watch: SensorWatch::AllObjects,
                 mount: None,
+                ids: None,
             })
             .unwrap();
         let check = |scene: &Scene, steps: Vec<Step>, needle: &str| {
@@ -14762,6 +15901,142 @@ mod device_tests {
             vec![step("x", vec![], Condition::Immediately)],
             "collides",
         );
+    }
+
+    /// Belt accumulation: parts stop short of a stopper across their path
+    /// and queue behind one another, front to back; the stopper itself
+    /// never rides; the belt's encoder counts the surface run regardless.
+    #[test]
+    fn conveyed_parts_queue_against_a_stopper_and_the_belt_counts_its_travel() {
+        let mut scene = sample_scene();
+        let cube = Geometry::Box {
+            size: Vector3::new(0.1, 0.1, 0.05),
+        };
+        scene
+            .add_obstacle("a", cube.clone(), iso(0.2, 0.0, 0.525))
+            .unwrap();
+        scene.add_obstacle("b", cube, iso(0.0, 0.0, 0.525)).unwrap();
+        scene
+            .add_obstacle(
+                "stop",
+                Geometry::Box {
+                    size: Vector3::new(0.02, 0.2, 0.06),
+                },
+                iso(1.0, 0.0, 0.53),
+            )
+            .unwrap();
+        scene.set_obstacle_stopper("stop", true).unwrap();
+        // A plate beside the belt, flagged too: not in the parts' path.
+        scene
+            .add_obstacle(
+                "aside",
+                Geometry::Box {
+                    size: Vector3::new(0.02, 0.1, 0.06),
+                },
+                iso(0.6, 0.3, 0.53),
+            )
+            .unwrap();
+        scene.set_obstacle_stopper("aside", true).unwrap();
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(1.0, 0.0, 0.55),
+                zone_size: Vector3::new(2.0, 0.6, 0.2),
+                velocity: Vector3::new(0.5, 0.0, 0.0),
+                running: true,
+                encoder: true,
+            },
+        });
+        scene.upsert_sequence(Sequence {
+            name: "run".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 3.0 })],
+        });
+        let tl = scene
+            .simulate_sequence("run", &RolloutOptions::default())
+            .unwrap();
+        let x = |name: &str, t: f64| {
+            let track = tl.objects.iter().find(|o| o.name == name).unwrap();
+            SequenceTimeline::object_pose(track, &[], t)
+                .unwrap()
+                .translation
+                .x
+        };
+        // `a` runs until its front face (x + 0.05) meets the stopper's back
+        // face (0.99); `b` until its front meets `a`'s back.
+        assert!((x("a", 3.0) - 0.94).abs() < 1e-9, "{}", x("a", 3.0));
+        assert!((x("b", 3.0) - 0.84).abs() < 1e-9, "{}", x("b", 3.0));
+        // Free running before the queue formed: belt speed exactly.
+        assert!((x("a", 1.0) - 0.7).abs() < 1e-9);
+        assert!(tl
+            .objects
+            .iter()
+            .all(|o| o.name != "stop" && o.name != "aside"));
+        let travel = tl.words.iter().find(|w| w.name == "belt.encoder").unwrap();
+        assert!(!travel.integer);
+        assert!((travel.value_at(3.0) - 1.5).abs() < 1e-9, "{travel:?}");
+        assert!((travel.value_at(1.0) - 0.5).abs() < 1e-9);
+    }
+
+    /// An identification reader: its presence lane as any zone sensor's,
+    /// and a word with the smallest id it sees — 0 when it sees nothing.
+    #[test]
+    fn an_identification_reader_reports_the_smallest_id_it_sees() {
+        let mut scene = sample_scene();
+        let cube = Geometry::Box {
+            size: Vector3::new(0.1, 0.1, 0.05),
+        };
+        scene
+            .add_obstacle("a", cube.clone(), iso(0.2, 0.0, 0.525))
+            .unwrap();
+        scene.add_obstacle("b", cube, iso(0.0, 0.0, 0.525)).unwrap();
+        scene
+            .add_obstacle(
+                "stop",
+                Geometry::Box {
+                    size: Vector3::new(0.02, 0.2, 0.06),
+                },
+                iso(1.0, 0.0, 0.53),
+            )
+            .unwrap();
+        scene.set_obstacle_stopper("stop", true).unwrap();
+        scene.upsert_device(Device {
+            name: "belt".into(),
+            kind: DeviceKind::Conveyor {
+                zone_pose: iso(1.0, 0.0, 0.55),
+                zone_size: Vector3::new(2.0, 0.3, 0.2),
+                velocity: Vector3::new(0.5, 0.0, 0.0),
+                running: true,
+                encoder: false,
+            },
+        });
+        scene
+            .upsert_sensor(Sensor {
+                name: "eye".into(),
+                kind: SensorKind::Zone {
+                    pose: iso(0.9, 0.0, 0.525),
+                    size: Vector3::new(0.05, 0.3, 0.1),
+                },
+                watch: SensorWatch::Objects(vec!["a".into(), "b".into()]),
+                mount: None,
+                ids: Some(vec![("a".into(), 7), ("b".into(), 3)]),
+            })
+            .unwrap();
+        scene.upsert_sequence(Sequence {
+            name: "run".into(),
+            steps: vec![step("wait", vec![], Condition::Elapsed { seconds: 3.0 })],
+        });
+        let tl = scene
+            .simulate_sequence("run", &RolloutOptions::default())
+            .unwrap();
+        let id = tl.words.iter().find(|w| w.name == "eye.id").unwrap();
+        assert!(id.integer);
+        let values: Vec<f64> = id.samples.iter().map(|s| s.1).collect();
+        // Nothing, then `a` (7) alone, then `b` (3) queued beside it.
+        assert_eq!(values, [0.0, 7.0, 3.0], "{id:?}");
+        let eye = tl.signals.iter().find(|s| s.name == "eye").unwrap();
+        assert!(eye.value_at(tl.duration), "the queue stands in the eye");
+        assert!((id.samples[1].0 - 1.25).abs() < 1e-9, "{id:?}");
+        assert!((id.samples[2].0 - 1.65).abs() < 1e-9, "{id:?}");
     }
 }
 
@@ -14845,6 +16120,7 @@ mod multi_actor_tests {
                 },
                 watch: SensorWatch::Robots(vec!["a".into()]),
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene
@@ -15234,6 +16510,7 @@ mod tracking_tests {
                 zone_size: Vector3::new(3.0, 0.4, 0.4),
                 velocity: Vector3::new(0.2, 0.0, 0.0),
                 running: true,
+                encoder: false,
             },
         });
         scene
@@ -17454,6 +18731,7 @@ mod vehicle_tests {
                 zone_size: Vector3::new(1.0, 1.0, 0.2),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -17928,6 +19206,7 @@ mod tray_tests {
                 },
                 watch: SensorWatch::Objects(vec!["carton".into()]),
                 mount: Some("agv".into()),
+                ids: None,
             })
             .unwrap();
         // The same zone bolted to the floor, for contrast.
@@ -17940,6 +19219,7 @@ mod tray_tests {
                 },
                 watch: SensorWatch::Objects(vec!["carton".into()]),
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene.upsert_sequence(Sequence {
@@ -18037,6 +19317,7 @@ mod tray_tests {
             },
             watch: SensorWatch::AllObjects,
             mount: Some("agv".into()),
+            ids: None,
         };
         let msg = crate::wire::sensor_msg(&sensor);
         let back: crate::wire::SensorMsg =
@@ -18071,6 +19352,7 @@ mod tray_tests {
                 },
                 watch: SensorWatch::AllObjects,
                 mount: Some("nowhere".into()),
+                ids: None,
             })
             .unwrap();
         check(&ghost, "unknown device `nowhere`");
@@ -18083,6 +19365,7 @@ mod tray_tests {
                 zone_size: Vector3::new(1.0, 1.0, 0.2),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         belt.upsert_sensor(Sensor {
@@ -18093,6 +19376,7 @@ mod tray_tests {
             },
             watch: SensorWatch::AllObjects,
             mount: Some("belt".into()),
+            ids: None,
         })
         .unwrap();
         check(&belt, "not a vehicle");
@@ -18455,6 +19739,7 @@ mod mount_tests {
                 zone_size: Vector3::new(1.0, 1.0, 0.2),
                 velocity: Vector3::new(0.1, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         let err = scene
@@ -19260,6 +20545,7 @@ mod parallel_program_tests {
                 zone_size: Vector3::new(20.0, 1.0, 1.0),
                 velocity: Vector3::new(speed, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene
@@ -19375,6 +20661,8 @@ mod parallel_program_tests {
                 position: 0.0,
                 range: (0.0, 1.0),
                 stops: Vec::new(),
+                coils: Vec::new(),
+                encoder: false,
             },
         });
         scene.upsert_sequence(Sequence {
@@ -22361,6 +23649,8 @@ mod physics_tests {
                 position: 0.0,
                 range: (0.0, 1.0),
                 stops: Vec::new(),
+                coils: Vec::new(),
+                encoder: false,
             },
         });
         let err = scene
@@ -22431,6 +23721,7 @@ mod physics_tests {
                 zone_size: Vector3::new(1.95, 0.3, 0.27),
                 velocity: Vector3::new(0.3, 0.0, 0.0),
                 running: false,
+                encoder: false,
             },
         });
         scene
@@ -22442,6 +23733,7 @@ mod physics_tests {
                 },
                 watch: crate::seq::SensorWatch::Objects(vec!["part".into()]),
                 mount: None,
+                ids: None,
             })
             .unwrap();
         scene
@@ -23415,6 +24707,7 @@ mod dual_arm_tests {
                     },
                     watch: SensorWatch::Groups(vec![(robot.clone(), arm.into())]),
                     mount: None,
+                    ids: None,
                 })
                 .unwrap();
         }

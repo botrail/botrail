@@ -2287,6 +2287,20 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Marks an obstacle a stopper for conveyed parts (or clears it): a
+    /// belt's advection stops a part short of it when its bounds lie
+    /// across the part's path — the end plate of a belt, the blade of a
+    /// stopper cylinder raised into the parts' way (lowered out of it, it
+    /// blocks nothing) — and parts queue behind one another in front of
+    /// it. Nothing else about the obstacle changes; a physics bake stops
+    /// parts by contact regardless.
+    #[pyo3(signature = (name, stopper = true))]
+    fn set_obstacle_stopper(&self, name: &str, stopper: bool) -> PyResult<()> {
+        self.hub
+            .set_obstacle_stopper(name, stopper)
+            .map_err(scene_err)
+    }
+
     /// Sets how an obstacle's surface takes light. Passing no appearance values
     /// clears the material, handing the choice back to the viewer. `finish`
     /// — `"wood"`, `"checker_plate"` or `"plastic"` — is a surface pattern
@@ -2781,6 +2795,85 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// Binds a robot's grasp to a coil: the plant's side of a vacuum valve
+    /// or a gripper solenoid (design-virtual-commissioning.md VC2). While
+    /// `signal` is high the tool takes the nearest candidate part within
+    /// `reach_m` of its surface; when it falls, it releases what it holds.
+    /// Every edge counts, whoever made it — a step's `set_signal`, a
+    /// controller's coil write on the wire, a force. A sequence on a bound
+    /// tool writes the coil and never `attach`es: a PLC has no attach
+    /// command, so the exchange and the PLCopen / ST exports carry only the
+    /// coil.
+    ///
+    /// * `parts` — the obstacles the grasp may take, by name or group;
+    ///   default any enabled obstacle nobody holds.
+    /// * `reach_m` — how far from the tool's surface a part may be to be
+    ///   taken; `None` runs no distance test and takes the nearest named
+    ///   part on the rising edge wherever it stands (a part designated by
+    ///   name, as an authored `attach` would). One of `parts` / `reach_m`
+    ///   is required.
+    /// * `link`, `group` — the anchor: a link, or the tip of an arm of a
+    ///   dual-arm robot (default the TCP).
+    /// * `touch_links` — links allowed to touch the carried part, as
+    ///   `bt.seq.attach(touch_links=)`.
+    #[pyo3(signature = (signal, robot = None, parts = None, reach_m = None, link = None, group = None, touch_links = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn bind_grasp(
+        &self,
+        signal: &str,
+        robot: Option<&str>,
+        parts: Option<Vec<String>>,
+        reach_m: Option<f64>,
+        link: Option<&str>,
+        group: Option<&str>,
+        touch_links: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        let index = self.resolve_robot(robot)?;
+        self.hub
+            .bind_grasp(
+                signal,
+                index,
+                link,
+                group,
+                parts.as_deref(),
+                reach_m,
+                touch_links.as_deref(),
+            )
+            .map_err(scene_err)
+    }
+
+    /// Drops the grasp that follows `signal`.
+    fn unbind_grasp(&self, signal: &str) -> PyResult<()> {
+        self.hub.unbind_grasp(signal).map_err(scene_err)
+    }
+
+    /// The grasps bound to coils: one dict per binding with `signal`,
+    /// `robot`, `link`, `parts`, `reach_m`, `group`, `touch_links`.
+    fn grasp_bindings<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let robots = self.hub.with_scene(|scene| {
+            scene
+                .robots()
+                .iter()
+                .map(|r| (r.name.clone(), r.model.clone()))
+                .collect::<Vec<_>>()
+        });
+        self.hub
+            .grasp_bindings()
+            .iter()
+            .map(|b| {
+                let d = PyDict::new(py);
+                d.set_item("signal", &b.signal)?;
+                d.set_item("robot", &robots[b.robot].0)?;
+                d.set_item("link", &robots[b.robot].1.links[b.link].name)?;
+                d.set_item("parts", b.parts.clone())?;
+                d.set_item("reach_m", b.reach_m)?;
+                d.set_item("group", b.group.clone())?;
+                d.set_item("touch_links", b.touch_links.clone())?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     /// Declares a robot dynamic under physics bakes (design-rl-dynamics.md):
     /// every link with geometry becomes a rigid body weighing what its
     /// model states (URDF `<inertial>`, USD `PhysicsMassAPI`; else its
@@ -2996,6 +3089,56 @@ impl Scene {
             .map_err(scene_err)
     }
 
+    /// The indicator lamps declared (`add_lamp`), each as `{name, signal,
+    /// obstacle, color}`.
+    fn lamps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let lamps: Vec<_> = self.hub.with_scene(|scene| {
+            scene
+                .weld_flashes()
+                .iter()
+                .filter(|f| f.kind == botrail_scene::seq::FlashKind::Lamp)
+                .map(|f| {
+                    (
+                        f.name.clone(),
+                        f.signal.clone(),
+                        f.obstacle.clone().unwrap_or_default(),
+                        f.color.unwrap_or([1.0, 0.0, 0.0]),
+                    )
+                })
+                .collect()
+        });
+        lamps
+            .into_iter()
+            .map(|(name, signal, obstacle, color)| {
+                let d = PyDict::new(py);
+                d.set_item("name", name)?;
+                d.set_item("signal", signal)?;
+                d.set_item("obstacle", obstacle)?;
+                d.set_item("color", (color[0], color[1], color[2]))?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Binds an indicator lamp to a signal: `obstacle` is drawn lit in
+    /// `color` (linear RGB, default red) while `signal` — an internal
+    /// signal or a sensor's lane — is on, as authored otherwise. The pilot
+    /// light a PLC drives with an output, shown the way the operator sees
+    /// it. Pure presentation, like `add_weld_flash`; USD export carries
+    /// nothing for it.
+    #[pyo3(signature = (name, signal, obstacle, color = (1.0, 0.0, 0.0)))]
+    fn add_lamp(
+        &self,
+        name: &str,
+        signal: &str,
+        obstacle: &str,
+        color: (f32, f32, f32),
+    ) -> PyResult<()> {
+        self.hub
+            .add_lamp(name, signal, obstacle, [color.0, color.1, color.2])
+            .map_err(scene_err)
+    }
+
     #[pyo3(signature = (name, signal, robot, spin_link = None))]
     fn add_cut_trace(
         &self,
@@ -3045,7 +3188,14 @@ impl Scene {
     /// `watch_groups=[(robot, group), ...]` watches the named arms only —
     /// the interlock zone that sees one arm of a dual-arm robot and not
     /// the other.
-    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None, mount = None, watch_groups = None))]
+    ///
+    /// `ids={"carrier_a": 1, "carrier_b": 2}` makes the zone an
+    /// identification reader (RFID, code reader): besides its presence
+    /// lane it records the word lane `<name>.id` — the smallest id among
+    /// the watched bodies it sees, 0 for none — which a controller reads
+    /// once declared on it (`declare_io("<name>.id", role="input",
+    /// host="PLC1")`).
+    #[pyo3(signature = (name, position, size, quaternion = None, watch = None, watch_robot = false, watch_robots = None, mount = None, watch_groups = None, ids = None))]
     #[allow(clippy::too_many_arguments)]
     fn add_zone_sensor(
         &self,
@@ -3058,7 +3208,17 @@ impl Scene {
         watch_robots: Option<Vec<String>>,
         mount: Option<String>,
         watch_groups: Option<Vec<(String, String)>>,
+        ids: Option<std::collections::BTreeMap<String, i64>>,
     ) -> PyResult<()> {
+        if let Some(ids) = &ids {
+            for (obstacle, id) in ids {
+                if *id <= 0 || *id > i16::MAX as i64 {
+                    return Err(PyValueError::new_err(format!(
+                        "id {id} of {obstacle:?} must be 1..=32767 (0 means nothing seen)"
+                    )));
+                }
+            }
+        }
         self.hub
             .upsert_sensor(botrail_scene::seq::Sensor {
                 name: name.to_string(),
@@ -3068,6 +3228,7 @@ impl Scene {
                 },
                 watch: sensor_watch(watch, watch_robot, watch_robots, watch_groups),
                 mount,
+                ids: ids.map(|m| m.into_iter().collect()),
             })
             .map_err(scene_err)
     }
@@ -3098,6 +3259,7 @@ impl Scene {
                 },
                 watch: sensor_watch(watch, watch_robot, watch_robots, watch_groups),
                 mount,
+                ids: None,
             })
             .map_err(scene_err)
     }
@@ -3132,6 +3294,7 @@ impl Scene {
                 },
                 watch: sensor_watch(watch, watch_robot, watch_robots, None),
                 mount: None,
+                ids: None,
             })
             .map_err(scene_err)
     }
@@ -3172,6 +3335,7 @@ impl Scene {
                 },
                 watch: sensor_watch(watch, watch_robot, watch_robots, None),
                 mount: None,
+                ids: None,
             })
             .map_err(scene_err)
     }
@@ -3541,7 +3705,15 @@ impl Scene {
     /// Adds a conveyor: while running, any unattached obstacle whose origin
     /// lies inside the zone box is carried at `velocity` (m/s). Start/stop
     /// it from sequences with `bt.seq.start`/`bt.seq.stop`.
-    #[pyo3(signature = (name, zone_position, zone_size, velocity, zone_quaternion = None, running = true))]
+    ///
+    /// A part stops short of a *stopper* in its path (an obstacle flagged
+    /// `set_obstacle_stopper`) and short of a part ahead that stopped, so
+    /// parts queue against a raised blade. With `encoder=True` the belt's
+    /// travel is recorded as the word lane `<name>.encoder` (metres run,
+    /// REAL) and derived as a feedback word for the controller that
+    /// commands the belt.
+    #[pyo3(signature = (name, zone_position, zone_size, velocity, zone_quaternion = None, running = true, encoder = false))]
+    #[allow(clippy::too_many_arguments)]
     fn add_conveyor(
         &self,
         name: &str,
@@ -3550,6 +3722,7 @@ impl Scene {
         velocity: [f64; 3],
         zone_quaternion: Option<[f64; 4]>,
         running: bool,
+        encoder: bool,
     ) -> PyResult<()> {
         self.hub.upsert_device(botrail_scene::seq::Device {
             name: name.to_string(),
@@ -3558,6 +3731,7 @@ impl Scene {
                 zone_size: nalgebra::Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
                 velocity: nalgebra::Vector3::new(velocity[0], velocity[1], velocity[2]),
                 running,
+                encoder,
             },
         });
         Ok(())
@@ -3645,7 +3819,17 @@ impl Scene {
     /// What the axis drives is checked against every robot each tick: a
     /// leaf closing on an arm still inside is a `DeviceCollision` error
     /// naming the device, the obstacle, the robot and the link.
-    #[pyo3(signature = (name, objects, axis, speed, range, position = 0.0, stops = None))]
+    ///
+    /// `coils` makes the axis a solenoid-driven cylinder: `{"extend":
+    /// "extended", "retract": "retracted"}` names an output coil per stop
+    /// (`<name>/<coil>`), and a stop no coil names is the spring-return
+    /// position a single-solenoid cylinder goes back to when its coil
+    /// drops. The controller then sees the cylinder as two coils and two
+    /// limit switches — never a position word — and `device_done` is the
+    /// switch of the stop the step sent it to. `encoder=True` records the
+    /// actual position as the word lane `<name>.encoder` (REAL), derived
+    /// as a feedback word for the controller that positions the axis.
+    #[pyo3(signature = (name, objects, axis, speed, range, position = 0.0, stops = None, coils = None, encoder = false))]
     #[allow(clippy::too_many_arguments)]
     fn add_linear_axis(
         &self,
@@ -3656,6 +3840,8 @@ impl Scene {
         range: [f64; 2],
         position: f64,
         stops: Option<std::collections::BTreeMap<String, f64>>,
+        coils: Option<std::collections::BTreeMap<String, String>>,
+        encoder: bool,
     ) -> PyResult<()> {
         let axis = nalgebra::Unit::try_new(nalgebra::Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
             .ok_or_else(|| PyValueError::new_err("axis must be a nonzero vector"))?;
@@ -3679,6 +3865,36 @@ impl Scene {
             }
             named.push((stop, at));
         }
+        let mut coil_list = Vec::new();
+        for (coil, stop) in coils.unwrap_or_default() {
+            if coil.is_empty() || coil.contains('/') {
+                return Err(PyValueError::new_err(format!(
+                    "coil name {coil:?} must be non-empty and contain no `/`"
+                )));
+            }
+            if !named.iter().any(|(n, _)| *n == stop) {
+                return Err(PyValueError::new_err(format!(
+                    "coil {coil:?} drives to unknown stop {stop:?} (stops: {})",
+                    named
+                        .iter()
+                        .map(|(n, _)| format!("{n:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            coil_list.push((coil, stop));
+        }
+        if !coil_list.is_empty() {
+            let uncoiled = named
+                .iter()
+                .filter(|(n, _)| !coil_list.iter().any(|(_, s)| s == n))
+                .count();
+            if uncoiled > 1 {
+                return Err(PyValueError::new_err(format!(
+                    "{uncoiled} stops have no coil — a cylinder has one spring-return stop at most"
+                )));
+            }
+        }
         self.hub.upsert_device(botrail_scene::seq::Device {
             name: name.to_string(),
             kind: botrail_scene::seq::DeviceKind::LinearAxis {
@@ -3688,6 +3904,8 @@ impl Scene {
                 position,
                 range: (range[0], range[1]),
                 stops: named,
+                coils: coil_list,
+                encoder,
             },
         });
         Ok(())
@@ -4203,6 +4421,17 @@ impl Scene {
         Ok(d.points.into_iter().map(|p| IoPoint { inner: p }).collect())
     }
 
+    /// Where each program of the set runs, as `(program, host)` pairs —
+    /// the node that lists it, a robot's controller for a program that
+    /// drives only that robot (`<name>` of the node, or the implicit
+    /// `<arm>`), else the implicit cell host `<cell>`. The hosts a
+    /// loopback session answers for (`bt.vc.run_fat` opens one for every
+    /// host of the program set).
+    #[pyo3(signature = (sequences = None))]
+    fn program_hosts(&self, sequences: Option<Vec<String>>) -> PyResult<Vec<(String, String)>> {
+        Ok(self.derive_io(sequences)?.program_hosts)
+    }
+
     /// Lint findings over the derived I/O map: name clashes, unreferenced
     /// definitions, numeric (word/analog) points, programs on the
     /// implicit cell host. `assert scene.io_report().errors() == []` is
@@ -4251,9 +4480,14 @@ impl Scene {
     /// station or safety module belongs to; `channels` are the dicts the
     /// `bt.io` templates build (`bt.io.di8(base="%IX0.0") + bt.io.do8(...)`
     /// or `bt.io.ur_standard()`).
+    /// `monitor=True` makes a PLC report the active step of every program
+    /// it runs in a word per program (`<program>.step`): the ST export
+    /// writes it on every transition and a plant session records it as
+    /// the controller's step bands, so the studio's SFC chart shows a PLC
+    /// under test the way it shows the cell's own programs.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (name, kind = "plc", robots = None, programs = None, uplink = None,
-        channels = None, place = None, model = None, label = None))]
+        channels = None, place = None, model = None, label = None, monitor = false))]
     fn add_io_node(
         &self,
         name: &str,
@@ -4265,7 +4499,13 @@ impl Scene {
         place: Option<String>,
         model: Option<String>,
         label: Option<String>,
+        monitor: bool,
     ) -> PyResult<()> {
+        if monitor && kind != "plc" {
+            return Err(PyValueError::new_err(
+                "monitor=True only applies to kind=\"plc\" — only a PLC's ST export writes step words",
+            ));
+        }
         use botrail_scene::iomap::{IoNode, IoNodeKind, Uplink};
         let kind = match kind {
             "plc" => IoNodeKind::Plc,
@@ -4324,6 +4564,7 @@ impl Scene {
                 channels,
                 place,
                 model,
+                monitor,
             })
             .map_err(scene_err)
     }
@@ -4499,6 +4740,70 @@ impl Scene {
         task_interval_ms: u32,
     ) -> PyResult<()> {
         let text = self.plcopen(sequences, name, cycle, task_interval_ms)?;
+        std::fs::write(&path, text)
+            .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
+    }
+
+    // ------------------------------------------------------- exchange
+
+    /// The exchange of controller `host` over `sequences` (every sequence
+    /// by default): the half of the I/O map that host sees, turned to the
+    /// plant's side — what the controller writes (coils, device commands,
+    /// robot start / program words) are the plant's inputs, what it reads
+    /// (sensors, limit switches, in-position and done contacts, handshake
+    /// wires) are its outputs — with the PLCopen variable, type, initial
+    /// value and binding of every point, the numbered robot commands and
+    /// the device parameters. Derived, never authored; the table a PLC
+    /// under test is wired to (`bt.vc`).
+    #[pyo3(signature = (host, sequences = None))]
+    fn exchange(&self, host: &str, sequences: Option<Vec<String>>) -> PyResult<Exchange> {
+        let scene = self.hub.authored_snapshot();
+        let names: Option<Vec<&str>> = sequences
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        botrail_scene::exchange::derive(&scene, names.as_deref(), host)
+            .map(|inner| Exchange { inner })
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The programs of controller `host` as IEC 61131-3 Structured Text —
+    /// the form a runtime compiles itself (OpenPLC's matiec, Beremiz,
+    /// CODESYS and the IDEs that read ST but not PLCopen XML). The same
+    /// logic as the PLCopen export, as a step-flag program: one `BOOL` per
+    /// step, the transitions as `IF step AND condition` blocks, the
+    /// exchange's points as located globals (`AT %IX0.0` from the bindings
+    /// on PLC-family nodes), robot commands as the start / program / done
+    /// handshake written for a polled link. `cycle=False` parks a program
+    /// after its last step instead of starting over.
+    #[pyo3(signature = (host, sequences = None, *, cycle = true, task_interval_ms = 10))]
+    fn st(
+        &self,
+        host: &str,
+        sequences: Option<Vec<String>>,
+        cycle: bool,
+        task_interval_ms: u32,
+    ) -> PyResult<String> {
+        let options = botrail_scene::st::StOptions {
+            sequences,
+            host: host.to_string(),
+            task_interval_ms,
+            cycle,
+        };
+        botrail_scene::st::render_st(&self.hub.authored_snapshot(), &options)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Writes `st()` to `path` (`.st`).
+    #[pyo3(signature = (path, host, sequences = None, *, cycle = true, task_interval_ms = 10))]
+    fn export_st(
+        &self,
+        path: PathBuf,
+        host: &str,
+        sequences: Option<Vec<String>>,
+        cycle: bool,
+        task_interval_ms: u32,
+    ) -> PyResult<()> {
+        let text = self.st(host, sequences, cycle, task_interval_ms)?;
         std::fs::write(&path, text)
             .map_err(|e| PyIOError::new_err(format!("{}: {e}", path.display())))
     }
@@ -4920,8 +5225,12 @@ impl Scene {
     /// name the scene does not have becomes a new declared point when
     /// `role` is input or output. `kind` overrides the channel type
     /// (`"safe_di"`, ...), `safety` marks the safety class, `pair` names
-    /// the other channel of a two-channel safety input.
-    #[pyo3(signature = (name, role = None, kind = None, safety = false, pair = None, note = None))]
+    /// the other channel of a two-channel safety input. `host` names the
+    /// node the point belongs to when no program of the set reads or
+    /// writes it — a word a hand-written PLC program will read
+    /// (`declare_io("reader.id", role="input", host="PLC1")`).
+    #[pyo3(signature = (name, role = None, kind = None, safety = false, pair = None, note = None, host = None))]
+    #[allow(clippy::too_many_arguments)]
     fn declare_io(
         &self,
         name: &str,
@@ -4930,6 +5239,7 @@ impl Scene {
         safety: bool,
         pair: Option<String>,
         note: Option<String>,
+        host: Option<String>,
     ) -> PyResult<()> {
         use botrail_scene::iomap::{ChannelKind, DeclRole, IoDecl};
         let role = match role {
@@ -4955,6 +5265,7 @@ impl Scene {
             safety,
             pair,
             note,
+            host,
         });
         Ok(())
     }
@@ -6371,6 +6682,102 @@ impl Scene {
             .map_err(PyValueError::new_err)
     }
 
+    /// Opens the cell as the **plant** of the controllers that run the
+    /// programs on `external_hosts` (design-virtual-commissioning.md VC1):
+    /// those programs are not scanned — their controllers write the host's
+    /// inputs with `apply()` and read its outputs with `outputs()`, over
+    /// the exchange `exchange(host)` — while every other program, the
+    /// devices, sensors and physics run as in the batch bake. The rollout
+    /// stands at `t = 0` with the world built and the sensors read; the
+    /// first `tick()` is the first scan at `t = 0`, each later one a scan
+    /// period on. Every input written is recorded (`input_log()`), so the
+    /// same stream replays the same timeline.
+    ///
+    /// `loopback=True` keeps the external programs scanned by botrail,
+    /// through the exchange — the reference that must equal the bake.
+    /// `cycle=True` starts a program the plant scans over when it ends
+    /// (the PLCopen `jumpStep`) — what a cycling controller outside
+    /// needs from the machine programs inside.
+    /// Without it, a host that is a robot's own controller is refused (the
+    /// plant cannot move a robot whose program it does not run), and so is
+    /// a program that commands a magazine (no coil; declare it an output).
+    /// `bt.vc.Session` drives this loop.
+    /// `joints=[robot, …]` names robots whose joints a controller outside
+    /// streams in (`bt.vc.ursim`): the plant mirrors the stream
+    /// (`command`) and takes the controller's word for the robot's idle
+    /// (`report_idle`), so the robot's own controller may be the external
+    /// host running the robot's program.
+    #[pyo3(signature = (sequences, external_hosts, *, loopback = false, cycle = false, dt = 0.01, max_duration = 120.0, plan_resolution = None, scenario = None, physics = None, joints = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn open_plant(
+        &self,
+        sequences: &Bound<'_, PyAny>,
+        external_hosts: Vec<String>,
+        loopback: bool,
+        cycle: bool,
+        dt: f64,
+        max_duration: f64,
+        plan_resolution: Option<f64>,
+        scenario: Option<&str>,
+        physics: Option<&Bound<'_, PyAny>>,
+        joints: Option<Vec<String>>,
+    ) -> PyResult<LiveRollout> {
+        let names: Vec<String> = if let Ok(one) = sequences.extract::<String>() {
+            vec![one]
+        } else {
+            sequences.extract::<Vec<String>>().map_err(|_| {
+                PyValueError::new_err("sequences must be a sequence name or a list of names")
+            })?
+        };
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "dt must be positive, got {dt}"
+            )));
+        }
+        let mut options = botrail_scene::rollout::RolloutOptions {
+            dt,
+            max_duration,
+            ..Default::default()
+        };
+        if let Some(resolution) = plan_resolution {
+            if !(resolution.is_finite() && resolution > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "plan_resolution must be positive, got {resolution}"
+                )));
+            }
+            options.plan.resolution = resolution;
+        }
+        let backend = physics_bake(&mut options, physics)?;
+        let scenario = scenario
+            .filter(|s| *s != botrail_scene::seq::BASELINE_SCENARIO)
+            .map(str::to_string);
+        let mut snapshot = self.hub.snapshot();
+        if let Some(name) = &scenario {
+            snapshot
+                .apply_scenario(name)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        }
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let hosts: Vec<&str> = external_hosts.iter().map(String::as_str).collect();
+        let joints = joints.unwrap_or_default();
+        let streamed: Vec<&str> = joints.iter().map(String::as_str).collect();
+        let live = snapshot
+            .open_plant(&refs, &options, backend, &hosts, loopback, cycle, &streamed)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(LiveRollout {
+            inner: Some(live),
+            scene: snapshot,
+            hub: self.hub.clone(),
+            label: format!(
+                "{} (plant of {})",
+                refs.join(" + "),
+                external_hosts.join(", ")
+            ),
+            scenario,
+            spec: None,
+        })
+    }
+
     /// Opens the rollout `simulate_sequences` would bake, stopped at
     /// `t = 0` with every program in its first step, for Python to
     /// advance one scan tick at a time (design-rl.md R0). Between ticks
@@ -6491,36 +6898,7 @@ impl Scene {
             faults: Vec::new(),
         };
         for fault in faults.unwrap_or_default() {
-            let dict = fault.downcast::<PyDict>().map_err(|_| {
-                PyValueError::new_err(
-                    "faults are bt.io.stuck(name, value) / bt.io.open(name) entries",
-                )
-            })?;
-            let target: String = dict
-                .get_item("target")?
-                .ok_or_else(|| PyValueError::new_err("a fault needs a `target`"))?
-                .extract()?;
-            let kind: String = dict
-                .get_item("kind")?
-                .ok_or_else(|| PyValueError::new_err("a fault needs a `kind`"))?
-                .extract()?;
-            let kind = match kind.as_str() {
-                "stuck" => botrail_scene::seq::FaultKind::StuckAt(
-                    dict.get_item("value")?
-                        .ok_or_else(|| PyValueError::new_err("a stuck fault needs a `value`"))?
-                        .extract::<bool>()?,
-                ),
-                "open" => botrail_scene::seq::FaultKind::Open,
-                "node_down" => botrail_scene::seq::FaultKind::NodeDown,
-                other => {
-                    return Err(PyValueError::new_err(format!(
-                        "unknown fault kind {other:?} (stuck, open, node_down)"
-                    )))
-                }
-            };
-            scenario
-                .faults
-                .push(botrail_scene::seq::Fault { target, kind });
+            scenario.faults.push(parse_fault(&fault)?);
         }
         if let Some(signals) = signals {
             for (key, value) in signals.iter() {
@@ -7407,6 +7785,7 @@ impl Trajectory {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            io_registers: false,
         };
         let program = botrail_export::build_program(
             name,
@@ -7880,6 +8259,30 @@ impl LiveRollout {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// What a streamed robot's controller says about itself — idle (no
+    /// program running) or busy. The plant's `done` contact for the robot
+    /// and every `robot_done` wait on it read this word; the mirror drive
+    /// itself never ends (`open_plant(joints=[...])`).
+    #[pyo3(signature = (robot = None, idle = true))]
+    fn report_idle(&mut self, robot: Option<&str>, idle: bool) -> PyResult<()> {
+        let r = self.robot(robot)?;
+        self.live_mut()?
+            .report_idle(r, idle)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// The robots whose joints a controller streams in.
+    #[getter]
+    fn streamed(&self) -> PyResult<Vec<String>> {
+        let names: Vec<String> = self.scene.robots().iter().map(|r| r.name.clone()).collect();
+        Ok(self
+            .live()?
+            .streamed_robots()
+            .into_iter()
+            .filter_map(|r| names.get(r).cloned())
+            .collect())
+    }
+
     /// A hand on a body — the mouse pick of a physics viewer: holds
     /// `name` (an obstacle, or a robot link as `"robot/link"`) at `point`
     /// in its own frame and pulls it toward `target` in the world with a
@@ -8025,6 +8428,13 @@ impl LiveRollout {
         self.live()?
             .signal(name)
             .ok_or_else(|| PyValueError::new_err(format!("unknown signal `{name}`")))
+    }
+
+    /// A word lane's current value (`feed.encoder`, `reader.id`).
+    fn word(&self, name: &str) -> PyResult<f64> {
+        self.live()?
+            .word(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown word lane `{name}`")))
     }
 
     /// The body pairs in contact after the last tick, `(a, b, peak
@@ -8384,6 +8794,212 @@ impl LiveRollout {
             scene: self.scene.clone(),
         })
     }
+
+    // ------------------------------------------------------ plant mode
+
+    /// The external hosts of a plant rollout (`Scene.open_plant`), in the
+    /// order given; empty for an ordinary rollout.
+    #[getter]
+    fn hosts(&self) -> PyResult<Vec<String>> {
+        Ok(self.live()?.plant_hosts())
+    }
+
+    /// The exchange of an external host.
+    fn exchange(&self, host: &str) -> PyResult<Exchange> {
+        self.live()?
+            .exchange(host)
+            .map(|x| Exchange { inner: x.clone() })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("`{host}` is not an external host of this rollout"))
+            })
+    }
+
+    /// The host's outputs as the world stands after the last tick — what
+    /// its controller reads this scan: `{label: value}`.
+    fn outputs<'py>(&self, py: Python<'py>, host: &str) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (id, value) in self
+            .live()?
+            .outputs(host)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+        {
+            out.set_item(id.label(), value_to_py(py, value)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Hands the controller's writes to the plant, `{label: value}` over
+    /// the host's inputs, to take effect at the host's slot in the next
+    /// tick. Levels and words as they stand on the controller; a start
+    /// or dispatch pulse as its level (the plant edges it). Unchanged
+    /// values are harmless; an unknown label is refused by name.
+    fn apply(&mut self, host: &str, inputs: &Bound<'_, PyDict>) -> PyResult<()> {
+        let mut writes = Vec::with_capacity(inputs.len());
+        {
+            let live = self.live()?;
+            let exchange = live.exchange(host).ok_or_else(|| {
+                PyValueError::new_err(format!("`{host}` is not an external host of this rollout"))
+            })?;
+            for (key, value) in inputs.iter() {
+                let label: String = key.extract()?;
+                let point = exchange
+                    .by_label(&label, botrail_scene::exchange::PlantSide::Input)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "`{label}` is not an input of host `{host}` (inputs: {})",
+                            exchange
+                                .inputs()
+                                .map(|p| p.label())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                    })?;
+                writes.push((point.id.clone(), value_from_py(&value)?));
+            }
+        }
+        self.live_mut()?
+            .apply(host, writes)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Pins a lane — a sensor, an internal signal, a device's running
+    /// state — to `value` from now on (a PLC force): sensor geometry and
+    /// program writes are dropped until `unforce`.
+    fn force(&mut self, name: &str, value: bool) -> PyResult<()> {
+        self.live_mut()?
+            .force_lane(name, value)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Lets a forced lane follow the world again.
+    fn unforce(&mut self, name: &str) -> PyResult<()> {
+        self.live_mut()?
+            .unforce_lane(name)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Injects a fault — `bt.io.stuck(name, value)`, `bt.io.open(name)`,
+    /// `bt.io.node_down(node)` — resolved through the bindings like a
+    /// scenario's: now (`at=None`), on a lane's rising edge
+    /// (`at={"rising": name}`), or when a program the plant scans enters a
+    /// step (`at={"program": p, "step": s}`). `bt.vc.rising` / `bt.vc.step`
+    /// build the anchors.
+    #[pyo3(signature = (fault, at = None))]
+    fn inject(&mut self, fault: &Bound<'_, PyAny>, at: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        use botrail_scene::rollout::FaultAnchor;
+        let fault = parse_fault(fault)?;
+        let anchor = match at {
+            None => FaultAnchor::Now,
+            Some(at) => {
+                let dict = at.downcast::<PyDict>().map_err(|_| {
+                    PyValueError::new_err(
+                        "at= is None, {\"rising\": lane} or {\"program\": p, \"step\": s}",
+                    )
+                })?;
+                if let Some(name) = dict.get_item("rising")? {
+                    FaultAnchor::Rising(name.extract()?)
+                } else if let (Some(program), Some(step)) =
+                    (dict.get_item("program")?, dict.get_item("step")?)
+                {
+                    FaultAnchor::Step {
+                        program: program.extract()?,
+                        step: step.extract()?,
+                    }
+                } else {
+                    return Err(PyValueError::new_err(
+                        "at= is None, {\"rising\": lane} or {\"program\": p, \"step\": s}",
+                    ));
+                }
+            }
+        };
+        self.live_mut()?
+            .inject(fault, anchor)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Every input written on the plant so far, `(t, host, label, value)`
+    /// in order — the stream `bt.vc.replay` feeds back.
+    fn input_log(&self, py: Python<'_>) -> PyResult<Vec<InputLogRow>> {
+        self.live()?
+            .input_log()
+            .iter()
+            .map(|r| Ok((r.t, r.host.clone(), r.id.label(), value_to_py(py, r.value)?)))
+            .collect()
+    }
+
+    // ------------------------------------------------------ studio, live
+
+    /// Sends the stretch after `sent` to the connected studios as one
+    /// window of a live stream (the dock follows its head) and returns
+    /// the clock it reached — the `sent` of the next call. With no studio
+    /// connected nothing is built. `done` closes the stream.
+    #[pyo3(signature = (sent, done = false))]
+    fn broadcast(&self, sent: f64, done: bool) -> PyResult<f64> {
+        let live = self.live()?;
+        Ok(botrail_session::emit_live_window(
+            &*self.hub,
+            &self.scene,
+            live,
+            sent,
+            done,
+        ))
+    }
+
+    /// Whether a studio is connected to this scene's server.
+    fn has_viewers(&self) -> bool {
+        self.hub.has_listeners()
+    }
+
+    /// Tells the connected studios about the plant session: `status` is
+    /// the `plant` message's status as JSON (`bt.vc.Session` builds it),
+    /// or `None` when the session ends.
+    #[pyo3(signature = (status = None))]
+    fn publish_status(&self, status: Option<&str>) -> PyResult<()> {
+        use botrail_scene::wire::{PlantStatusMsg, ServerMessage};
+        let status = match status {
+            None => None,
+            Some(text) => Some(serde_json::from_str::<PlantStatusMsg>(text).map_err(|e| {
+                PyValueError::new_err(format!("plant status is not a PlantStatusMsg: {e}"))
+            })?),
+        };
+        if self.hub.has_listeners() {
+            self.hub.emit(&ServerMessage::Plant { status });
+        }
+        Ok(())
+    }
+
+    /// The studio's commands for the plant session since the last call,
+    /// each as the JSON of a `PlantCommandMsg` (`{"command": "pause"}`,
+    /// `{"command": "force", "lane": …, "value": …}` …), in arrival order.
+    fn take_studio_commands(&self) -> Vec<String> {
+        self.hub
+            .take_plant_commands()
+            .iter()
+            .map(|c| serde_json::to_string(c).expect("wire types serialize infallibly"))
+            .collect()
+    }
+
+    /// The stretch `[start, end]` of the timeline so far (`end` defaults
+    /// to now) as a timeline starting at zero: the clip a recording keeps.
+    #[pyo3(signature = (start, end = None))]
+    fn clip(&self, start: f64, end: Option<f64>) -> PyResult<SequenceTimeline> {
+        let live = self.live()?;
+        let mut timeline = live.timeline();
+        timeline.scenario = self.scenario.clone();
+        let end = end.unwrap_or(timeline.duration);
+        Ok(SequenceTimeline {
+            inner: timeline.clip(start, end),
+            scene: self.scene.clone(),
+        })
+    }
+
+    /// Broadcasts `timeline` — a clip of this rollout — to the connected
+    /// studios as the session's latest bake (playable, exportable as USD).
+    #[pyo3(signature = (timeline, label = None))]
+    fn publish(&self, timeline: &SequenceTimeline, label: Option<&str>) {
+        self.hub
+            .publish_timeline(&self.scene, &timeline.inner, label.unwrap_or(&self.label));
+    }
 }
 
 /// One cloth over a baked cycle: where every vertex was, on the cloth's
@@ -8577,6 +9193,33 @@ impl SequenceTimeline {
         self.inner.duration
     }
 
+    /// The stretch `[start, end]` (`end` defaults to the end) as a
+    /// timeline of its own starting at zero: one cycle cut out of a long
+    /// run, or the clip a live recording kept. Tracks are cut and
+    /// re-timed with exact samples at both ends; the step bands, moves,
+    /// lanes, decisions, grasps and touches are kept where they overlap,
+    /// a lane's level at `start` becoming its initial level. The planned
+    /// paths and gait tracks are left out, so a clip plays and exports
+    /// but does not compile to a controller script.
+    #[pyo3(signature = (start, end = None))]
+    fn clip(&self, start: f64, end: Option<f64>) -> PyResult<SequenceTimeline> {
+        if !(start.is_finite() && start >= 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "start must be a time within the timeline, got {start}"
+            )));
+        }
+        let end = end.unwrap_or(self.inner.duration);
+        if !(end.is_finite() && end >= start) {
+            return Err(PyValueError::new_err(format!(
+                "end must be at or after start ({start}), got {end}"
+            )));
+        }
+        Ok(SequenceTimeline {
+            inner: self.inner.clip(start, end),
+            scene: self.scene.clone(),
+        })
+    }
+
     /// Instance names of the robots on this timeline, in scene order.
     #[getter]
     fn robots(&self) -> Vec<String> {
@@ -8601,6 +9244,42 @@ impl SequenceTimeline {
             .iter()
             .map(|s| (s.name.clone(), s.edges.clone()))
             .collect()
+    }
+
+    /// Word lanes — encoders (`feed.encoder`), identification readers
+    /// (`reader.id`) — as `(name, [(time, value), ...])` sample lists,
+    /// each value holding until the next sample. Empty unless a device
+    /// or sensor was asked to record one.
+    #[getter]
+    fn words(&self) -> Vec<(String, Vec<(f64, f64)>)> {
+        self.inner
+            .words
+            .iter()
+            .map(|w| (w.name.clone(), w.samples.clone()))
+            .collect()
+    }
+
+    /// The named word lane.
+    fn word(&self, name: &str) -> PyResult<WordTrack> {
+        self.inner
+            .words
+            .iter()
+            .find(|w| w.name == name)
+            .map(|w| WordTrack {
+                inner: w.clone(),
+                duration: self.inner.duration,
+            })
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown word lane `{name}` (lanes: {})",
+                    self.inner
+                        .words
+                        .iter()
+                        .map(|w| format!("`{}`", w.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
     }
 
     /// A robot's joint positions at time `t` (clamped to the cycle).
@@ -9635,11 +10314,16 @@ impl SequenceTimeline {
     /// one script per program. Approximations (unmapped device commands,
     /// waits that ran beside a move in simulation) are raised as Python
     /// warnings; what cannot be expressed at all (`any_of` waits,
-    /// conveyor tracking) raises `ValueError`.
+    /// conveyor tracking) raises `ValueError`. `rtde=True` addresses the
+    /// I/O as the controller's general-purpose bit registers (UR:
+    /// `read_input_boolean_register` / `write_output_boolean_register`,
+    /// the registers a `bt.vc.ursim` link drives) instead of the standard
+    /// digital I/O — the ports are then register indices
+    /// (`bt.io.ur_registers()`).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (sequence = None, dialect = "urscript", name = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None,
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, rtde = false, node = None, io = None,
         group = None))]
     fn to_script(
         &self,
@@ -9654,6 +10338,7 @@ impl SequenceTimeline {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        rtde: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
         group: Option<&str>,
@@ -9679,6 +10364,7 @@ impl SequenceTimeline {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            io_registers: rtde,
         };
         let out = botrail_scene::script::sequence_program(
             &self.scene,
@@ -9754,7 +10440,7 @@ impl SequenceTimeline {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None,
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, rtde = false, node = None, io = None,
         group = None))]
     fn export_script(
         &self,
@@ -9770,6 +10456,7 @@ impl SequenceTimeline {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        rtde: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
         group: Option<&str>,
@@ -9786,6 +10473,7 @@ impl SequenceTimeline {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            rtde,
             node,
             io,
             group,
@@ -9926,7 +10614,7 @@ impl ScenarioRuns {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (sequence = None, dialect = "urscript", name = None, primary = None,
         inputs = None, outputs = None, speed_scale = 1.0, blend_radius = 0.0,
-        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, node = None, io = None,
+        tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true, rtde = false, node = None, io = None,
         group = None))]
     fn to_script(
         &self,
@@ -9942,6 +10630,7 @@ impl ScenarioRuns {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        rtde: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
         group: Option<&str>,
@@ -9987,6 +10676,7 @@ impl ScenarioRuns {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            io_registers: rtde,
         };
         let mut ordered: Vec<(&str, &botrail_scene::rollout::SequenceTimeline)> =
             vec![(self.runs[lead].0.as_str(), &borrowed[lead].inner)];
@@ -10028,7 +10718,7 @@ impl ScenarioRuns {
     #[pyo3(signature = (path, sequence = None, dialect = "urscript", name = None,
         primary = None, inputs = None, outputs = None, speed_scale = 1.0,
         blend_radius = 0.0, tcp_speed = 0.25, tcp_accel = 1.2, move_to_start = true,
-        node = None, io = None, group = None))]
+        rtde = false, node = None, io = None, group = None))]
     fn export_script(
         &self,
         py: Python<'_>,
@@ -10044,6 +10734,7 @@ impl ScenarioRuns {
         tcp_speed: f64,
         tcp_accel: f64,
         move_to_start: bool,
+        rtde: bool,
         node: Option<&str>,
         io: Option<PyRef<'_, IoMap>>,
         group: Option<&str>,
@@ -10061,6 +10752,7 @@ impl ScenarioRuns {
             tcp_speed,
             tcp_accel,
             move_to_start,
+            rtde,
             node,
             io,
             group,
@@ -10434,13 +11126,108 @@ fn channel_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::iomap::IoC
     } else {
         None
     };
+    let unit: Option<String> = match get("unit")? {
+        Some(v) if !v.is_none() => {
+            let u: String = v.extract()?;
+            if botrail_scene::iomap::unit_scale(&u).is_none() {
+                return Err(PyValueError::new_err(format!(
+                    "channel {id:?}: unit {u:?} is not one the exchange can scale by (m, cm, mm, 0.1mm, 0.01mm, um, m/s, mm/s, mm/min, deg, 0.1deg)"
+                )));
+            }
+            Some(u)
+        }
+        _ => None,
+    };
     Ok(IoChannel {
         id,
         kind,
         port,
         address,
         electrical,
+        unit,
     })
+}
+
+/// A word lane of a baked timeline: a number as a step function — an
+/// encoder's travel (`feed.encoder`, REAL), an identification reader's
+/// word (`reader.id`, INT).
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct WordTrack {
+    inner: botrail_scene::rollout::WordTrack,
+    duration: f64,
+}
+
+#[pymethods]
+impl WordTrack {
+    /// Lane label, `name.aspect`.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+
+    /// Where the lane comes from: `"sensor"` (a reader, an encoder).
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.as_str().to_string()
+    }
+
+    /// `True` for a count (an INT word), `False` for a measurement (REAL).
+    #[getter]
+    fn integer(&self) -> bool {
+        self.inner.integer
+    }
+
+    /// `(time, value)` samples, starting with `(0, initial)`; each value
+    /// holds until the next sample.
+    #[getter]
+    fn samples(&self) -> Vec<(f64, f64)> {
+        self.inner.samples.clone()
+    }
+
+    /// The cycle time the lane spans.
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.duration
+    }
+
+    /// The value at time `t`.
+    fn value_at(&self, t: f64) -> f64 {
+        self.inner.value_at(t)
+    }
+
+    /// The last value of the cycle.
+    fn final_value(&self) -> f64 {
+        self.inner.samples.last().map(|s| s.1).unwrap_or(0.0)
+    }
+
+    /// The largest value over the cycle.
+    fn max(&self) -> f64 {
+        self.inner
+            .samples
+            .iter()
+            .map(|s| s.1)
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// The first time the lane reaches `value` (within `tol`), if ever.
+    #[pyo3(signature = (value, tol = 1e-9))]
+    fn reaches(&self, value: f64, tol: f64) -> Option<f64> {
+        self.inner
+            .samples
+            .iter()
+            .find(|(_, v)| (v - value).abs() <= tol)
+            .map(|(t, _)| *t)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "WordTrack({:?}, {} samples, {})",
+            self.inner.name,
+            self.inner.samples.len(),
+            if self.inner.integer { "INT" } else { "REAL" }
+        )
+    }
 }
 
 /// The assignment layer of a scene's I/O map (see `Scene.io_map`).
@@ -10601,6 +11388,292 @@ fn render_io(d: &botrail_scene::iomap::IoDerivation, format: &str) -> PyResult<S
 
 fn step_ref_tuple(s: &botrail_scene::iomap::StepRef) -> (String, usize, String) {
     (s.sequence.clone(), s.index, s.name.clone())
+}
+
+/// A `bt.io.stuck / open / node_down` dict as a fault.
+fn parse_fault(fault: &Bound<'_, PyAny>) -> PyResult<botrail_scene::seq::Fault> {
+    let dict = fault.downcast::<PyDict>().map_err(|_| {
+        PyValueError::new_err("faults are bt.io.stuck(name, value) / bt.io.open(name) entries")
+    })?;
+    let target: String = dict
+        .get_item("target")?
+        .ok_or_else(|| PyValueError::new_err("a fault needs a `target`"))?
+        .extract()?;
+    let kind: String = dict
+        .get_item("kind")?
+        .ok_or_else(|| PyValueError::new_err("a fault needs a `kind`"))?
+        .extract()?;
+    let kind = match kind.as_str() {
+        "stuck" => botrail_scene::seq::FaultKind::StuckAt(
+            dict.get_item("value")?
+                .ok_or_else(|| PyValueError::new_err("a stuck fault needs a `value`"))?
+                .extract::<bool>()?,
+        ),
+        "open" => botrail_scene::seq::FaultKind::Open,
+        "node_down" => botrail_scene::seq::FaultKind::NodeDown,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown fault kind {other:?} (stuck, open, node_down)"
+            )))
+        }
+    };
+    Ok(botrail_scene::seq::Fault { target, kind })
+}
+
+/// One row of `LiveRollout.input_log()`: `(t, host, label, value)`.
+type InputLogRow = (f64, String, String, Py<PyAny>);
+
+/// An exchanged value as a Python `bool`, `int` or `float`.
+fn value_to_py(py: Python<'_>, v: botrail_scene::exchange::Value) -> PyResult<Py<PyAny>> {
+    use botrail_scene::exchange::Value;
+    Ok(match v {
+        Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
+        Value::Int(i) => i.into_pyobject(py)?.into_any().unbind(),
+        Value::Real(x) => x.into_pyobject(py)?.into_any().unbind(),
+    })
+}
+
+/// A Python `bool`, `int` or `float` as an exchanged value (coerced to the
+/// point's type where it lands).
+fn value_from_py(obj: &Bound<'_, PyAny>) -> PyResult<botrail_scene::exchange::Value> {
+    use botrail_scene::exchange::Value;
+    if let Ok(b) = obj.downcast::<pyo3::types::PyBool>() {
+        return Ok(Value::Bool(b.is_true()));
+    }
+    if let Ok(i) = obj.extract::<i64>() {
+        return Ok(Value::Int(i));
+    }
+    if let Ok(x) = obj.extract::<f64>() {
+        return Ok(Value::Real(x));
+    }
+    Err(PyValueError::new_err(format!(
+        "{} is not a bool, int or float",
+        obj.repr()?
+    )))
+}
+
+/// The exchange of one controller host: the half of the I/O map it sees,
+/// turned to the plant's side (see `Scene.exchange`).
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct Exchange {
+    inner: botrail_scene::exchange::Exchange,
+}
+
+#[pymethods]
+impl Exchange {
+    /// The controller host the exchange belongs to.
+    #[getter]
+    fn host(&self) -> String {
+        self.inner.host.clone()
+    }
+
+    /// The program set the exchange was derived over.
+    #[getter]
+    fn sequences(&self) -> Vec<String> {
+        self.inner.sequences.clone()
+    }
+
+    /// The programs that run on this host.
+    #[getter]
+    fn programs(&self) -> Vec<String> {
+        self.inner.programs.clone()
+    }
+
+    /// Relays written and read on this host only — never exchanged.
+    #[getter]
+    fn internal(&self) -> Vec<String> {
+        self.inner.internal.clone()
+    }
+
+    /// The exchanged points, inputs and outputs of the plant.
+    #[getter]
+    fn points(&self) -> Vec<ExchangePoint> {
+        self.inner
+            .points
+            .iter()
+            .map(|p| ExchangePoint { inner: p.clone() })
+            .collect()
+    }
+
+    /// The numbered robot commands `(robot, number, key, label)` a start
+    /// pulse with the program word selects.
+    #[getter]
+    fn entries(&self) -> Vec<(String, u32, String, String)> {
+        self.inner
+            .entries
+            .iter()
+            .map(|e| (e.robot.clone(), e.number, e.key.clone(), e.label.clone()))
+            .collect()
+    }
+
+    /// Device parameters the bus cannot carry live: `(device, name, value)`.
+    #[getter]
+    fn parameters(&self) -> Vec<(String, String, f64)> {
+        self.inner
+            .parameters
+            .iter()
+            .map(|p| (p.device.clone(), p.name.clone(), p.value))
+            .collect()
+    }
+
+    #[getter]
+    fn notes(&self) -> Vec<String> {
+        self.inner.notes.clone()
+    }
+
+    fn to_json(&self) -> String {
+        self.inner.to_json()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Exchange({} — {} inputs, {} outputs, {} robot entries)",
+            self.inner.host,
+            self.inner.inputs().count(),
+            self.inner.outputs().count(),
+            self.inner.entries.len()
+        )
+    }
+}
+
+/// One point of an exchange (see `Exchange.points`).
+#[pyclass(frozen, module = "botrail._core")]
+#[derive(Clone)]
+struct ExchangePoint {
+    inner: botrail_scene::exchange::ExchangePoint,
+}
+
+#[pymethods]
+impl ExchangePoint {
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.id.name.clone()
+    }
+
+    #[getter]
+    fn aspect(&self) -> Option<String> {
+        self.inner.id.aspect.map(|a| a.as_str().to_string())
+    }
+
+    /// `name` or `name.aspect` — the key `outputs()` / `apply()` use.
+    #[getter]
+    fn label(&self) -> String {
+        self.inner.label()
+    }
+
+    /// The variable the PLCopen export declares for the point.
+    #[getter]
+    fn var(&self) -> String {
+        self.inner.var.clone()
+    }
+
+    /// `"input"` or `"output"` from the controller's side (the I/O map's
+    /// direction).
+    #[getter]
+    fn direction(&self) -> String {
+        self.inner.id.direction.as_str().to_string()
+    }
+
+    /// `"input"` (the controller writes it, the plant reads) or `"output"`
+    /// (the plant writes it, the controller reads) — from the plant's side.
+    #[getter]
+    fn side(&self) -> String {
+        self.inner.side.as_str().to_string()
+    }
+
+    /// `"BOOL"`, `"INT"` or `"REAL"` — the IEC type of the variable.
+    #[getter]
+    fn value_type(&self) -> String {
+        self.inner.value.as_str().to_string()
+    }
+
+    /// Channel type: `"DI"`, `"DO"`, `"Word"`, `"AO"`, ...
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.as_str().to_string()
+    }
+
+    /// The derivation rule behind the point (`"sensor"`, `"device:run"`,
+    /// `"robot:start"`, ...).
+    #[getter]
+    fn source(&self) -> String {
+        self.inner.source.as_str().to_string()
+    }
+
+    /// The value the point holds before anything is written.
+    #[getter]
+    fn initial(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        value_to_py(py, self.inner.initial)
+    }
+
+    #[getter]
+    fn node(&self) -> Option<String> {
+        self.inner.node.clone()
+    }
+
+    #[getter]
+    fn channel(&self) -> Option<String> {
+        self.inner.channel.clone()
+    }
+
+    /// The bound channel's PLC address (`"%IX0.2"`), when bound.
+    #[getter]
+    fn address(&self) -> Option<String> {
+        self.inner.address.clone()
+    }
+
+    /// The bound channel's vendor port number, when it has one.
+    #[getter]
+    fn port(&self) -> Option<u32> {
+        self.inner.port
+    }
+
+    /// The PLC tag the binding names, when any.
+    #[getter]
+    fn tag(&self) -> Option<String> {
+        self.inner.tag.clone()
+    }
+
+    #[getter]
+    fn invert(&self) -> bool {
+        self.inner.invert
+    }
+
+    /// What the plant does with the point beyond the obvious: a coil a
+    /// grasp follows says so here.
+    #[getter]
+    fn note(&self) -> Option<String> {
+        self.inner.note.clone()
+    }
+
+    /// Register counts per SI unit when a measurement crosses a word
+    /// channel with a unit (`1000.0` for `mm`); `1.0` otherwise.
+    #[getter]
+    fn scale(&self) -> f64 {
+        self.inner.scale
+    }
+
+    /// The word channel's engineering unit the point is scaled to, if any.
+    #[getter]
+    fn unit(&self) -> Option<String> {
+        self.inner.unit.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExchangePoint({} {} {} {}{})",
+            self.inner.label(),
+            self.inner.side.as_str(),
+            self.inner.value.as_str(),
+            self.inner.source.as_str(),
+            self.inner
+                .address
+                .as_ref()
+                .map(|a| format!(" @{a}"))
+                .unwrap_or_default()
+        )
+    }
 }
 
 /// One derived I/O point of the cell (see `Scene.io_points`).
@@ -12023,9 +13096,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ScenarioRuns>()?;
     m.add_class::<Span>()?;
     m.add_class::<SignalTrack>()?;
+    m.add_class::<WordTrack>()?;
     m.add_class::<ScanFrame>()?;
     m.add_class::<Clearance>()?;
     m.add_class::<IoPoint>()?;
+    m.add_class::<Exchange>()?;
+    m.add_class::<ExchangePoint>()?;
     m.add_class::<IoFinding>()?;
     m.add_class::<IoReport>()?;
     m.add_class::<IoMap>()?;

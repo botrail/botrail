@@ -444,6 +444,10 @@ pub struct ObstacleMsg {
     /// have no walkable surfaces, which is what they meant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub walkable: bool,
+    /// A stopper for conveyed parts: the belt advection stops a part
+    /// short of it. Files written before this existed have none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopper: bool,
     /// Display colour, linear RGB, from the scene file's
     /// `primvars:displayColor`. Absent means "no authored appearance": the
     /// studio then draws the obstacle as a neutral collision proxy.
@@ -814,6 +818,20 @@ pub struct SensorMsg {
     /// vehicle's frame. `None` (the usual case) is a floor fixture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<String>,
+    /// An identification reader's table, `(obstacle, id)`: the sensor
+    /// then records the word lane `<name>.id`. Absent for a plain
+    /// presence sensor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<IdEntryMsg>>,
+}
+
+/// One row of an identification reader's table.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct IdEntryMsg {
+    pub obstacle: String,
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -995,6 +1013,9 @@ pub enum DeviceKindMsg {
         zone_size: [f64; 3],
         velocity: [f64; 3],
         running: bool,
+        /// Records the belt's travel as the word lane `<name>.encoder`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        encoder: bool,
     },
     /// Moves the listed obstacles along `axis` within `range`; `stops`
     /// are its named positions (each a `<axis>/<stop>` input lane).
@@ -1006,6 +1027,13 @@ pub enum DeviceKindMsg {
         range: [f64; 2],
         #[serde(default)]
         stops: Vec<LiftStopMsg>,
+        /// Solenoid coils `(coil, stop)`: an output `<axis>/<coil>` that
+        /// drives the axis to the named stop (a cylinder's valve).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        coils: Vec<CoilMsg>,
+        /// Records the actual position as the word lane `<name>.encoder`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        encoder: bool,
     },
     /// Feeds parked carriers onto the line every `interval` seconds.
     Source {
@@ -1193,6 +1221,15 @@ pub struct LiftStopMsg {
     pub at: f64,
 }
 
+/// A solenoid coil of a cylinder-like axis and the stop it drives to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CoilMsg {
+    pub coil: String,
+    pub stop: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -1240,6 +1277,12 @@ pub struct FlashMsg {
     /// Spray-cone size, `[length, radius]` in meters (spray effects only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cone: Option<[f64; 2]>,
+    /// The obstacle a lamp lights (lamp effects only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obstacle: Option<String>,
+    /// The lamp's lit colour, linear RGB (lamp effects only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1253,12 +1296,16 @@ pub enum FlashKindMsg {
     Spray,
     /// The bound link spun while the signal is on, nothing drawn.
     Spin,
+    /// An obstacle lit in its colour while the signal is on: an indicator
+    /// lamp on a panel, a tower light.
+    Lamp,
 }
 
 pub fn flash_kind_msg(kind: crate::seq::FlashKind) -> FlashKindMsg {
     match kind {
         crate::seq::FlashKind::Flash => FlashKindMsg::Flash,
         crate::seq::FlashKind::Trace => FlashKindMsg::Trace,
+        crate::seq::FlashKind::Lamp => FlashKindMsg::Lamp,
         crate::seq::FlashKind::Spray => FlashKindMsg::Spray,
         crate::seq::FlashKind::Spin => FlashKindMsg::Spin,
     }
@@ -1270,7 +1317,136 @@ pub fn flash_kind_from_msg(kind: FlashKindMsg) -> crate::seq::FlashKind {
         FlashKindMsg::Trace => crate::seq::FlashKind::Trace,
         FlashKindMsg::Spray => crate::seq::FlashKind::Spray,
         FlashKindMsg::Spin => crate::seq::FlashKind::Spin,
+        FlashKindMsg::Lamp => crate::seq::FlashKind::Lamp,
     }
+}
+
+/// One controller of a live plant session (`bt.vc.Session`), as its link
+/// reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct PlantHostMsg {
+    pub name: String,
+    /// The link, kind and endpoint: `modbus 127.0.0.1:5020`, `opcua
+    /// opc.tcp://…`, `loopback`, `replay`, `by hand`.
+    pub link: String,
+    /// Exchanges the link has served: Modbus polls, OPC UA writes, replay
+    /// rows.
+    #[serde(default)]
+    pub exchanges: u64,
+    /// The link's last error, when it is down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A breakpoint on a lane's edge: the session pauses when the lane takes
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct PlantBreakMsg {
+    pub lane: String,
+    pub rising: bool,
+}
+
+/// The state of the live plant session a studio watches: who the
+/// controllers are and how the loop keeps time, what is forced, where it
+/// breaks, whether it records. Sent whenever it changes and with every
+/// window of the stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct PlantStatusMsg {
+    /// `pick (plant of PLC1)`.
+    pub label: String,
+    /// The plant clock after the last scan.
+    pub t: f64,
+    /// The scan period.
+    pub dt: f64,
+    /// `realtime`, `sync` or `free`.
+    pub pace: String,
+    /// The realtime speed factor.
+    pub speed: f64,
+    pub paused: bool,
+    /// Why it paused on its own: the break it hit (`↑part_at_pick at
+    /// 12.34 s`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halted: Option<String>,
+    pub hosts: Vec<PlantHostMsg>,
+    /// Lag behind the wall clock in realtime pace (ms): mean and worst,
+    /// and the scans that started more than a period late.
+    #[serde(default)]
+    pub lag_ms: f64,
+    #[serde(default)]
+    pub lag_max_ms: f64,
+    #[serde(default)]
+    pub overruns: u64,
+    /// Lanes pinned by a force, with the level.
+    #[serde(default)]
+    pub forced: Vec<(String, bool)>,
+    #[serde(default)]
+    pub breaks: Vec<PlantBreakMsg>,
+    /// Since when the session records a clip (plant seconds); absent when
+    /// it does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_from: Option<f64>,
+    /// Whether the stream follows the live plant: false while a clip the
+    /// session published stands on the dock instead.
+    #[serde(default = "default_true")]
+    pub following: bool,
+    /// The lanes a click presses: the push buttons of the cell's panels.
+    #[serde(default)]
+    pub buttons: Vec<String>,
+    /// The clips published so far, newest last.
+    #[serde(default)]
+    pub clips: Vec<String>,
+}
+
+/// A hand on the live plant session from the studio: the transport, a
+/// force, a push button, a breakpoint, the recording. Queued for the
+/// session's loop, which applies it before its next scan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "command", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum PlantCommandMsg {
+    /// Hold the plant where it stands; the controller keeps polling a
+    /// frozen world and its writes wait for the next scan.
+    Pause,
+    Resume,
+    /// `n` scans, then hold again.
+    Step {
+        n: u32,
+    },
+    /// The realtime speed factor.
+    Speed {
+        speed: f64,
+    },
+    /// Pin a lane (a PLC force) until `unforce`.
+    Force {
+        lane: String,
+        value: bool,
+    },
+    Unforce {
+        lane: String,
+    },
+    /// Press a push button: its lane high for `hold_s` plant seconds (the
+    /// session's default when absent).
+    Press {
+        lane: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold_s: Option<f64>,
+    },
+    /// Set (`on`) or clear a breakpoint on a lane's rising or falling
+    /// edge.
+    Break {
+        lane: String,
+        rising: bool,
+        on: bool,
+    },
+    /// Start or stop recording a clip; stopping publishes it to the dock.
+    Record {
+        on: bool,
+    },
+    /// Follow the live plant again after a clip.
+    Follow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1502,6 +1678,22 @@ pub struct SignalTrackMsg {
     pub kind: String,
 }
 
+/// A word — a number — as a step function (timing-chart lane): an
+/// encoder's travel (`feed.encoder`), an identification reader's id
+/// (`reader.id`). `values[i]` holds from `times[i]` on; `integer` says
+/// the lane is a count, drawn and labelled without decimals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct WordTrackMsg {
+    pub name: String,
+    pub times: Vec<f64>,
+    pub values: Vec<f64>,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub integer: bool,
+}
+
 /// One robot's playable track on a baked timeline.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -1561,6 +1753,9 @@ pub struct TimelineMsg {
     pub vehicles: Vec<VehicleTrackMsg>,
     pub step_spans: Vec<StepSpanMsg>,
     pub signals: Vec<SignalTrackMsg>,
+    /// Word lanes (encoders, readers); absent from older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<WordTrackMsg>,
     /// Every selection divergence this bake resolved, in resolution order.
     #[serde(default)]
     pub branches: Vec<BranchTakenMsg>,
@@ -1726,6 +1921,11 @@ pub enum ServerMessage {
     Grab {
         name: String,
         held: bool,
+    },
+    /// The live plant session a studio watches (`bt.vc.Session` with a
+    /// studio connected), or `None` when it ends.
+    Plant {
+        status: Option<PlantStatusMsg>,
     },
     /// One window of a streaming bake (`start_bake`): the tracks sampled
     /// after `from` up to the timeline's `duration`, on the same 30 Hz
@@ -2028,6 +2228,11 @@ pub enum ClientMessage {
     },
     /// The hand lets go.
     Release,
+    /// A hand on the live plant session (`bt.vc.Session`): applied by its
+    /// loop before the next scan.
+    Plant {
+        command: PlantCommandMsg,
+    },
     /// Bake the last simulated timeline as a usda layer; the result
     /// arrives as a `usd_document` (the browser saves it as a download).
     ExportUsd {
@@ -2739,6 +2944,14 @@ pub fn sequences_message(scene: &Scene) -> ServerMessage {
 pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
     SensorMsg {
         mount: sensor.mount.clone(),
+        ids: sensor.ids.as_ref().map(|ids| {
+            ids.iter()
+                .map(|(obstacle, id)| IdEntryMsg {
+                    obstacle: obstacle.clone(),
+                    id: *id,
+                })
+                .collect()
+        }),
         name: sensor.name.clone(),
         kind: match &sensor.kind {
             SensorKind::Zone { pose, size } => SensorKindMsg::Zone {
@@ -2797,6 +3010,10 @@ pub fn sensor_msg(sensor: &Sensor) -> SensorMsg {
 pub fn sensor_from_msg(msg: &SensorMsg) -> Sensor {
     Sensor {
         mount: msg.mount.clone(),
+        ids: msg
+            .ids
+            .as_ref()
+            .map(|ids| ids.iter().map(|e| (e.obstacle.clone(), e.id)).collect()),
         name: msg.name.clone(),
         kind: match &msg.kind {
             SensorKindMsg::Zone { pose, size } => SensorKind::Zone {
@@ -2958,11 +3175,13 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 zone_size,
                 velocity,
                 running,
+                encoder,
             } => DeviceKindMsg::Conveyor {
                 zone_pose: PoseMsg::from(zone_pose),
                 zone_size: [zone_size.x, zone_size.y, zone_size.z],
                 velocity: [velocity.x, velocity.y, velocity.z],
                 running: *running,
+                encoder: *encoder,
             },
             DeviceKind::LinearAxis {
                 objects,
@@ -2971,6 +3190,8 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 position,
                 range,
                 stops,
+                coils,
+                encoder,
             } => DeviceKindMsg::LinearAxis {
                 objects: objects.clone(),
                 axis: [axis.x, axis.y, axis.z],
@@ -2984,6 +3205,14 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                         at: *at,
                     })
                     .collect(),
+                coils: coils
+                    .iter()
+                    .map(|(coil, stop)| CoilMsg {
+                        coil: coil.clone(),
+                        stop: stop.clone(),
+                    })
+                    .collect(),
+                encoder: *encoder,
             },
             DeviceKind::Source {
                 pool,
@@ -3104,11 +3333,13 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 zone_size,
                 velocity,
                 running,
+                encoder,
             } => DeviceKind::Conveyor {
                 zone_pose: zone_pose.into(),
                 zone_size: Vector3::new(zone_size[0], zone_size[1], zone_size[2]),
                 velocity: Vector3::new(velocity[0], velocity[1], velocity[2]),
                 running: *running,
+                encoder: *encoder,
             },
             DeviceKindMsg::LinearAxis {
                 objects,
@@ -3117,6 +3348,8 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 position,
                 range,
                 stops,
+                coils,
+                encoder,
             } => DeviceKind::LinearAxis {
                 objects: objects.clone(),
                 axis: nalgebra::Unit::try_new(Vector3::new(axis[0], axis[1], axis[2]), 1e-9)
@@ -3125,6 +3358,11 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 position: *position,
                 range: (range[0], range[1]),
                 stops: stops.iter().map(|s| (s.name.clone(), s.at)).collect(),
+                coils: coils
+                    .iter()
+                    .map(|c| (c.coil.clone(), c.stop.clone()))
+                    .collect(),
+                encoder: *encoder,
             },
             DeviceKindMsg::Source {
                 pool,
@@ -3609,6 +3847,8 @@ pub fn effects_message(scene: &Scene) -> ServerMessage {
                 kind: flash_kind_msg(f.kind),
                 spin_link: f.spin_link.clone(),
                 cone: f.cone.map(|c| [c.length, c.radius]),
+                obstacle: f.obstacle.clone(),
+                color: f.color,
             })
             .collect(),
     }
@@ -3952,6 +4192,7 @@ pub fn obstacles_message(
                 enabled: o.enabled,
                 visible: o.visible,
                 walkable: o.walkable,
+                stopper: o.stopper,
                 color: o.color,
                 material: o.material.map(Into::into),
                 legend: o.legend.as_ref().map(Into::into),
@@ -4154,6 +4395,7 @@ mod tests {
                 group: None,
             }],
             signals: vec![],
+            words: vec![],
             branches: vec![BranchTakenMsg {
                 sequence: "a".into(),
                 step: "gate".into(),

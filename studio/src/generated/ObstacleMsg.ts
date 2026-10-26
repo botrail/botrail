@@ -29,6 +29,11 @@ visible: boolean,
  */
 walkable?: boolean, 
 /**
+ * A stopper for conveyed parts: the belt advection stops a part
+ * short of it. Files written before this existed have none.
+ */
+stopper?: boolean, 
+/**
  * Display colour, linear RGB, from the scene file's
  * `primvars:displayColor`. Absent means "no authored appearance": the
  * studio then draws the obstacle as a neutral collision proxy.

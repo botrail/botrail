@@ -269,7 +269,10 @@ programs, uplink and model, and its channel table through templates
 (`+ DI×8` … `+ UR standard`, with a base address that counts up). Every
 edit is one message the server validates the way the Python API does, and
 `generate_python` writes it all back as `add_io_node` / `bind_input` /
-`declare_io`.
+`declare_io`. While a [plant session](virtual-commissioning.md) streams to
+the studio, the table also carries the controllers' chips and a **force**
+column — `1` / `0` pin a lane like a PLC force, `×` releases it, and a
+forced row is marked.
 
 ![The I/O table over the viewport, a fault scenario's stall on the dock](../assets/studio/io.png)
 
@@ -340,6 +343,16 @@ folds a group in or out (device outputs start folded, and sensors do too once
 a cell has more than twelve). **lanes** in the dock's header hides them all,
 leaving the step bar; drag the dock's top edge to size the lane area
 (double-click it for the default). The browser remembers these choices.
+
+When the cell runs as the **plant** of a controller
+([virtual commissioning](virtual-commissioning.md)), the dock follows the
+live plant and a **plant bar** sits over the transport: the run and its
+controllers, the pace and the lag, and the hand on it — **❚❚ hold** /
+**▶ run**, **⏭ scan**, the realtime **speed**, **● rec** for a clip that
+lands on the dock when stopped (**live** follows the plant again). A
+right-click on a lane's name sets a breakpoint on its rising edge (shift:
+falling), a click on a panel button in the viewport presses it, and the
+panel's lamps light with their signals.
 
 ## Serving details
 

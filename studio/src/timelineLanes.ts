@@ -84,3 +84,50 @@ export function parseLaneView(text: string | null): LaneView {
 export function serializeLaneView(view: LaneView): string {
   return JSON.stringify(view);
 }
+
+/** A word lane's value at `t`: the last sample at or before it (the
+ * initial value before any). */
+export function wordValueAt(word: { times: number[]; values: number[] }, t: number): number {
+  let v = word.values[0] ?? 0;
+  for (let i = 0; i < word.times.length; i++) {
+    if (word.times[i] <= t + 1e-9) v = word.values[i];
+    else break;
+  }
+  return v;
+}
+
+/** A word's label: a count plain, a measurement to the millimetre (to
+ * the tenth once it runs into the hundreds). */
+export function formatWord(value: number, integer: boolean): string {
+  if (integer) return String(Math.round(value));
+  return Math.abs(value) >= 100 ? value.toFixed(1) : value.toFixed(3);
+}
+
+/** The `(x, y)` step-plot points of a word lane over `[0, duration]`,
+ * scaled to the lane's own range in a `width` × `height` box: a flat
+ * lane sits mid-track. */
+export function wordPolyline(
+  word: { times: number[]; values: number[] },
+  duration: number,
+  width = 1000,
+  height = 8,
+): string {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const v of word.values) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!Number.isFinite(lo)) return "";
+  const span = hi - lo;
+  const y = (v: number) => (span > 0 ? height - 1 - ((v - lo) / span) * (height - 2) : height / 2);
+  const x = (t: number) => (duration > 0 ? (t / duration) * width : 0);
+  const points: string[] = [];
+  for (let i = 0; i < word.times.length; i++) {
+    const t0 = word.times[i];
+    const t1 = word.times[i + 1] ?? duration;
+    const v = word.values[i];
+    points.push(`${x(t0)},${y(v)}`, `${x(t1)},${y(v)}`);
+  }
+  return points.join(" ");
+}

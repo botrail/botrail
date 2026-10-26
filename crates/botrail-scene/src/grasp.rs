@@ -10,9 +10,10 @@
 //! (and `tl.grasp_report()` above it) read back from the contact record.
 
 use nalgebra::Isometry3;
+use parry3d_f64::shape::SharedShape;
 
 use crate::rollout::{RobotTrack, SequenceTimeline, TrackSpan};
-use crate::{Scene, SceneError};
+use crate::{names_match, Scene, SceneError};
 
 /// Default signed clearance `grasp_close` closes to: half a millimetre of
 /// overtravel. Measured against rapier 0.34 (the adapter's
@@ -95,6 +96,217 @@ pub(crate) fn joint_kind(
     match model.joints[ji].joint_type {
         botrail_model::JointType::Prismatic => botrail_physics::JointKind::Prismatic,
         _ => botrail_physics::JointKind::Revolute,
+    }
+}
+
+/// A grasp that follows a coil (design-virtual-commissioning.md §8, VC2
+/// record): the plant's side of a vacuum valve or a gripper solenoid. While
+/// `signal` is high the anchor link takes the nearest candidate obstacle
+/// within `reach_m` of its own surface, and when the signal falls it
+/// releases what it holds — the way a PLC expresses a grasp (it has no
+/// "attach" command). A controller's write, a program's `set`, a force on
+/// the lane: every edge counts, whoever made it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraspBinding {
+    /// The internal signal (coil) the grasp follows.
+    pub signal: String,
+    /// Carrying robot (scene index).
+    pub robot: usize,
+    /// Anchor link (model index): `link=`, else the tip of `group` / the TCP.
+    pub link: usize,
+    /// Candidate obstacles — names or groups ([`names_match`]); empty means
+    /// every enabled obstacle nobody holds.
+    pub parts: Vec<String>,
+    /// Farthest an obstacle's surface may be from the anchor link's own
+    /// surface to be taken (m). `None` runs no distance test: the nearest
+    /// candidate is taken on the rising edge wherever it stands (a part
+    /// designated by name, as an authored `attach` would).
+    pub reach_m: Option<f64>,
+    /// Links allowed to touch the carried part (as `attach(touch_links=)`).
+    pub touch_links: Option<Vec<String>>,
+    /// The arm of a dual-arm robot the anchor belongs to.
+    pub group: Option<String>,
+    /// `link=` as declared, for persistence; `None` = derived from `group`.
+    pub link_name: Option<String>,
+}
+
+impl GraspBinding {
+    /// What the exchange, the ST export and the studio print next to the
+    /// coil: who grasps, what, how far.
+    pub fn describe(&self, robot: &str) -> String {
+        let what = if self.parts.is_empty() {
+            "any obstacle".to_string()
+        } else {
+            self.parts
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match self.reach_m {
+            Some(reach) => format!(
+                "grasp of `{robot}`: while high, takes the nearest of {what} within {reach} m of its tool; low releases"
+            ),
+            None => format!("grasp of `{robot}`: rising takes the nearest of {what}; falling releases"),
+        }
+    }
+}
+
+impl Scene {
+    /// Binds `robot`'s grasp to the coil `signal` (see [`GraspBinding`]).
+    /// Either `parts` or `reach_m` is required: a grasp that may take
+    /// anything needs a reach, a grasp that takes anywhere needs its parts
+    /// named. One binding per signal (re-declaring replaces it) and one per
+    /// anchor link.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_grasp(
+        &mut self,
+        signal: &str,
+        robot: usize,
+        link: Option<&str>,
+        group: Option<&str>,
+        parts: Option<&[String]>,
+        reach_m: Option<f64>,
+        touch_links: Option<&[String]>,
+    ) -> Result<(), SceneError> {
+        let bad = |m: String| Err(SceneError::BadGrasp(m));
+        if !self.signals.iter().any(|s| s.name == signal) {
+            return Err(SceneError::UnknownSignal(signal.to_string()));
+        }
+        let parts: Vec<String> = parts.map(|p| p.to_vec()).unwrap_or_default();
+        if parts.is_empty() && reach_m.is_none() {
+            return bad(format!(
+                "bind_grasp({signal:?}): name the parts the grasp may take (parts=[...]) or give \
+                 the reach it takes them within (reach_m=...)"
+            ));
+        }
+        let unknown = self.unmatched_obstacle_names(&parts);
+        if !unknown.is_empty() {
+            return bad(format!(
+                "bind_grasp({signal:?}): {} names no obstacle",
+                unknown
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(reach) = reach_m {
+            if !(reach.is_finite() && reach > 0.0) {
+                return bad(format!(
+                    "bind_grasp({signal:?}): reach_m must be positive, got {reach}"
+                ));
+            }
+        }
+        let model = self.robots[robot].model.clone();
+        let anchor = match link {
+            Some(l) => model
+                .link_index(l)
+                .ok_or_else(|| SceneError::UnknownLink(l.to_string()))?,
+            None => {
+                let g = self.resolve_group(robot, group, None)?;
+                self.group_tip(robot, g)
+            }
+        };
+        if let Some(names) = touch_links {
+            for l in names {
+                if l != "tool" && model.link_index(l).is_none() {
+                    return Err(SceneError::UnknownLink(l.to_string()));
+                }
+            }
+        }
+        if let Some(other) = self
+            .grasp_bindings
+            .iter()
+            .find(|b| b.robot == robot && b.link == anchor && b.signal != signal)
+        {
+            return bad(format!(
+                "bind_grasp({signal:?}): `{}` already takes the grasp of `{}` at `{}`",
+                other.signal, self.robots[robot].name, model.links[anchor].name
+            ));
+        }
+        self.grasp_bindings.retain(|b| b.signal != signal);
+        self.grasp_bindings.push(GraspBinding {
+            signal: signal.to_string(),
+            robot,
+            link: anchor,
+            parts,
+            reach_m,
+            touch_links: touch_links.map(|t| t.to_vec()),
+            group: group.map(str::to_string),
+            link_name: link.map(str::to_string),
+        });
+        Ok(())
+    }
+
+    /// Drops the grasp that follows `signal`.
+    pub fn unbind_grasp(&mut self, signal: &str) -> Result<(), SceneError> {
+        let before = self.grasp_bindings.len();
+        self.grasp_bindings.retain(|b| b.signal != signal);
+        if self.grasp_bindings.len() == before {
+            return Err(SceneError::BadGrasp(format!("no grasp follows `{signal}`")));
+        }
+        Ok(())
+    }
+
+    /// Every grasp bound to a coil, in declaration order.
+    pub fn grasp_bindings(&self) -> &[GraspBinding] {
+        &self.grasp_bindings
+    }
+
+    /// The grasp that follows `signal`, if any.
+    pub fn grasp_binding(&self, signal: &str) -> Option<&GraspBinding> {
+        self.grasp_bindings.iter().find(|b| b.signal == signal)
+    }
+
+    /// The grasp bound at `robot`'s link `link`, if any.
+    pub fn grasp_binding_at(&self, robot: usize, link: usize) -> Option<&GraspBinding> {
+        self.grasp_bindings
+            .iter()
+            .find(|b| b.robot == robot && b.link == link)
+    }
+
+    /// The obstacle `binding` takes as the scene stands: the nearest
+    /// candidate — enabled, held by nobody, not a walkable surface, one of
+    /// `parts` when named — by surface distance from the anchor link
+    /// (from its origin when the link has no geometry), within `reach_m`
+    /// when set. Returns the name and that distance.
+    pub fn grasp_target(&self, binding: &GraspBinding) -> Option<(String, f64)> {
+        let poses = self.link_poses_for(binding.robot);
+        let anchor = poses[binding.link];
+        let collider = &self.robots[binding.robot].collider;
+        let point = [(
+            botrail_collide::to_parry_pose(&Isometry3::identity()),
+            SharedShape::ball(1e-6),
+        )];
+        let link_parts = if collider.link_has_geometry(binding.link) {
+            collider.link_parts(binding.link)
+        } else {
+            &point[..]
+        };
+        let mut best: Option<(usize, f64)> = None;
+        for (i, (o, c)) in self
+            .obstacles
+            .iter()
+            .zip(&self.obstacle_colliders)
+            .enumerate()
+        {
+            if !o.enabled || o.walkable || self.is_attached(&o.name) {
+                continue;
+            }
+            if !binding.parts.is_empty() && !names_match(&binding.parts, &o.name) {
+                continue;
+            }
+            let d = botrail_collide::parts_signed_distance(&anchor, link_parts, &o.pose, c.parts())
+                .unwrap_or(f64::INFINITY);
+            if binding.reach_m.is_some_and(|reach| d > reach) {
+                continue;
+            }
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        best.map(|(i, d)| (self.obstacles[i].name.clone(), d))
     }
 }
 

@@ -38,6 +38,9 @@ a point of this map.
 | a device commanded `start`/`stop` | a **DO** run coil; `advance` → `name.index` DO; `goto` → `name.dispatch` DO + `name.station` Word; `move_to` → `name.position` Word; `set_speed` → `name.speed` AO | ⑤ |
 | a device awaited with `device_done` | a **DI** (in position / arrived) | ⑤ |
 | a linear axis with named `stops` | a **DI** per stop, `<axis>/<stop>` — the limit switch at that end, read like a sensor | ⑤ |
+| a linear axis with `coils` (a solenoid cylinder) commanded `move_to` | a **DO** per coil, `<axis>/<coil>` — and no position word; `device_done` reads the stop lanes instead of an in-position DI | ⑤ |
+| a device with `encoder=True` | a **Word** `name.encoder` (REAL — the axis's position, the belt's travel) on every host that commands or awaits the device | ⑤ |
+| a zone sensor with `ids=` (an identification reader) | its presence DI as any sensor's, and the word `name.id` (INT) — recorded by the plant, put on a host by `declare_io("name.id", role="input", host="PLC1")` | ①⑦ |
 | a `Source` / `Sink` magazine | a *cosmetic* row — presentation, not counted, not linted | ⑤ |
 | a robot driven (`motion` / `ramp` / `toolpath`) by a program that does **not** live on that robot's own controller | `robot.start` DO + `robot.done` DI on the driving host; a `robot.program` Word when the program picks among several motions | ⑥ |
 | a program that only reads `robot_done("x")` from another host | `x.done` DI on the reader's host | ⑥ |
@@ -45,6 +48,16 @@ a point of this map.
 Word and AO points are table vocabulary — the numeric commands a bool coil
 cannot carry. They are listed (and flagged `word_unexpressible`, an info),
 and the URScript lowering keeps them as comments, as it does today.
+
+A measurement — a position, a speed, an encoder — is a REAL, and a PLC's
+word register is 16 bits: give the word channel a **unit**
+(`bt.io.word(count=4, base="%QW100", unit="mm")`) and every REAL point bound
+to it is exchanged, declared and written as an INT in that unit
+(`feed_position := 300; (* 0.3 m *)`), the way a drive takes a position in
+increments. A REAL left on a word channel without a unit is a `unit`
+warning; a unit the exchange cannot scale by (`m`, `cm`, `mm`, `0.1mm`,
+`0.01mm`, `um`, `m/s`, `mm/s`, `mm/min`, `deg`, `0.1deg` are known) an
+error; a scaled range beyond INT16 a warning.
 
 ## Hosts: who owns a point
 

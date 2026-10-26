@@ -159,6 +159,10 @@ pub struct Program {
     pub name: String,
     pub joint_names: Vec<String>,
     pub commands: Vec<Command>,
+    /// The program's digital I/O lives in the controller's general-purpose
+    /// bit registers (what an external RTDE client reads and writes)
+    /// instead of its standard digital I/O. Ports are register indices.
+    pub io_registers: bool,
 }
 
 impl Program {
@@ -206,6 +210,11 @@ pub struct ProgramOptions {
     /// Emit an initial joint move to the first waypoint, making the
     /// program runnable from any (nearby, collision-free) configuration.
     pub move_to_start: bool,
+    /// Address the program's I/O as the controller's general-purpose bit
+    /// registers (UR: `read_input_boolean_register` /
+    /// `write_output_boolean_register`, the registers an external RTDE
+    /// client drives) instead of the standard digital I/O.
+    pub io_registers: bool,
 }
 
 impl Default for ProgramOptions {
@@ -216,6 +225,7 @@ impl Default for ProgramOptions {
             tcp_speed: 0.25,
             tcp_accel: 1.2,
             move_to_start: true,
+            io_registers: false,
         }
     }
 }
@@ -316,6 +326,7 @@ pub fn build_program(
         name: name.to_string(),
         joint_names: joint_names.to_vec(),
         commands,
+        io_registers: options.io_registers,
     })
 }
 

@@ -5,4 +5,4 @@
  * several wires: a device's numeric commands and a robot's handshake.
  * Rendered as `name.aspect`.
  */
-export type Aspect = "index" | "dispatch" | "station" | "position" | "speed" | "start" | "done" | "program";
+export type Aspect = "index" | "dispatch" | "station" | "position" | "speed" | "start" | "done" | "program" | "step" | "encoder" | "id";

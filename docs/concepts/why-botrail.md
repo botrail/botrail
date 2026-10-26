@@ -73,9 +73,12 @@ physics, and honesty about that is what makes the numbers trustworthy.
   frozen; there is no cooperative planning. Execution-time interference is
   caught by tick checking, and separation is authored with interlocks — the
   way a PLC cell actually does it.
-* **PLC vocabulary, not PLC connectivity** — but the I/O list, the
+* **PLC vocabulary first; connectivity for commissioning, not production** — the I/O list, the
   logic and the [cable list](../guides/routing.md) are deliverables. Steps, signals, and scan cycles are the mental
-  model; there is no OPC-UA link to real hardware. What the cell needs
+  model; there is no online link to a controller today — a controller-in-the-loop
+  mode (the cell as the plant for a PLC under test, its inputs recorded and
+  replayed deterministically) is in design, and botrail will not drive real
+  actuators. What the cell needs
   electrically is derived from those programs ([the I/O map](../guides/io-map.md):
   points, assignments, handshake wires, a broken-wire scenario), the
   sequences leave as [PLCopen XML](../guides/offline-commissioning.md) for

@@ -59,7 +59,8 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
                 sequences=None, scenarios: bool = False, dt: float = 0.01,
                 max_duration: float = 120., plan_resolution: float = 0.05,
                 clearance_dt: float | None = 0.01, title: str | None = None,
-                fps: float = 30., scale: float = 100., manifest: bool = True) -> Path:
+                fps: float = 30., scale: float = 100., manifest: bool = True,
+                fat=None) -> Path:
     """Write the selected documents (and a manifest) from a fresh snapshot and bake.
 
     ``out`` is created when missing; a document set already there is
@@ -70,6 +71,13 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
     robot dialect, a PLCopen block left as a stub, or a scenario that did
     not complete is recorded under ``issues`` in the manifest and the
     report rather than failing the export.
+
+    ``fat`` adds the FAT sheet (``<name>_fat.md`` / ``.json``, and a section
+    of the report): ``True`` runs the rows derived from the interlock table
+    and the safety inputs (``bt.vc.interlock_tests`` / ``safety_tests``), a
+    path reads a cases file (``bt.vc.load_cases``), a list of
+    ``bt.vc.TestCase`` runs those. Every case runs offline, in loopback; a
+    failed row is an ``issue`` (``fat_case_failed``), not an export failure.
 
     Returns the manifest path — or, with ``manifest=False``, the directory.
     """
@@ -85,6 +93,10 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
         _positive(value, key)
     if clearance_dt is not None:
         _positive(clearance_dt, "clearance_dt")
+    if fat is not None and fat is not True and fat is not False and not isinstance(fat, (str, Path)):
+        fat = list(fat)
+        if any(not isinstance(c, _TestCase()) for c in fat):
+            raise ValueError("fat must be True, a cases file path, or a list of bt.vc.TestCase")
     if out.exists() and not out.is_dir():
         raise ValueError(f"export directory is a file: {out}")
     snapshot = scene._snapshot()
@@ -97,7 +109,7 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
         "scenarios": ["baseline", *snapshot.scenario_names] if scenarios and bake else (["baseline"] if bake else []),
         "dt": dt, "max_duration": max_duration, "plan_resolution": plan_resolution,
         "clearance_dt": clearance_dt if "report" in wanted and bake else None,
-        "fps": fps, "layout_scale": scale, "title": title,
+        "fps": fps, "layout_scale": scale, "title": title, "fat": None,
     }
     manifest_name = f"{name}_manifest.json"
     files, issues = [], []
@@ -139,6 +151,30 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
         if runs is not None:
             for scenario, error in runs.errors.items():
                 issue("scenario_execution_failed", f"{scenario}: {error}")
+        sections = []
+        if fat and names:
+            from . import vc
+
+            if fat is True:
+                cases = vc.interlock_tests(snapshot, sequences=names) + vc.safety_tests(snapshot, sequences=names)
+            elif isinstance(fat, (str, Path)):
+                cases = vc.load_cases(fat, snapshot)
+            else:
+                cases = list(fat)
+            if cases:
+                sheet = vc.run_fat(snapshot, cases, names, dt=dt, title=title)
+                for ext in ("md", "json"):
+                    write(f"{name}_fat.{ext}", "fat", lambda p, sheet=sheet: sheet.save(p))
+                for row in sheet.failed:
+                    why = row.detail or "; ".join(f"{c.expectation}: {c.detail}" for c in row.checks if c.ok is False)
+                    issue("fat_case_failed", f"{row.name}: {why}", f"{name}_fat.md")
+                sections.append(sheet.section())
+                conditions["fat"] = {"cases": len(sheet), "mode": sheet.mode, "horizon_s": sheet.horizon,
+                                     "counts": sheet.counts}
+            else:
+                issue("no_fat_cases", "fat: no test case — no deniable interlock row and no safety input")
+        elif fat and not names:
+            issue("no_programs", "fat: no programs selected; no sheet generated")
         if "project" in wanted:
             write(f"{name}.botrail", "project", snapshot.save_project)
         if "python" in wanted:
@@ -200,7 +236,7 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
 
         if "report" in wanted:
             report = snapshot.cell_report(timelines or None, scenarios=runs, sequences=names,
-                                          clearance_dt=clearance_dt, title=title)
+                                          clearance_dt=clearance_dt, title=title, sections=sections or None)
             data = json.loads(report.to_json())
             data["deliverables"] = [{k: row[k] for k in ("path", "kind", "sha256", "bytes")} for row in files]
             data["issues"] = list(issues)
@@ -222,6 +258,12 @@ def export_cell(scene, out: str | Path, *, name: str = "cell", exports=None,
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, target)
     return out / manifest_name if manifest else out
+
+
+def _TestCase():
+    from .vc import TestCase
+
+    return TestCase
 
 
 def _deliverables_markdown(files, issues):

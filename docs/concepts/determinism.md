@@ -40,11 +40,13 @@ still catches everything you care about.
 Determinism is not an implementation nicety; it is bought with three design
 decisions, each visible elsewhere in the docs:
 
-1. **No physics engine.** Geometry, kinematics, and a discrete scan — no
-   contact solver, no integrator with its stability noise. This is the
-   headline [non-goal](why-botrail.md#what-botrail-does-not-claim): botrail
-   answers *reach, clearance, seconds*, and in exchange every answer is
-   exact.
+1. **No physics in the bake.** Geometry, kinematics, and a discrete scan —
+   no contact solver, no integrator with its stability noise. Physics is an
+   opt-in mode ([physics](../guides/physics.md)) whose bakes are
+   deterministic per machine and build, not bit-identical across machines;
+   the kinematic bake is the headline
+   [position](why-botrail.md#what-botrail-does-not-claim): botrail answers
+   *reach, clearance, seconds*, and in exchange every answer is exact.
 2. **The PLC scan.** Sensors, devices, transitions, and tracking all advance
    on a fixed tick (`dt=0.01`). Time is a grid, not a race; the timeline is
    quantized, and one tick (`abs=0.011`) is the natural tolerance for any

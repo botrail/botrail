@@ -4,6 +4,7 @@ import type {
   CollisionPairMsg,
   ContactMsg,
   FlashMsg,
+  PlantStatusMsg,
   FrameMsg,
   GroupMsg,
   ToolpathOverlayMsg,
@@ -26,6 +27,7 @@ import type {
   ServerMessage,
   SignalDefMsg,
   SignalTrackMsg,
+  WordTrackMsg,
   StepSpanMsg,
   TopologyMsg, RouteSupportMsg, RouteCandidate } from "./protocol";
 import {
@@ -580,6 +582,10 @@ export interface StudioState {
   sensors: SensorMsg[];
   /** Weld-flash bindings (signal -> flash at a robot's TCP). */
   flashes: FlashMsg[];
+  /** The live plant session streaming to this studio (`bt.vc.Session`),
+   * or `null`: its hosts and links, pace, what is forced, broken on,
+   * recorded — the dock's plant bar and the I/O table's force column. */
+  plant: PlantStatusMsg | null;
   /** Auxiliary devices; re-sent in full by the server on every change. */
   devices: DeviceMsg[];
   /** Cameras; re-sent in full by the server on every change. */
@@ -707,6 +713,8 @@ export interface StudioState {
     /** Per-robot move intervals (motion/ramp bands), in scene order. */
     robots: { name: string; moves: StepSpanMsg[] }[];
     signals: SignalTrackMsg[];
+    /** Word lanes — encoders, identification readers — sampled on change. */
+    words: WordTrackMsg[];
     /** Which arm each branching step took (recordings have none). */
     branches: BranchTakenMsg[];
     /** Scenario the bake ran under; null = the unmodified scene. */
@@ -904,6 +912,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   signalDefs: [],
   sensors: [],
   flashes: [],
+  plant: null,
   devices: [],
   cameras: [],
   lidars: [],
@@ -1105,6 +1114,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       });
     } else if (msg.type === "effects") {
       set({ flashes: msg.flashes });
+    } else if (msg.type === "plant") {
+      set({ plant: msg.status ?? null });
     } else if (msg.type === "devices") {
       set((s) => {
         const sel = s.selection;
@@ -1229,6 +1240,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               moves: r.moves,
             })),
             signals: tl.signals,
+            words: tl.words ?? [],
             branches: tl.branches,
             scenario: msg.scenario ?? null,
             contacts: tl.contacts ?? [],
@@ -1312,6 +1324,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             routeFindings: [],
             robots: chunk.robots.map((r) => ({ name: r.name, moves: r.moves })),
             signals: chunk.signals,
+            words: chunk.words ?? [],
             branches: chunk.branches,
             scenario,
             // Touches come by the window they began in: most windows bring
@@ -1371,6 +1384,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
               moves: r.moves,
             })),
             signals: msg.timeline.signals,
+            words: msg.timeline.words ?? [],
             branches: msg.timeline.branches,
             scenario: null,
             contacts: msg.timeline.contacts ?? [],

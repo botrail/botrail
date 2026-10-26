@@ -863,6 +863,7 @@ mod tests {
                     zone_size: Vector3::new(3.0, 0.4, 0.4),
                     velocity: Vector3::new(0.2, 0.0, 0.0),
                     running: false,
+                    encoder: false,
                 },
             });
             scene.upsert_sequence(Sequence {

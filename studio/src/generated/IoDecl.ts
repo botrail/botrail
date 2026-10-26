@@ -9,4 +9,12 @@ export type IoDecl = { name: string, role?: DeclRole | null, kind?: ChannelKind 
 /**
  * The other channel of a two-channel safety input.
  */
-pair?: string | null, note?: string | null, };
+pair?: string | null, note?: string | null, 
+/**
+ * The controller the point belongs to when no program of the set
+ * reads or writes it — a point a hand-written PLC program will read
+ * (an identification reader's word, an encoder on another host).
+ * Names a node. Without it an unused declared point has no host and
+ * sits on no exchange.
+ */
+host?: string | null, };

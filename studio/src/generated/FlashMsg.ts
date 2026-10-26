@@ -17,4 +17,12 @@ spin_link: string | null,
 /**
  * Spray-cone size, `[length, radius]` in meters (spray effects only).
  */
-cone?: [number, number] | null, };
+cone?: [number, number] | null, 
+/**
+ * The obstacle a lamp lights (lamp effects only).
+ */
+obstacle?: string | null, 
+/**
+ * The lamp's lit colour, linear RGB (lamp effects only).
+ */
+color?: [number, number, number] | null, };

@@ -77,6 +77,24 @@ a sensor doesn't break the cell — re-simulate and read the new cycle time.
   digests) all come out of the same script as the simulation, so a layout
   edit changes exactly the documents it touches — and never lets them
   disagree.
+- **Virtual commissioning** — the cell as the plant of a PLC under test:
+  the exchange a controller writes and reads is derived from the I/O map,
+  the programs leave as Structured Text a runtime compiles, botrail answers
+  as a Modbus TCP server or an OPC UA client, a grasp follows its coil the
+  way a PLC expects, the FAT is a sheet of test cases — rows derived from
+  the interlock table and the safety inputs, yours beside them — that runs
+  offline or against the PLC, the robot's own controller (URSim over RTDE)
+  can run the exported program with the plant mirroring its arm, vendor
+  interfaces (FANUC UOP, KUKA, ABB, UR) are data in the I/O map, the
+  plant speaks the PLC's device vocabulary — position and encoder words
+  scaled to a register's unit, solenoid cylinders as coils and limit
+  switches, belt stoppers that queue parts, identification readers —
+  and the run lands in the same timeline as the bake,
+  recorded and replayable, diffed against the design — and streams to the
+  studio live, where the dock holds, steps and records it, the I/O table
+  forces a lane, a click presses a panel button and the PLC's own step
+  word lights the SFC chart
+  ([guide](https://neka-nat.github.io/botrail/guides/virtual-commissioning/)).
 - **Selection, checked — not chosen** — `scene.requirements()` derives what
   every BOM line must be able to do (payload from the grasped parts, reach
   from the taught targets, a beam's span, a conveyor's load...) and compares

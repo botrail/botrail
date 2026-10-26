@@ -17,6 +17,7 @@ import { RobotBaseGizmo } from "./RobotBaseGizmo";
 import { RouteViaGizmo } from "./RouteViaGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
+import { LampView } from "./LampView";
 import { ContactMarkerView } from "./ContactMarkerView";
 import { SensorView } from "./SensorView";
 import { CameraView } from "./CameraView";
@@ -199,6 +200,7 @@ export function Viewport() {
             <LidarView />
           </Aid>
           <FlashView />
+          <LampView />
           <Aid>
             <ContactMarkerView />
           </Aid>

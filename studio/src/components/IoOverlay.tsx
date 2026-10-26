@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import { useDockReserve } from "../dockReserve";
 import { channelChoices, pointId } from "../ioEdit";
+import { forcedLevel, hostChip } from "../plant";
 import { signalAt } from "../playbackRig";
 import type {
   ChannelKind,
@@ -17,6 +18,7 @@ import {
   sendAutoAssignIo,
   sendBindIo,
   sendDeclareIo,
+  sendPlant,
   sendUnbindIo,
   sendUndeclareIo,
 } from "../ws";
@@ -48,7 +50,9 @@ export function channelChip(p: IoPointMsg): string | null {
 export function chipsForLane(points: IoPointMsg[], name: string): string[] {
   const chips: string[] = [];
   for (const p of points) {
-    if (p.name !== name || p.aspect) continue;
+    // A bool lane is a point's name; a word lane its label, `name.aspect`.
+    const label = p.aspect ? `${p.name}.${p.aspect}` : p.name;
+    if (label !== name) continue;
     const chip = channelChip(p);
     if (chip && !chips.includes(chip)) chips.push(chip);
   }
@@ -95,6 +99,7 @@ export function IoOverlay() {
   const selectSensor = useStudioStore((s) => s.selectSensor);
   const selectDevice = useStudioStore((s) => s.selectDevice);
   const focusTab = useStudioStore((s) => s.focusTab);
+  const plant = useStudioStore((s) => s.plant);
   const docked = useStudioStore((s) => s.playback !== null);
   const [panel, setPanel] = useState<HTMLDivElement | null>(null);
   useDockReserve(panel, docked);
@@ -201,6 +206,20 @@ export function IoOverlay() {
             {warnings > 0 ? `${warnings} warning${warnings > 1 ? "s" : ""}` : ""}
           </span>
         )}
+        {/* The live plant's controllers: each host with its link and how
+            many exchanges it has served — the connection header of a
+            commissioning session, red when a link is down. */}
+        {plant &&
+          plant.hosts.map((host) => (
+            <span
+              key={host.name}
+              className={host.error ? "plant-chip plant-chip-error" : "plant-chip"}
+              title={host.error ?? `${host.name}: ${host.link}`}
+            >
+              {hostChip(host)}
+              {host.error ? " · down" : ""}
+            </span>
+          ))}
         <label className="io-filter" title="only points without a channel">
           <input
             type="checkbox"
@@ -261,6 +280,9 @@ export function IoOverlay() {
                 <th title="lane level at the playhead (points with a lane, while a bake is loaded)">
                   live
                 </th>
+                {plant && (
+                  <th title="pin the lane like a PLC force: 1 / 0 until released (×)">force</th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -273,10 +295,13 @@ export function IoOverlay() {
                 const clickable =
                   sensors.some((s) => s.name === p.name) ||
                   devices.some((d) => d.name === p.name);
+                const forced = p.aspect ? null : forcedLevel(plant, p.name);
                 return (
                   <tr
                     key={`${p.label}/${p.direction}/${p.host ?? ""}`}
-                    className={`io-row io-${p.status}${clickable ? " io-clickable" : ""}`}
+                    className={`io-row io-${p.status}${clickable ? " io-clickable" : ""}${
+                      forced !== null ? " io-forced" : ""
+                    }`}
                     onClick={() => pick(p)}
                     title={clickable ? "select in the scene tree" : undefined}
                   >
@@ -310,7 +335,44 @@ export function IoOverlay() {
                       ) : (
                         <span className={live ? "io-on" : "io-off"}>{live ? "●" : "○"}</span>
                       )}
+                      {forced !== null && (
+                        <span className="io-forced-mark" title="forced">
+                          F
+                        </span>
+                      )}
                     </td>
+                    {plant && (
+                      <td className="io-force" onClick={(e) => e.stopPropagation()}>
+                        {lane ? (
+                          <>
+                            <button
+                              className={forced === true ? "io-force-on" : undefined}
+                              onClick={() => sendPlant({ command: "force", lane: p.name, value: true })}
+                              title="force the lane high"
+                            >
+                              1
+                            </button>
+                            <button
+                              className={forced === false ? "io-force-on" : undefined}
+                              onClick={() => sendPlant({ command: "force", lane: p.name, value: false })}
+                              title="force the lane low"
+                            >
+                              0
+                            </button>
+                            {forced !== null && (
+                              <button
+                                onClick={() => sendPlant({ command: "unforce", lane: p.name })}
+                                title="release the force: the lane follows the world again"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          <span className="io-muted">—</span>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 );
               })}

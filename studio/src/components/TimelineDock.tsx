@@ -1,21 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { samplePlayback } from "../playback";
-import type { StepSpanMsg } from "../protocol";
+import {
+  breakMark,
+  hostChip,
+  nextSpeed,
+  plantCaption,
+  speedLabel,
+  toggleBreak,
+} from "../plant";
+import type { PlantStatusMsg, StepSpanMsg, WordTrackMsg } from "../protocol";
 import { setPhysics } from "../bake";
 import { followsLive, useStudioStore } from "../store";
 import {
   LANE_GROUPS,
   clampLanesHeight,
+  formatWord,
   isFolded,
   parseLaneView,
   serializeLaneView,
   signalGroup,
   toggleGroup,
+  wordPolyline,
+  wordValueAt,
   type LaneGroup,
   type LaneView,
 } from "../timelineLanes";
-import { sendExportUsd } from "../ws";
+import { sendExportUsd, sendPlant } from "../ws";
 import { chipsForLane } from "./IoOverlay";
 
 const LANES_KEY = "botrail-studio.lanes";
@@ -99,6 +110,7 @@ function SignalLane({
   duration,
   chips,
   hot,
+  plant,
 }: {
   signal: { name: string; times: number[]; values: boolean[] };
   duration: number;
@@ -107,14 +119,30 @@ function SignalLane({
   chips: string[];
   /** Picked in the topology diagram. */
   hot: boolean;
+  /** The live plant session, when one streams: a right-click on the lane
+   * sets a breakpoint on its rising edge (shift: falling), the mark on
+   * the name says which are set. */
+  plant: PlantStatusMsg | null;
 }) {
   const pct = (t: number) => `${(t / duration) * 100}%`;
+  const mark = breakMark(plant, signal.name);
+  const describe = chips.length > 0 ? `${signal.name} — ${chips.join(", ")}` : signal.name;
   return (
     <div className={`timeline-lane${hot ? " timeline-lane-hot" : ""}`}>
       <span
-        className="timeline-lane-name"
-        title={chips.length > 0 ? `${signal.name} — ${chips.join(", ")}` : signal.name}
+        className={`timeline-lane-name${plant ? " timeline-lane-name-breakable" : ""}`}
+        title={
+          plant
+            ? `${describe} · right-click: pause the plant at this lane's rising edge (shift: falling)`
+            : describe
+        }
+        onContextMenu={(e) => {
+          if (!plant) return;
+          e.preventDefault();
+          sendPlant(toggleBreak(plant, signal.name, !e.shiftKey));
+        }}
       >
+        {mark && <span className="timeline-lane-break">{mark} </span>}
         {signal.name}
       </span>
       {chips.length > 0 && (
@@ -147,11 +175,73 @@ function SignalLane({
   );
 }
 
+/**
+ * A word lane: the number as a step plot over the cycle — an encoder's
+ * travel climbing while the belt runs, a reader's id jumping as a carrier
+ * passes — with the value under the playhead beside the name. Scaled to
+ * the lane's own range, so a 20 mm cylinder and a 2 m axis each fill
+ * their track.
+ */
+function WordLane({
+  word,
+  duration,
+  at,
+  chips,
+  hot,
+}: {
+  word: WordTrackMsg;
+  duration: number;
+  /** The playhead time, whose value the lane labels. */
+  at: number;
+  /** The channels the word is bound to (`PLC1.IW0 · %IW100`). */
+  chips: string[];
+  hot: boolean;
+}) {
+  const W = 1000;
+  const H = 8;
+  const lo = word.values.length ? Math.min(...word.values) : 0;
+  const hi = word.values.length ? Math.max(...word.values) : 0;
+  const points = wordPolyline(word, duration, W, H);
+  const now = wordValueAt(word, at);
+  const title = `${word.name} — ${formatWord(lo, word.integer)} … ${formatWord(hi, word.integer)}`;
+  return (
+    <div className={`timeline-lane${hot ? " timeline-lane-hot" : ""}`}>
+      <span className="timeline-lane-name" title={title}>
+        {word.name}
+      </span>
+      <span className="timeline-lane-value" title={title}>
+        {formatWord(now, word.integer)}
+      </span>
+      {chips.length > 0 && (
+        <span className="timeline-lane-chips" title={chips.join(", ")}>
+          {chips.slice(0, 2).map((c) => (
+            <span key={c} className="io-chip">
+              {c}
+            </span>
+          ))}
+          {chips.length > 2 && <span className="io-chip">+{chips.length - 2}</span>}
+        </span>
+      )}
+      <div className="timeline-lane-track">
+        <svg
+          className="timeline-lane-word"
+          viewBox={`0 0 ${W} ${H}`}
+          preserveAspectRatio="none"
+          aria-label={title}
+        >
+          <polyline points={points} vectorEffect="non-scaling-stroke" />
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 export function TimelineDock() {
   const timeline = useStudioStore((s) => s.timeline);
   const physicsOn = useStudioStore((s) => s.physicsOn);
   const streaming = useStudioStore((s) => s.bakeStream !== null);
   const live = useStudioStore(followsLive);
+  const plant = useStudioStore((s) => s.plant);
   const simulating = useStudioStore((s) => s.sequenceSimulating);
   const connected = useStudioStore((s) => s.connection === "connected");
   const lanes = useMemo(
@@ -221,6 +311,9 @@ export function TimelineDock() {
     for (const lane of timeline?.signals ?? []) {
       m.set(lane.name, chipsForLane(ioPoints, lane.name));
     }
+    for (const word of timeline?.words ?? []) {
+      m.set(word.name, chipsForLane(ioPoints, word.name));
+    }
     return m;
   }, [ioPoints, timeline]);
 
@@ -252,10 +345,13 @@ export function TimelineDock() {
   const pct = (t: number) => `${(t / duration) * 100}%`;
 
   // One robot plays alone on the step bar; several get a lane each.
+  // Word lanes (encoders, readers) sit with the sensors: they are inputs
+  // the controller reads, just not boolean ones.
+  const words = timeline?.words ?? [];
   const counts: Record<LaneGroup, number> = {
     robots: lanes.length > 1 ? lanes.length : 0,
     signals: signalsByGroup.signals.length,
-    sensors: signalsByGroup.sensors.length,
+    sensors: signalsByGroup.sensors.length + words.length,
     devices: signalsByGroup.devices.length,
   };
   const groups = LANE_GROUPS.filter((g) => counts[g] > 0);
@@ -295,11 +391,13 @@ export function TimelineDock() {
         duration={duration}
         chips={chips.get(signal.name) ?? []}
         hot={highlightLane === signal.name}
+        plant={plant}
       />
     ));
 
   return (
     <div className="timeline-dock" ref={dockRef}>
+      {plant && <PlantBar plant={plant} />}
       {laneView.open && groups.length > 0 && (
         <div
           className="timeline-grip"
@@ -316,7 +414,7 @@ export function TimelineDock() {
           {timeline ? (timeline.stepSpans.length > 0 ? "cycle" : "physics") : "preview"}{" "}
           {(timeline?.cycleEnd ?? duration).toFixed(2)}s
           {timeline?.cycleEnd != null ? ` · world ${duration.toFixed(2)}s` : ""}
-          {live ? " · drag a body to push it" : ""}
+          {live && !plant ? " · drag a body to push it" : ""}
         </span>
         <span className="timeline-controls">
           {/* A 60-90 s takt is unwatchable at 1x; speed and loop are how a
@@ -345,7 +443,7 @@ export function TimelineDock() {
           {/* The physics toggle: this bake again under the host's physics
               (or back to kinematic), restarted from the top. The label
               names the engine the playing bake ran under. */}
-          {!recording && (
+          {!recording && !plant && (
             <button
               className={
                 physicsOn ? "timeline-button timeline-button-on" : "timeline-button"
@@ -554,10 +652,110 @@ export function TimelineDock() {
                 asked for — hundreds on a line of sources and sinks). */}
             {shown("signals") && signalLanes("signals")}
             {shown("sensors") && signalLanes("sensors")}
+            {shown("sensors") &&
+              words.map((word) => (
+                <WordLane
+                  key={word.name}
+                  word={word}
+                  duration={duration}
+                  at={playbackTime}
+                  chips={chips.get(word.name) ?? []}
+                  hot={highlightLane === word.name}
+                />
+              ))}
             {shown("devices") && signalLanes("devices")}
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The live plant session's bar over the transport: who the controllers
+ * are and how the loop keeps time (the session's own words), and the
+ * hand on it — hold / run / one scan, the realtime speed, a clip
+ * recording, and `live` to follow the plant again after a clip. Every
+ * button is one `plant` command; the session answers with its status.
+ */
+function PlantBar({ plant }: { plant: PlantStatusMsg }) {
+  const recording = plant.recording_from != null;
+  return (
+    <div className="plant-bar">
+      <span className="plant-caption" title={plantCaption(plant)}>
+        <span className={plant.paused ? "plant-dot plant-dot-paused" : "plant-dot"}>●</span>
+        <span>{plantCaption(plant)}</span>
+        {plant.hosts.map((host) => (
+          <span
+            key={host.name}
+            className={host.error ? "plant-chip plant-chip-error" : "plant-chip"}
+            title={host.error ?? `${host.name}: ${host.link}`}
+          >
+            {hostChip(host)}
+            {host.error ? " · down" : ""}
+          </span>
+        ))}
+        {plant.forced.length > 0 && (
+          <span className="plant-chip" title={plant.forced.map(([lane, v]) => `${lane} = ${v ? 1 : 0}`).join(", ")}>
+            {plant.forced.length} forced
+          </span>
+        )}
+        {plant.halted && <span className="plant-halted">paused at {plant.halted}</span>}
+        {!plant.following && (
+          <span className="plant-chip" title="a clip stands on the dock; the plant runs on">
+            clip on the dock
+          </span>
+        )}
+      </span>
+      <span className="plant-controls">
+        <button
+          className="timeline-button"
+          onClick={() => sendPlant({ command: plant.paused ? "resume" : "pause" })}
+          title={
+            plant.paused
+              ? "run the plant on (the controller kept polling it as it stood)"
+              : "hold the plant where it stands; the controller keeps polling a frozen world"
+          }
+        >
+          {plant.paused ? "▶ run" : "❚❚ hold"}
+        </button>
+        <button
+          className="timeline-button"
+          onClick={() => sendPlant({ command: "step", n: 1 })}
+          title="one scan, then hold"
+        >
+          ⏭ scan
+        </button>
+        {plant.pace === "realtime" && (
+          <button
+            className="timeline-button"
+            onClick={() => sendPlant({ command: "speed", speed: nextSpeed(plant.speed) })}
+            title="the realtime speed (plant seconds per wall second)"
+          >
+            {speedLabel(plant.speed)}
+          </button>
+        )}
+        <button
+          className={recording ? "timeline-button timeline-button-rec" : "timeline-button"}
+          onClick={() => sendPlant({ command: "record", on: !recording })}
+          title={
+            recording
+              ? "stop recording: the clip lands on the dock, playable and exportable as USD"
+              : "record a clip of the run from here"
+          }
+        >
+          {recording ? `■ ${(plant.t - (plant.recording_from ?? plant.t)).toFixed(1)} s` : "● rec"}
+        </button>
+        {!plant.following && (
+          <button
+            className="timeline-button timeline-button-on"
+            onClick={() => sendPlant({ command: "follow" })}
+            title="follow the live plant again"
+          >
+            live
+          </button>
+        )}
+      </span>
     </div>
   );
 }

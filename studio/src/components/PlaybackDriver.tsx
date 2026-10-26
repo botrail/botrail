@@ -10,6 +10,7 @@ import {
   signalAt,
   styleFlash,
   styleSpray,
+  updateLamps,
 } from "../playbackRig";
 import { useStudioStore, robotByName, type StudioState } from "../store";
 
@@ -93,6 +94,7 @@ export function PlaybackDriver() {
     updateFlashes(s, sample, t);
     updateSprays(s, sample, t);
     updateTraces(s, sample, t, Math.min(delta, 0.25));
+    updateLamps(s.flashes, s.timeline?.signals ?? [], t);
     if (
       lastPushed.current < 0 ||
       Math.abs(t - lastPushed.current) >= UI_PERIOD

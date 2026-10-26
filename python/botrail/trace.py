@@ -1,13 +1,15 @@
 """Traces from the real controller, and the diff against the bake — offline
-commissioning without an online link.
+commissioning on files.
 
-botrail never closes a loop with a running PLC (that would cost the
-determinism everything else stands on). What it does instead: the cell
-hands its logic and its I/O list to the controller, the controller runs,
-its I/O log comes back as a trace, and the trace is *compared* with the
-timeline the cell baked — edge by edge, by name. Where they disagree is
-where the design and the machine differ: a sensor that never fired, a
-handshake that came late, a coil that switched twice.
+The bake is the trajectory the cell follows if the controller behaves as
+designed; a trace is what a controller actually did. This module compares
+the two: the cell hands its logic and its I/O list to the controller, the
+controller runs, its I/O log comes back as a trace, and the trace is
+*compared* with the timeline the cell baked — edge by edge, by name. Where
+they disagree is where the design and the machine differ: a sensor that
+never fired, a handshake that came late, a coil that switched twice. (A
+controller-in-the-loop mode that records the controller's inputs live and
+replays them deterministically is in design; the diff stays the same.)
 
     trace = bt.trace.load("plc_log.csv", io=scene.io_map())   # tags → point names
     d = tl.diff(trace, tolerance=0.05, align_on="beam_pick")

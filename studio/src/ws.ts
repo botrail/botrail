@@ -18,6 +18,7 @@ import type {
   IoNode,
   IoPointId,
   ObstacleMsg,
+  PlantCommandMsg,
   PoseMsg,
   SegmentMsg,
   SensorMsg,
@@ -376,6 +377,13 @@ export function sendDrag(
 /** The hand lets go. */
 export function sendRelease(): void {
   rawSend({ type: "release" });
+}
+
+/** A hand on the live plant session (`bt.vc.Session`): the transport, a
+ * force, a push button, a breakpoint, the recording. The session's loop
+ * applies it before its next scan. */
+export function sendPlant(command: PlantCommandMsg): void {
+  rawSend({ type: "plant", command });
 }
 
 /** Bake the last simulated timeline as a usda layer; the reply

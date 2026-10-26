@@ -6,6 +6,8 @@ line of Python — the entry an agent's iteration loop and a CI job share.
     botrail export cell.botrail --out deliverables/ --all
     botrail schema > project.schema.json       # the .botrail JSON Schema
     botrail studio cell.botrail                # open it in the browser
+    botrail commission cell.py --link PLC1=modbus://0.0.0.0:5020 --for 60   # the cell as a PLC's plant
+    botrail fat cell.py --cases fat.yaml --out fat.md                      # the FAT sheet (offline, or --link)
 
 A *cell* is a `.botrail` project or a Python file: the file is run and its
 top-level `scene` is taken, or its `build()` / `build_cell()` (returning a
@@ -169,7 +171,7 @@ def cmd_export(args) -> int:
             sequences=args.sequence, scenarios=args.scenarios, dt=args.dt,
             max_duration=args.max_duration, plan_resolution=args.plan_resolution,
             clearance_dt=None if args.no_clearance else args.clearance_dt,
-            title=args.title, fps=args.fps, scale=args.scale,
+            title=args.title, fps=args.fps, scale=args.scale, fat=args.fat,
         )
     except (ValueError, KeyError, OSError) as e:
         print(json.dumps({"ok": False, "cell": args.cell, "error": str(e)}, indent=2))
@@ -180,6 +182,20 @@ def cmd_export(args) -> int:
         # uncovered branch) is not an export failure; say why.
         print(json.dumps({"warning": f"{issue['code']}: {issue['message']}"}), file=sys.stderr)
     files = [str(manifest.parent / row["path"]) for row in record["files"]]
+    stem = args.name or Path(args.cell).stem
+    out_dir = Path(args.out)
+    for host in args.exchange or []:
+        import botrail as bt
+
+        xc = bt.vc.exchange(scene, host, args.sequence)
+        for ext in ("md", "csv", "json"):
+            path = out_dir / f"{stem}_exchange_{_slug(host)}.{ext}"
+            xc.save(path)
+            files.append(str(path))
+    for host in args.st or []:
+        path = out_dir / f"{stem}_{_slug(host)}.st"
+        scene.export_st(path, host, args.sequence)
+        files.append(str(path))
     result = {"ok": True, "cell": args.cell, "out": str(args.out), "files": files}
     if args.manifest:
         result["manifest"] = str(manifest)
@@ -187,6 +203,136 @@ def cmd_export(args) -> int:
         manifest.unlink()
     print(json.dumps(result, indent=2))
     return 0
+
+
+def _slug(host: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in host).strip("_") or "host"
+
+
+def _parse_link(spec: str, exchange):
+    """`HOST=modbus://bind:port` / `HOST=opcua://url` / `HOST=replay:file` /
+    `HOST=loopback` → `(host, link or None, loopback)`."""
+    import botrail as bt
+
+    host, sep, target = spec.partition("=")
+    if not sep or not host or not target:
+        raise CliError(f"--link {spec!r}: expected HOST=modbus://BIND | HOST=opcua://URL | HOST=replay:FILE | HOST=loopback")
+    if target == "loopback":
+        return host, None, True
+    if target.startswith("modbus://"):
+        bind = target[len("modbus://"):]
+        return host, bt.vc.modbus_server(exchange(host), bind, allow_remote=True), False
+    if target.startswith("opc.tcp://") or target.startswith("opcua://"):
+        url = target.replace("opcua://", "opc.tcp://", 1)
+        return host, bt.vc.opcua_client(exchange(host), url, allow_remote=True), False
+    if target.startswith("replay:"):
+        return host, bt.vc.replay(target[len("replay:"):]), False
+    raise CliError(f"--link {spec!r}: unknown link {target!r}")
+
+
+def cmd_commission(args) -> int:
+    """Runs the cell as the plant of the controllers named by `--link`."""
+    import botrail as bt
+
+    scene = load_cell(args.cell)
+    sequences = args.sequence or None
+    links = {}
+    loopback_hosts = []
+    for spec in args.link:
+        host, link, loopback = _parse_link(spec, lambda h: bt.vc.exchange(scene, h, sequences))
+        if loopback:
+            loopback_hosts.append(host)
+        else:
+            links[host] = link
+    if links and loopback_hosts:
+        raise CliError("--link: loopback hosts and linked hosts cannot mix in one session")
+    names = sequences or list(scene.sequence_names)
+    bake = None
+    if args.diff:
+        bake = scene.simulate_sequences(names, max_duration=args.max_duration)
+    pace = args.pace or ("sync" if not links else "realtime")
+    session = bt.vc.Session(
+        scene, names, links=links or None, hosts=loopback_hosts or None,
+        loopback=bool(loopback_hosts), cycle=args.cycle, pace=pace, speed=args.speed,
+        max_duration=args.max_duration,
+    )
+    result = {"ok": True, "cell": args.cell, "hosts": session.hosts, "pace": pace}
+    try:
+        with session as s:
+            if args.for_ is not None:
+                s.run(for_=args.for_)
+            elif bake is not None:
+                s.run(for_=bake.duration * 1.5 + 1.0)
+            else:
+                s.run(timeout=args.max_duration)
+            tl = s.timeline()
+            result["t"] = s.t
+            result["stats"] = s.stats()
+            out = Path(args.record) if args.record else None
+            if out is not None:
+                out.mkdir(parents=True, exist_ok=True)
+                stem = Path(args.cell).stem
+                s.recording().save(out / f"{stem}_inputs.csv")
+                tl.export_usd(out / f"{stem}_emulated.usdc")
+                for host in session.hosts:
+                    s.exchange(host).save(out / f"{stem}_exchange_{_slug(host)}.md")
+                result["record"] = str(out)
+            if bake is not None:
+                d = bake.diff(bt.trace.from_timeline(tl), tolerance=args.tolerance, align_on=args.align_on)
+                result["diff"] = json.loads(d.to_json())
+                result["ok"] = bool(d.ok)
+    except (ValueError, RuntimeError, TimeoutError) as e:
+        print(json.dumps({"ok": False, "cell": args.cell, "error": str(e)}, indent=2))
+        return 1
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result["ok"] else 1
+
+
+def cmd_fat(args) -> int:
+    """Runs the FAT sheet: the cases of `--cases`, the rows derived from
+    the interlock table (`--interlocks`) and the safety inputs
+    (`--safety`) — all of them when nothing is picked — offline, or
+    against the controllers of `--link`."""
+    import botrail as bt
+
+    scene = load_cell(args.cell)
+    sequences = args.sequence or None
+    cases = []
+    try:
+        if args.cases:
+            cases += bt.vc.load_cases(args.cases, scene)
+        derive_all = not args.cases and args.interlocks is None and not args.safety
+        if args.interlocks is not None or derive_all:
+            for program in (args.interlocks or [None]):
+                cases += bt.vc.interlock_tests(scene, program, sequences=sequences)
+        if args.safety or derive_all:
+            cases += bt.vc.safety_tests(scene, sequences=sequences)
+    except (ValueError, ImportError, OSError) as e:
+        raise CliError(f"--cases: {e}") from e
+    if not cases:
+        raise CliError("no test cases: nothing in --cases, no deniable interlock row, no safety input")
+    links = {}
+    for spec in args.link or ():
+        host, link, loopback = _parse_link(spec, lambda h: bt.vc.exchange(scene, h, sequences))
+        if not loopback:
+            links[host] = link
+    result = {"ok": True, "cell": args.cell, "cases": len(cases)}
+    try:
+        sheet = bt.vc.run_fat(scene, cases, sequences, links=links or None, horizon=args.horizon, dt=args.dt,
+                              title=args.title)
+    except (ValueError, RuntimeError, TimeoutError) as e:
+        print(json.dumps({"ok": False, "cell": args.cell, "error": str(e)}, indent=2))
+        return 1
+    result.update({"ok": sheet.ok, "mode": sheet.mode, "horizon_s": sheet.horizon, "counts": sheet.counts,
+                   "cases": [c.to_dict() for c in sheet.cases]})
+    if args.out:
+        sheet.save(args.out)
+        result["out"] = args.out
+    if args.markdown:
+        print(sheet.to_markdown())
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    return 0 if sheet.ok else 1
 
 
 def cmd_schema(args) -> int:
@@ -360,7 +506,52 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plan-resolution", type=float, default=0.05, help="planner edge sampling stride (default 0.05)")
     p.add_argument("--fps", type=float, default=30.0, help="USD frame rate (default 30)")
     p.add_argument("--scale", type=float, default=100.0, help="layout SVG pixels per metre (default 100)")
+    p.add_argument("--exchange", action="append", metavar="HOST",
+                   help="also write HOST's exchange table (.md/.csv/.json) — what a controller writes and reads")
+    p.add_argument("--st", action="append", metavar="HOST",
+                   help="also write HOST's programs as IEC 61131-3 Structured Text (.st)")
+    p.add_argument("--fat", nargs="?", const=True, metavar="CASES",
+                   help="also run the FAT sheet and write <stem>_fat.md/.json: the rows derived from the interlock "
+                        "table and the safety inputs, or the cases of a .yaml/.json file")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser(
+        "commission",
+        help="run the cell as the plant of a controller: --link HOST=modbus://BIND | HOST=opcua://URL | HOST=replay:FILE | HOST=loopback",
+    )
+    p.add_argument("cell")
+    p.add_argument("--link", action="append", required=True, metavar="HOST=TARGET",
+                   help="the controller of HOST: modbus://0.0.0.0:5020 (the PLC polls botrail), opc.tcp://host:4840 (botrail reads the PLC's server), replay:inputs.csv, or loopback")
+    p.add_argument("--sequence", action="append", help="program(s) of the cell (default: all)")
+    p.add_argument("--pace", choices=["sync", "free", "realtime"], help="sync/free for replay and loopback, realtime for a controller on the wire (the default follows the link)")
+    p.add_argument("--speed", type=float, default=1.0, help="realtime speed factor (default 1)")
+    p.add_argument("--cycle", action="store_true", help="programs the plant scans start over when they end (a cycling controller outside)")
+    p.add_argument("--for", dest="for_", type=float, help="plant seconds to run (default: 1.5 × the bake + 1 s with --diff, else until the programs end)")
+    p.add_argument("--max-duration", type=float, default=600.0, help="plant time limit, seconds (default 600)")
+    p.add_argument("--record", metavar="DIR", help="write the input recording, the emulated USD and the exchange tables here")
+    p.add_argument("--diff", action="store_true", help="bake the design and diff the run against it (exit 1 on a mismatch)")
+    p.add_argument("--tolerance", type=float, default=0.1, help="diff tolerance, seconds (default 0.1 — a polled link)")
+    p.add_argument("--align-on", help="diff: align the run's clock on this signal's first rising edge")
+    p.set_defaults(func=cmd_commission)
+
+    p = sub.add_parser(
+        "fat",
+        help="run the FAT sheet: --cases FILE, the rows derived from the interlock table and the safety inputs (the default), offline or --link",
+    )
+    p.add_argument("cell")
+    p.add_argument("--cases", metavar="FILE", help="authored test cases (.yaml / .json; see bt.vc.cases_from_data)")
+    p.add_argument("--interlocks", nargs="*", metavar="PROGRAM",
+                   help="derive a row per interlock-table row (of these programs; all when bare)")
+    p.add_argument("--safety", action="store_true", help="derive a row per safety input the programs read")
+    p.add_argument("--sequence", action="append", help="program(s) of the cell (default: all)")
+    p.add_argument("--link", action="append", metavar="HOST=TARGET",
+                   help="run the cases against a controller instead of in loopback (as `commission`)")
+    p.add_argument("--horizon", type=float, help="plant seconds each case may run after its moment (default: 1.5 × the bake + 1 s)")
+    p.add_argument("--dt", type=float, default=0.01, help="scan step, seconds (default 0.01)")
+    p.add_argument("--title", help="sheet title")
+    p.add_argument("--out", metavar="FILE", help="write the sheet here (.md, .csv or .json)")
+    p.add_argument("--markdown", action="store_true", help="print the sheet as Markdown instead of JSON")
+    p.set_defaults(func=cmd_fat)
 
     p = sub.add_parser("schema", help="print the .botrail JSON Schema")
     p.add_argument("--out", help="write it here instead of stdout")
