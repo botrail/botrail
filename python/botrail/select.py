@@ -20,7 +20,9 @@ same column. The keys, and the attribute names that answer them
 
 | requirement            | derived from                                               | answered by                                  |
 |------------------------|------------------------------------------------------------|----------------------------------------------|
-| `payload_kg`           | tool mass + the heaviest part the robot grasps; parts riding a vehicle's deck at start | `payload_kg`                                 |
+| `payload_kg`           | tool mass + the heaviest part the robot grasps; parts riding a vehicle's deck at start; a formation platform's share of the load it carries | `payload_kg`                                 |
+| `cooperative_units`    | the platforms of a formation (`add_formation`) under one load | `cooperative_units`                          |
+| `cooperative_payload_kg` | the load a formation carries                              | `cooperative_payload_kg`                     |
 | `reach_mm`             | the farthest taught target from the base, plus a margin; the table of a machining centre (or the spindle of a lathe) in the cell, through its opening | `reach_mm`                                   |
 | `stroke_mm`            | the smallest side of the grasped parts (parallel gripper)  | `stroke_mm`, `opening_mm`                    |
 | `sensing_range_mm`     | a beam sensor's span                                       | `sensing_range_mm`, `range_mm`, `max_range_mm` |
@@ -98,6 +100,10 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "max_climb_mps": ("max_climb_mps",),
     "max_descent_mps": ("max_descent_mps",),
     "flight_time_min": ("flight_time_min",),
+    # Load sharing (design-cooperative-transport.md): how many platforms may
+    # carry one load together, and how much, as the vendor states it.
+    "cooperative_units": ("cooperative_units",),
+    "cooperative_payload_kg": ("cooperative_payload_kg",),
     "load_kg": ("load_kg", "capacity_kg", "max_load_kg", "payload_kg"),
     # A screwdriver's tightening torque and the screws it takes (the
     # joint's torque lands on the screw lines — `bt.assembly.fasten`).
@@ -232,10 +238,15 @@ class Finding:
 class Requirements:
     """What the cell asks of every BOM line — the result of :func:`requirements`."""
 
-    def __init__(self, rows: list[Row], *, margin: float, sequences: list[str]) -> None:
+    def __init__(
+        self, rows: list[Row], *, margin: float, sequences: list[str], problems: Optional[list[Finding]] = None
+    ) -> None:
         self.rows = rows
         self.margin = margin
         self.sequences = sequences
+        #: What the cell asks that no part can answer — a formation's load
+        #: off its supports (`load_off_support`, error).
+        self.problems: list[Finding] = list(problems or [])
 
     def __iter__(self) -> Iterator[Row]:
         return iter(self.rows)
@@ -266,15 +277,17 @@ class Requirements:
 
     @property
     def ok(self) -> bool:
-        """No line falls short of what the cell asks (unknowns do not count)."""
-        return not self.short()
+        """No line falls short of what the cell asks (unknowns do not count),
+        and nothing is asked that no part can answer."""
+        return not self.short() and not self.problems
 
     def findings(self) -> list[Finding]:
         """`spec_short` (error), `spec_unknown` (warning) and
-        `requirement_incomplete` (info), in row order. An I/O node's
+        `requirement_incomplete` (info), in row order, after the cell's
+        own problems (`load_off_support`, error). An I/O node's
         channel capacity gets no spec finding — the I/O report already
         lints it — but its robot cable does."""
-        out: list[Finding] = []
+        out: list[Finding] = list(self.problems)
         for row in self.rows:
             for r in row.requirements:
                 if not r.lint:
@@ -497,7 +510,7 @@ def requirements(
                 notes=_dedupe(notes),
             )
         )
-    return Requirements(rows, margin=margin, sequences=cell.sequence_names)
+    return Requirements(rows, margin=margin, sequences=cell.sequence_names, problems=cell.formation_problems())
 
 
 def check(
@@ -670,6 +683,7 @@ class _Cell:
         self._routing: Optional[dict] = None
         self._plan: Optional[dict] = None
         self._motion: Optional[dict] = None
+        self._formation_loads: dict[str, Optional[dict]] = {}
         self.carriers: set[str] = {
             s["name"] for s in (self.plan.get("supports") or []) if s.get("kind") == "carrier"
         }
@@ -786,6 +800,131 @@ class _Cell:
         if mount.get("gait") or mount.get("drive") or not kind.get("body"):
             return device
         return None
+
+    def crew_of(self, robot: str) -> Optional[tuple[str, str]]:
+        """`(formation, member vehicle)` when the robot rides a platform of a
+        formation (`Scene.add_formation`)."""
+        device = (self.mounts.get(robot) or {}).get("device")
+        for name, kind in self.devices.items():
+            if kind.get("kind") != "vehicle":
+                continue
+            if any(m.get("vehicle") == device for m in kind.get("members") or []):
+                return name, device
+        return None
+
+    def formation_load(self, formation: str) -> Optional[dict]:
+        """What a formation carries and how its platforms share it, measured
+        where the formation starts (where it picks the load up): the heaviest
+        hold of any robot riding a member, its mass and centre of mass (each
+        mass part's bounds centre, weighted), the members' slots there, and
+        each member's share — a rigid load on equally stiff supports (two:
+        the lever; three: exact; more: the least-squares plane, stated).
+        `None` when no crewmate holds anything."""
+        if formation in self._formation_loads:
+            return self._formation_loads[formation]
+        kind = self.devices.get(formation) or {}
+        members = [m.get("vehicle") for m in kind.get("members") or []]
+        crew = {r: (self.mounts.get(r) or {}).get("device") for r in self.robots}
+        best: Optional[tuple[float, list[str], list[str], list[str]]] = None
+        for robot, device in crew.items():
+            if device not in members:
+                continue
+            for hold in self.holds_of(robot):
+                mass, names, unknown = self._carried(hold)
+                if names and (best is None or mass > best[0]):
+                    best = (mass, names, unknown, hold)
+        frame = self._parked_frame(kind) if best else None
+        if best is None or frame is None:
+            self._formation_loads[formation] = None
+            return None
+        mass, names, unknown, hold = best
+        # Each mass part once (a group's mass is one unit's), at the centre
+        # of the bounds of what it covers.
+        part_mass = {}
+        for obj in hold:
+            target, m = self.mass_part_of(obj)
+            if m is not None:
+                part_mass[target] = m
+        moment = [0.0, 0.0]
+        for target, m in part_mass.items():
+            bounds = self.bounds_of_group(target)
+            if bounds is None:
+                continue
+            (lo, hi) = bounds
+            moment[0] += m * (lo[0] + hi[0]) / 2.0
+            moment[1] += m * (lo[1] + hi[1]) / 2.0
+        cog = (moment[0] / mass, moment[1] / mass) if mass > _EPS else (0.0, 0.0)
+        position, quaternion = frame
+        supports: dict[str, tuple[float, float]] = {}
+        for m in kind.get("members") or []:
+            slot = (m.get("slot") or {}).get("position") or [0.0, 0.0, 0.0]
+            x, y, _ = _rotate(quaternion, (slot[0], slot[1], 0.0))
+            supports[m["vehicle"]] = (position[0] + x, position[1] + y)
+        shares = dict(zip(supports, _load_shares(list(supports.values()), mass, cog)))
+        centre = (sum(p[0] for p in supports.values()) / len(supports), sum(p[1] for p in supports.values()) / len(supports))
+        load = {
+            "names": names,
+            "unknown": unknown,
+            "mass": mass,
+            "cog": cog,
+            "offset": math.hypot(cog[0] - centre[0], cog[1] - centre[1]),
+            "supports": supports,
+            "shares": shares,
+        }
+        self._formation_loads[formation] = load
+        return load
+
+    def _crew_share(self, robot: str, formation: str, member: str) -> tuple[list[Requirement], list[str]]:
+        """What a formation asks of one of its platforms: its share of the
+        load, how many platforms share it, and the whole load."""
+        load = self.formation_load(formation)
+        if load is None:
+            return [], [f"formation `{formation}` carries nothing this robot's crew holds — no load share"]
+        n = len(load["supports"])
+        mass, share = load["mass"], load["shares"].get(member, 0.0)
+        what = " + ".join(load["names"])
+        model = "equally stiff supports" if n >= 4 else ("the lever between them" if n == 2 else "statics")
+        reqs = [
+            Requirement(
+                "payload_kg",
+                _round(max(share, 0.0), 1),
+                basis=f"{_fmt(_round(share, 1))} kg of {what} {_fmt(_round(mass, 1))} kg on {n} platforms of "
+                f"formation `{formation}`, its centre of mass {load['offset']:.2f} m off the platforms' "
+                f"centre ({model})",
+            ),
+            Requirement("cooperative_units", float(n), basis=f"platforms under one load in formation `{formation}`"),
+            Requirement(
+                "cooperative_payload_kg", _round(mass, 1), basis=f"{what}, carried by formation `{formation}`"
+            ),
+        ]
+        notes = []
+        if load["unknown"]:
+            notes.append(f"load share counts no mass for {', '.join(load['unknown'])} — give them mass_kg on set_part")
+        return reqs, notes
+
+    def formation_problems(self) -> list[Finding]:
+        """A formation whose load's centre of mass lies outside its supports:
+        a platform with a negative share lifts off — no part answers that."""
+        out: list[Finding] = []
+        for name, kind in self.devices.items():
+            if kind.get("kind") != "vehicle" or not kind.get("members"):
+                continue
+            load = self.formation_load(name)
+            if load is None:
+                continue
+            lifting = [(m, f) for m, f in load["shares"].items() if f < -_EPS]
+            if lifting:
+                who = ", ".join(f"`{m}` ({_fmt(_round(f, 1))} kg)" for m, f in lifting)
+                out.append(
+                    Finding(
+                        "error",
+                        "load_off_support",
+                        f"formation `{name}`: the centre of mass of {' + '.join(load['names'])} "
+                        f"({load['cog'][0]:.2f}, {load['cog'][1]:.2f}) is outside its supports — {who} would lift off",
+                        name,
+                    )
+                )
+        return out
 
     def mast_of(self, robot: str) -> Optional[str]:
         """The `mast` group of a forklift: a lift with no arm on it — the
@@ -1058,7 +1197,13 @@ class _Cell:
         if len(groups) <= 1 or self.mast_of(robot):
             return []
         flanged = [g for g in groups if model.group(g).flange]
-        return flanged or groups
+        if flanged:
+            return flanged
+        # A group of free-spinning joints is running gear — a vehicle
+        # package's wheels and castors, grouped chain by chain — not an arm.
+        limits = dict(zip(model.joint_names, model.joint_limits))
+        arms = [g for g in groups if any(limits.get(j) is not None for j in model.group(g).joints)]
+        return arms if len(arms) > 1 else []
 
     def robot_and_arm(self, name: str) -> tuple[str, Optional[str]]:
         """A BOM line `robot/arm` (an arm mounted from the catalog) split
@@ -1285,7 +1430,14 @@ class _Cell:
                 tool_known = False
             else:
                 tool_mass += m * int(row.get("qty") or 1)
-        heaviest, unknown = self._heaviest_hold(self.holds_of(robot, arm))
+        # A platform of a formation bears its share of the formation's load,
+        # whichever crewmate holds it — not the hold.
+        crew = self.crew_of(robot) if arm is None else None
+        heaviest, unknown = (None, []) if crew else self._heaviest_hold(self.holds_of(robot, arm))
+        if crew:
+            r, n = self._crew_share(robot, *crew)
+            reqs += r
+            notes += n
         if (has_tool and tool_known) or heaviest is not None:
             basis: list[str] = []
             if has_tool:
@@ -2092,6 +2244,43 @@ def _walk_steps(steps: list[dict]) -> Iterator[dict]:
 def _walk_actions(steps: list[dict]) -> Iterator[dict]:
     for step in _walk_steps(steps):
         yield from step.get("actions") or []
+
+
+def _load_shares(supports: list[tuple[float, float]], weight: float, cog: tuple[float, float]) -> list[float]:
+    """How a rigid load of `weight` with its centre of mass at `cog` rests
+    on point supports of equal stiffness: forces `F_i = a + b·x_i + c·y_i`
+    (a plane over the supports) with the sum `weight` and the moment the
+    load's. Two supports, or any on one line, are the lever along it; three
+    are the exact statics; more, the least-squares plane. A negative share
+    is a support the load would lift off."""
+    n = len(supports)
+    if n == 0:
+        return []
+    if n == 1:
+        return [weight]
+    mx = sum(p[0] for p in supports) / n
+    my = sum(p[1] for p in supports) / n
+    xs = [(p[0] - mx, p[1] - my) for p in supports]
+    cx, cy = cog[0] - mx, cog[1] - my
+    sxx = sum(x * x for x, _ in xs)
+    syy = sum(y * y for _, y in xs)
+    sxy = sum(x * y for x, y in xs)
+    det = sxx * syy - sxy * sxy
+    scale = max(sxx + syy, _EPS)
+    if abs(det) > 1e-9 * scale * scale:
+        b = weight * (syy * cx - sxy * cy) / det
+        c = weight * (sxx * cy - sxy * cx) / det
+        return [weight / n + b * x + c * y for x, y in xs]
+    # On one line: the lever along it (the load's offset across it is the
+    # platforms' decks' to take, not a share).
+    ux, uy = (xs[0][0], xs[0][1]) if math.hypot(*xs[0]) > _EPS else (xs[-1][0], xs[-1][1])
+    length = math.hypot(ux, uy)
+    if length < _EPS:
+        return [weight / n] * n
+    ux, uy = ux / length, uy / length
+    along = [x * ux + y * uy for x, y in xs]
+    b = weight * (cx * ux + cy * uy) / sum(s * s for s in along)
+    return [weight / n + b * s for s in along]
 
 
 def _merge(reqs: list[Requirement]) -> list[Requirement]:

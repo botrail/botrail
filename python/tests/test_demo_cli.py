@@ -62,6 +62,7 @@ CELL_DEMOS = [
     "rl/torque_env.py",
     "rl/tabletop_env.py",
     "vehicles/agv_cell_demo.py",
+    "vehicles/cooperative_transport_demo.py",
     "vehicles/amr_demo.py",
     "vehicles/lift_demo.py",
     "vehicles/semi_humanoid_demo.py",

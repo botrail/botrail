@@ -321,6 +321,34 @@ def main() -> None:
                 print("wrote forklift.png")
                 server.stop()
 
+        if want("cooperative"):
+            # ---- cooperative transport: two KMP 3000P turning the machine bed
+            # about its centre at the crossing, between the columns ---------
+            build_dir = Path(os.environ.get("BOTRAIL_CATALOG_BUILD")
+                             or ROOT.parent / "botrail-catalog-builder" / "build")
+            import cooperative_transport_demo
+            if (build_dir / "kuka/kmp/kmp-3000p/r1/manifest.yaml").is_file():
+                cooperative_transport_demo.CATALOG_ROOT = build_dir.resolve()
+            try:
+                scene, tl = cooperative_transport_demo.bake()
+            except Exception as e:  # noqa: BLE001 — no packages, no picture
+                print(f"skipping cooperative: {e}")
+            else:
+                server = bt.studio(scene, block=False, open_browser=False)
+                page.goto(server.url)
+                page.wait_for_selector("canvas")
+                time.sleep(4.0)
+                page.wait_for_selector(".timeline-bands", timeout=60000)
+                time.sleep(3.0)
+                page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+                t = tl.step_span("carry/to_inspection").start + 4.5
+                page.evaluate(f"window.__STUDIO__.getState().seek({t})")
+                page.evaluate("window.__CAM = {pos: [19.6, -3.2, 3.6], look: [13.9, 0.6, 0.6]}")
+                time.sleep(3.0)
+                page.screenshot(path=OUT / "cooperative.png")
+                print("wrote cooperative.png")
+                server.stop()
+
         if want("legged"):
             # ---- 5b. the legged cell: a quadruped carrying a part out ----
             # The Go2 is fetched from Unitree's repository on first run

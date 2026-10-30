@@ -731,6 +731,7 @@ impl Scene {
         }
 
         // ---- devices ---------------------------------------------------
+        let set_downs = self.formation_set_downs();
         for device in self.devices() {
             match &device.kind {
                 DeviceKind::Conveyor {
@@ -910,12 +911,31 @@ impl Scene {
                     for p in &pts {
                         footprint.include(*p);
                     }
-                    items.push(LayoutItem {
-                        layer: LayoutLayer::Device,
-                        name: device.name.clone(),
-                        shape: LayoutShape::Polyline { points: pts },
-                        dashed: true,
-                    });
+                    // A formation member's tape breaks where the formation
+                    // carries it: that leg is ridden, not driven.
+                    let set_down = set_downs.get(&device.name);
+                    let on_slot = |p: &[f64; 2]| {
+                        set_down.is_some_and(|points| {
+                            points
+                                .iter()
+                                .any(|q| (p[0] - q[0]).hypot(p[1] - q[1]) < 0.01)
+                        })
+                    };
+                    let mut runs: Vec<Vec<[f64; 2]>> = vec![Vec::new()];
+                    for (i, p) in pts.iter().enumerate() {
+                        if i > 0 && on_slot(&pts[i - 1]) && on_slot(p) {
+                            runs.push(Vec::new());
+                        }
+                        runs.last_mut().expect("a run").push(*p);
+                    }
+                    for points in runs.into_iter().filter(|r| r.len() > 1) {
+                        items.push(LayoutItem {
+                            layer: LayoutLayer::Device,
+                            name: device.name.clone(),
+                            shape: LayoutShape::Polyline { points },
+                            dashed: true,
+                        });
+                    }
                     for (station, index) in &path.stations {
                         if let Some(p) = path.waypoints.get(*index) {
                             items.push(LayoutItem {

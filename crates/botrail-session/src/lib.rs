@@ -2797,6 +2797,7 @@ mod tests {
                     prefer: botrail_scene::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         });
         scene.upsert_sequence(botrail_scene::seq::Sequence {

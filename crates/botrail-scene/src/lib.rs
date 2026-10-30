@@ -12,6 +12,7 @@ pub mod coat;
 pub mod connections;
 pub mod dynamics;
 pub mod exchange;
+pub mod formation;
 pub mod gait;
 pub mod gcode;
 pub mod grasp;

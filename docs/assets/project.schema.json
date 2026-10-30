@@ -2102,6 +2102,13 @@
               ],
               "format": "double"
             },
+            "members": {
+              "description": "Present makes the vehicle a formation: these vehicles board at\ntheir slots on a goto and ride its motion to the station.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FormationMemberMsg"
+              }
+            },
             "path": {
               "$ref": "#/$defs/VehiclePathMsg"
             },
@@ -2496,6 +2503,22 @@
         "name",
         "signal",
         "robot"
+      ]
+    },
+    "FormationMemberMsg": {
+      "description": "One vehicle of a formation and its slot — its vehicle frame in the\nformation's frame.",
+      "type": "object",
+      "properties": {
+        "slot": {
+          "$ref": "#/$defs/PoseMsg"
+        },
+        "vehicle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "vehicle",
+        "slot"
       ]
     },
     "FrameMsg": {

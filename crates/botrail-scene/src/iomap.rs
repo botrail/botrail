@@ -4507,6 +4507,7 @@ pub(crate) mod tests {
                 start: "a".into(),
                 drive: crate::seq::Drive::default(),
                 tray: None,
+                members: Vec::new(),
             },
         });
         scene.upsert_device(Device {

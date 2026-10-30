@@ -4335,9 +4335,167 @@ impl Scene {
                 start,
                 drive,
                 tray,
+                members: Vec::new(),
             },
         });
         Ok(())
+    }
+
+    /// Adds a *formation*: the vehicles `members` carrying one load as one
+    /// machine — several platforms under a long frame, the way a
+    /// master-follower pair of heavy AGVs shares a load. The formation is a
+    /// vehicle with no body of its own: `path` is the load's, and its frame
+    /// is the load's centre. `members` maps each vehicle to its *slot* —
+    /// `(x, y)` or `(x, y, yaw)`, its vehicle frame in the formation's
+    /// frame. The members are vehicles of their own (`add_vehicle`), checked
+    /// when the cell is simulated — so a member's path can be authored
+    /// after the formation, from
+    /// [`formation_slot`][botrail.Scene.formation_slot].
+    ///
+    /// `bt.seq.goto(name, station)` boards the members — every one must be
+    /// parked on its slot (within 5 mm and 1°), or the dispatch refuses by
+    /// name — and carries them whole, turns about the centre included:
+    /// their bodies, decks, mounted robots and what those hold ride
+    /// rigidly, and each member's own aisle checks run as it moves. On
+    /// arrival they are free again; a member is back on its own path when
+    /// that path has a waypoint where the formation set it down
+    /// ([`formation_slot`][botrail.Scene.formation_slot] gives it).
+    /// Aboard, a member's own goto is refused and its `device_done` waits
+    /// for the formation's.
+    ///
+    /// What is checked: a formation goes no faster than its slowest member
+    /// (`speed` against each member's), and turning about its centre at
+    /// `turn_speed` drives a member `r` metres out at `turn_speed · r` —
+    /// over its speed is refused with the turn rate that fits. A
+    /// differential member moves only along its heading: a route that
+    /// would drag one sideways is refused by name (two side by side turn
+    /// like the wheels of one large differential drive; one ahead of the
+    /// centre cannot). Holonomic members ride any route.
+    ///
+    /// `drive` is the formation's own: `"differential"` (it faces each leg,
+    /// pivoting about its centre — a long load follows the aisle) or
+    /// `"holonomic"` (it translates, the load keeps its heading). A load
+    /// one member holds (`bt.seq.attach(..., robot=<its platform>)`) may
+    /// rest on the link of the same name on the other members' platforms.
+    /// The other arguments are `add_vehicle`'s.
+    #[pyo3(signature = (name, members, path, stations, speed = 0.5,
+                        turn_speed = std::f64::consts::FRAC_PI_2,
+                        start = None, ring = false, allow_reverse = false,
+                        max_grade = None, drive = "differential",
+                        reverse_speed = None, prefer = "forward", arrive = None,
+                        body = None, tray_position = None, tray_size = None,
+                        tray_quaternion = None, climb_speed = None,
+                        descent_speed = None, fixed_yaw = None, turn_radius = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_formation(
+        &self,
+        name: &str,
+        members: BTreeMap<String, Vec<f64>>,
+        path: Vec<Vec<f64>>,
+        stations: BTreeMap<String, usize>,
+        speed: f64,
+        turn_speed: f64,
+        start: Option<String>,
+        ring: bool,
+        allow_reverse: bool,
+        max_grade: Option<f64>,
+        drive: &str,
+        reverse_speed: Option<f64>,
+        prefer: &str,
+        arrive: Option<BTreeMap<String, String>>,
+        body: Option<Vec<String>>,
+        tray_position: Option<[f64; 3]>,
+        tray_size: Option<[f64; 3]>,
+        tray_quaternion: Option<[f64; 4]>,
+        climb_speed: Option<f64>,
+        descent_speed: Option<f64>,
+        fixed_yaw: Option<f64>,
+        turn_radius: Option<f64>,
+    ) -> PyResult<()> {
+        if members.is_empty() {
+            return Err(PyValueError::new_err(
+                "members is empty; a formation carries at least one vehicle",
+            ));
+        }
+        let mut slots = Vec::with_capacity(members.len());
+        for (vehicle, slot) in &members {
+            let (x, y, yaw) = match slot.as_slice() {
+                [x, y] => (*x, *y, 0.0),
+                [x, y, yaw] => (*x, *y, *yaw),
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "member `{vehicle}`: a slot is (x, y) or (x, y, yaw), got {} values",
+                        other.len()
+                    )))
+                }
+            };
+            if !(x.is_finite() && y.is_finite() && yaw.is_finite()) {
+                return Err(PyValueError::new_err(format!(
+                    "member `{vehicle}`: the slot must be finite, got {slot:?}"
+                )));
+            }
+            slots.push(botrail_scene::seq::FormationMember {
+                vehicle: vehicle.clone(),
+                slot: nalgebra::Isometry3::from_parts(
+                    nalgebra::Translation3::new(x, y, 0.0),
+                    nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::z_axis(), yaw),
+                ),
+            });
+        }
+        self.add_vehicle(
+            name,
+            body.unwrap_or_default(),
+            path,
+            stations,
+            speed,
+            turn_speed,
+            start,
+            ring,
+            allow_reverse,
+            max_grade,
+            drive,
+            climb_speed,
+            descent_speed,
+            fixed_yaw,
+            tray_position,
+            tray_size,
+            tray_quaternion,
+            reverse_speed,
+            prefer,
+            arrive,
+            turn_radius,
+        )?;
+        self.hub
+            .with_scene(|scene| scene.set_formation_members(name, slots))
+            .map_err(PyValueError::new_err)?;
+        self.hub.emit(
+            &self
+                .hub
+                .with_scene(|scene| botrail_scene::wire::devices_message(scene)),
+        );
+        Ok(())
+    }
+
+    /// Where `member` stands — `((x, y, z), yaw)`, its vehicle frame —
+    /// once formation `formation` has driven to `station` from its start
+    /// (by way of station `via` first, when given): the frame the goto
+    /// parks the formation at, composed with the member's slot. Put it on
+    /// the member's own path so the member is back on its path when the
+    /// formation lets it go, and can drive off under its own power.
+    #[pyo3(signature = (formation, member, station, via = None))]
+    fn formation_slot(
+        &self,
+        formation: &str,
+        member: &str,
+        station: &str,
+        via: Option<&str>,
+    ) -> PyResult<((f64, f64, f64), f64)> {
+        let pose = self
+            .hub
+            .with_scene(|scene| scene.formation_slot(formation, member, station, via))
+            .map_err(PyValueError::new_err)?;
+        let t = pose.translation.vector;
+        Ok(((t.x, t.y, t.z), pose.rotation.euler_angles().2))
     }
 
     /// Places the vehicle `name` at `station` as if it had been authored

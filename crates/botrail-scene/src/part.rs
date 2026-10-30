@@ -1259,7 +1259,11 @@ impl Scene {
                     m.device == device.name && (m.gait.is_some() || m.drive.is_some() || bodiless)
                 })
             });
-            if is_the_robot && part.is_none() {
+            // A formation is how its members move together, not a machine
+            // anyone buys: the members are listed, the formation is not.
+            let formation = matches!(&device.kind,
+                DeviceKind::Vehicle { members, body, .. } if !members.is_empty() && body.is_empty());
+            if (is_the_robot || formation) && part.is_none() {
                 continue;
             }
             let Some(category) = device_category(&device.kind).or(part.and(Some("device"))) else {

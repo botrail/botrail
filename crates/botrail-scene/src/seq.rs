@@ -383,6 +383,14 @@ pub enum DeviceKind {
         /// frame — so a part placed on the deck simply joins the load, with
         /// no load/unload action to author and nothing to keep in step.
         tray: Option<(Isometry3<f64>, Vector3<f64>)>,
+        /// Non-empty makes this a *formation* (design-cooperative-
+        /// transport.md): several vehicles carrying one load as one
+        /// machine. The path is the formation's — its frame is the load's
+        /// — and each member's motion is derived from its slot. A goto
+        /// boards the members (each parked on its slot, or the dispatch
+        /// refuses by name) and carries them whole, the way a lift carries
+        /// the vehicles in its car; on arrival they are free again.
+        members: Vec<FormationMember>,
     },
     /// A lift (elevator): a car of obstacles moved along `axis` between
     /// named stops, carrying whatever its capture zone holds — loose parts
@@ -792,6 +800,15 @@ pub fn vehicle_frame(position: &nalgebra::Point3<f64>, heading: f64) -> Isometry
         nalgebra::Translation3::new(position.x, position.y, position.z),
         nalgebra::UnitQuaternion::from_axis_angle(&Vector3::z_axis(), heading),
     )
+}
+
+/// One vehicle of a formation and where it stands under the load.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormationMember {
+    /// The member vehicle's device name.
+    pub vehicle: String,
+    /// The member's vehicle frame in the formation's frame — its slot.
+    pub slot: Isometry3<f64>,
 }
 
 /// A robot riding on a vehicle: its base is `vehicle frame ∘ offset`,
@@ -2356,6 +2373,7 @@ impl Scene {
         }
         for device in &self.devices {
             self.validate_vehicle(device).map_err(|m| (None, m))?;
+            self.validate_formation(device).map_err(|m| (None, m))?;
             self.validate_lift(device).map_err(|m| (None, m))?;
             self.validate_axis(device).map_err(|m| (None, m))?;
         }
@@ -2754,6 +2772,7 @@ impl Scene {
             start,
             tray,
             drive,
+            members: _,
         } = &device.kind
         else {
             return Ok(());

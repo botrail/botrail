@@ -861,6 +861,34 @@ class Scene:
         arrive: Optional[dict[str, str]] = None,
         turn_radius: Optional[float] = None,
     ) -> None: ...
+    def add_formation(
+        self,
+        name: str,
+        members: dict[str, tuple[float, float] | tuple[float, float, float]],
+        path: list[tuple[float, float]] | list[tuple[float, float, float]],
+        stations: dict[str, int],
+        speed: float = 0.5,
+        turn_speed: float = 1.5707963267948966,
+        start: Optional[str] = None,
+        ring: bool = False,
+        allow_reverse: bool = False,
+        max_grade: Optional[float] = None,
+        drive: str = "differential",
+        reverse_speed: Optional[float] = None,
+        prefer: str = "forward",
+        arrive: Optional[dict[str, str]] = None,
+        body: Optional[list[str]] = None,
+        tray_position: Optional[tuple[float, float, float]] = None,
+        tray_size: Optional[tuple[float, float, float]] = None,
+        tray_quaternion: Optional[tuple[float, float, float, float]] = None,
+        climb_speed: Optional[float] = None,
+        descent_speed: Optional[float] = None,
+        fixed_yaw: Optional[float] = None,
+        turn_radius: Optional[float] = None,
+    ) -> None: ...
+    def formation_slot(
+        self, formation: str, member: str, station: str, via: Optional[str] = None
+    ) -> tuple[tuple[float, float, float], float]: ...
     def add_lift(
         self,
         name: str,

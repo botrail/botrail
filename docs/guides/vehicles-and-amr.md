@@ -553,6 +553,85 @@ motion waits for `device_done`, a ramp runs on the move.
 a cell built this way — the torso ramped, then the arm planned, from the
 low board of a bay to its top one.
 
+## Several vehicles, one load: formations
+
+A load longer or heavier than one platform takes — a machine bed, a welded
+frame, an aircraft jig — is carried by several platforms at once, one of
+them leading. botrail treats the group as **one machine**: a *formation* is
+a vehicle with no body of its own whose path is the load's, and whose
+*members* are ordinary vehicles that ride it from their *slots* — each
+member's vehicle frame in the formation's frame.
+
+```python
+kmp = bt.Robot.from_catalog("kuka/kmp/kmp-3000p")
+gear = bt.Wheels.from_catalog("kuka/kmp/kmp-3000p")
+scene.add_formation("carrier", members={"kmp1": (1.45, 0.0), "kmp2": (-1.45, 0.0)},
+                    path=[(3.5, 0), (14, 0), (14, 10)],
+                    stations={"assembly": 0, "corner": 1, "inspection": 2},
+                    speed=0.3, turn_speed=0.15)
+for name in ("kmp1", "kmp2"):
+    (ux, uy, _), _ = scene.formation_slot("carrier", name, "assembly")    # picked up here
+    (tx, ty, _), _ = scene.formation_slot("carrier", name, "inspection")  # set down here
+    scene.add_vehicle(name, body=[], path=[(ux - 0.8, -5.2), (ux, -5.2), (ux, uy), (tx, ty), ...],
+                      stations={"park": 0, "under": 2, "there": 3, ...}, drive="holonomic")
+    scene.add_robot(kmp, name=f"{name}_unit")
+    scene.mount_robot(name, robot=f"{name}_unit", wheels=gear)
+
+sq.step("in", actions=[bt.seq.goto(m, "under") for m in ("kmp1", "kmp2")], transition=...)
+sq.step("take", actions=[bt.seq.attach(p, link="deck", robot="kmp1_unit") for p in load])
+sq.step("lift", actions=[bt.seq.ramp({"lift": 0.1}, 3.3, robot=u) for u in ("kmp1_unit", "kmp2_unit")])
+sq.step("carry", actions=[bt.seq.goto("carrier", "inspection")], transition=bt.seq.device_done("carrier"))
+```
+
+`goto` on the formation **boards** its members: every one must be parked on
+its slot (within 5 mm and 1°), or the dispatch is refused by name. The
+formation then carries them whole — straights, and turns about its centre —
+and their bodies, the robots mounted on them, what those hold and their
+wheels all move with it; every member's own aisle check runs as it moves.
+On arrival they are free again, and a member whose path has a waypoint
+where it was set down (`formation_slot` gives it) drives off on its own.
+While aboard, a member's own `goto` is refused and its `device_done` waits
+for the formation's. Members are checked when the cell is simulated, so a
+member's path can be authored from `formation_slot` after the formation.
+
+![Two KMP 3000P turning a machine bed about its centre at a crossing; a MiR250 crossing behind](../assets/studio/cooperative.png)
+
+What the bake refuses, by name:
+
+* a formation faster than its slowest member, or turning so fast that the
+  outermost member would exceed its speed (the turn rate that fits is in
+  the message);
+* a **differential** member asked to move sideways — one ahead of the
+  centre on a turn, or any on a crab. Two side by side turn like the wheels
+  of one large differential drive and pass; holonomic members ride any
+  route;
+* the load's sweep: the formation's members, and the load the leading
+  platform holds, are checked against everything they pass — a long load
+  turning on the spot sweeps the circle of its farthest corner.
+
+The load is held by one platform (`attach` on its deck); the others bear it.
+A load one platform holds may touch the link of the same name on the other
+members' robots — or, held on a frame link with no geometry (a catalog
+package's `deck`), the link that frame is fixed to.
+
+**How much each platform carries** is a selection question, not a bake:
+[`bt.select.requirements`][botrail.select.requirements] gives each member's
+line its share of the load — a rigid load on its supports: the lever between
+two, the statics of three, the least-squares plane of four or more (stated
+in the basis) — as `payload_kg`, and the formation's size and load as
+`cooperative_units` and `cooperative_payload_kg`, which a catalog platform
+that states load sharing answers (the KMP 3000P: 2 units, 6000 kg). A centre
+of mass outside the supports is an error (`load_off_support`): a member
+would lift off. The formation itself is no line of the bill of materials,
+and the drawings leave out the leg a member rides: the studio and the layout
+show the formation's tape, and each member's own way in and out.
+
+`examples/vehicles/cooperative_transport_demo.py` carries a 4.3 t machine
+bed on its transport stand with two KMP 3000P: `--aisle 4.0` is refused at
+the turn by a named column, `--cog 0.6` (the casting set 0.6 m off the
+stand's centre) by the leading platform's 3 t, and `--no-interlock` shows a
+parts AMR crossing the aisle meet a platform.
+
 ## Legs instead of wheels
 
 A quadruped or a humanoid is the same vehicle with a gait on its mount:
@@ -566,7 +645,9 @@ Worth stating plainly, because the vocabulary invites bigger expectations:
 
 * No navigation — no SLAM, no dynamic obstacle avoidance, no route planning.
 * No fleet dispatch or traffic management. One vehicle's deterministic cycle
-  is in scope; deciding which of twenty vehicles goes where is not.
+  is in scope — and so is a formation's, several platforms carrying one load
+  as one machine; deciding which of twenty vehicles goes where is not, nor
+  the formation's following error, communication delay or load-cell balancing.
 * No docking error, wheel slip, protective-field slowdowns or battery.
 * No acceleration model: vehicles move at constant speed. If your machine's
   ramp-up distance is a large fraction of a leg, derate the speed you give
@@ -615,3 +696,10 @@ the cell starts waiting on it.
   speeds. `--aisle 2.5` is refused against the racking across the aisle, `--sweep`
   finds the aisle the sheet quotes, `--mast dx` is refused for level 2 by the
   sheet's own rule, and `--out DIR` writes the document set.
+* `examples/vehicles/cooperative_transport_demo.py` — two catalog KUKA KMP 3000P
+  carrying a 4.3 t machine bed on its transport stand as a formation: in under
+  the stand, the load taken and lifted, carried down the aisle, turned about its
+  centre at the crossing, set down in the inspection bay. `--aisle 4.0` is
+  refused at the turn, `--cog 0.6` by the leading platform's share, and
+  `--no-interlock` lets a crossing parts AMR meet the formation; `--out DIR`
+  writes the document set.

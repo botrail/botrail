@@ -2047,6 +2047,7 @@ mod tests {
                 start: "a".into(),
                 drive: Drive::default(),
                 tray: None,
+                members: Vec::new(),
             },
         });
         scene

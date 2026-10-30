@@ -2471,6 +2471,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                 holonomic,
                 aerial,
                 tray,
+                members,
             } => {
                 let waypoints: Vec<String> = path
                     .waypoints
@@ -2490,7 +2491,7 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                     .iter()
                     .map(|s| format!("{:?}: {}", s.name, s.index))
                     .collect();
-                let members: Vec<String> = body.iter().map(|n| format!("{n:?}")).collect();
+                let body_items: Vec<String> = body.iter().map(|n| format!("{n:?}")).collect();
                 let deck = match tray {
                     Some(t) => format!(
                         ", tray_position={}, tray_size={}",
@@ -2546,11 +2547,27 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
                         extras.push_str(&format!(", fixed_yaw={psi}"));
                     }
                 }
+                // A formation is the same call plus its crew: slots are
+                // planar by construction, (x, y, yaw) in its frame.
+                let (call, crew) = if members.is_empty() {
+                    ("add_vehicle", String::new())
+                } else {
+                    let slots: Vec<String> = members
+                        .iter()
+                        .map(|m| {
+                            let slot: Isometry3<f64> = (&m.slot).into();
+                            let yaw = slot.rotation.euler_angles().2;
+                            let p = &m.slot.position;
+                            format!("{:?}: {}", m.vehicle, py_tuple(&[p[0], p[1], yaw]))
+                        })
+                        .collect();
+                    ("add_formation", format!(", members={{{}}}", slots.join(", ")))
+                };
                 out.push_str(&format!(
-                    "scene.add_vehicle({:?}, body=[{}], path=[{}], stations={{{}}}, \
+                    "scene.{call}({:?}{crew}, body=[{}], path=[{}], stations={{{}}}, \
                      speed={speed}, turn_speed={turn_speed}, start={start:?}{extras}{deck})\n",
                     device.name,
-                    members.join(", "),
+                    body_items.join(", "),
                     waypoints.join(", "),
                     stations.join(", "),
                 ));
@@ -3868,6 +3885,7 @@ mod tests {
                     prefer: Gear::Reverse,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         });
         let json = scene.to_project().to_json();
@@ -3913,6 +3931,7 @@ mod tests {
                 start: "a".into(),
                 drive: Drive::default(),
                 tray: None,
+                members: Vec::new(),
             },
         });
         let py = generate_python(&scene.to_project());

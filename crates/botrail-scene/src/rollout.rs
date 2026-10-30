@@ -4223,6 +4223,11 @@ enum DeviceRuntime {
         /// Remaining legs of the active goto, front first.
         legs: std::collections::VecDeque<Leg>,
         lane: usize,
+        /// A formation's members and their slots (empty for an ordinary
+        /// vehicle), and the ones aboard the goto in flight — boarded at
+        /// dispatch, free again on arrival.
+        members: Vec<(String, Isometry3<f64>)>,
+        aboard: Vec<String>,
     },
     /// An elevator: the car obstacles and whatever the capture zone held
     /// at dispatch ride `axis · position` between named stops.
@@ -4297,6 +4302,10 @@ struct VehicleMove {
     /// by this vehicle) — carried as far as the checks are concerned: a
     /// tote on the deck is no aisle hazard to the arm riding beside it.
     extra: Vec<String>,
+    /// The vehicles moving rigidly with this one — a formation and its
+    /// members. The robots riding them ride the same motion, so the body
+    /// is not checked against them.
+    crew: Vec<String>,
     pieces: Vec<(f64, f64, VehiclePiece)>,
 }
 
@@ -4357,6 +4366,54 @@ fn vehicle_route(
     } else {
         forward
     }
+}
+
+/// The frame a vehicle parks at when it drives to station `to` from its
+/// start station — by way of `via` first, when given: the legs each goto
+/// would build, walked. What a formation member's own path needs at the
+/// formation's stops (`Scene::formation_slot`).
+pub(crate) fn arrival_frame(
+    path: &crate::seq::VehiclePath,
+    drive: &crate::seq::Drive,
+    speed: f64,
+    turn_speed: f64,
+    start: &str,
+    via: Option<&str>,
+    to: &str,
+) -> Result<Isometry3<f64>, String> {
+    let index = |station: &str| {
+        path.station(station)
+            .ok_or_else(|| format!("no station `{station}`"))
+    };
+    let mut at = index(start)?;
+    let mut position = path.waypoints[at];
+    let mut heading = path.heading_at(at);
+    for hop in via.into_iter().chain(std::iter::once(to)) {
+        let next = index(hop)?;
+        let route = vehicle_route(&path.waypoints, path.ring, at, next);
+        let legs = build_legs(
+            &path.waypoints,
+            &route,
+            position,
+            heading,
+            speed,
+            turn_speed,
+            drive,
+            path.arrival(hop),
+        )?;
+        for leg in legs {
+            match leg {
+                Leg::Turn { to, .. } => heading = to,
+                Leg::Straight { to, .. } => position = to,
+                Leg::Arc { to, to_heading, .. } => {
+                    position = to;
+                    heading = to_heading;
+                }
+            }
+        }
+        at = next;
+    }
+    Ok(vehicle_frame(&position, heading))
 }
 
 /// Expands a route into turn/straight legs from the vehicle's current
@@ -5178,6 +5235,7 @@ impl Rollout {
                         start,
                         drive,
                         tray,
+                        members,
                     } => {
                         signals.push(BoolTrack {
                             name: device.name.clone(),
@@ -5210,6 +5268,11 @@ impl Rollout {
                             target: at,
                             legs: std::collections::VecDeque::new(),
                             lane,
+                            members: members
+                                .iter()
+                                .map(|m| (m.vehicle.clone(), m.slot))
+                                .collect(),
+                            aboard: Vec::new(),
                         }
                     }
                     DeviceKind::Lift {
@@ -7670,6 +7733,16 @@ impl Rollout {
         #[allow(clippy::type_complexity)]
         let mut lift_shifts: Vec<(String, Vector3<f64>, Vector3<f64>, bool, Vec<String>)> =
             Vec::new();
+        // Formations that moved this tick: `(formation, members aboard,
+        // its pieces, arrived this tick)` — the members ride the pieces
+        // after the loop, as a lift's cargo does.
+        #[allow(clippy::type_complexity)]
+        let mut formation_shifts: Vec<(
+            String,
+            Vec<String>,
+            Vec<(f64, f64, VehiclePiece)>,
+            bool,
+        )> = Vec::new();
         for device in &mut self.devices {
             match device {
                 DeviceRuntime::Conveyor {
@@ -7917,6 +7990,7 @@ impl Rollout {
                     target,
                     legs,
                     lane,
+                    aboard,
                     ..
                 } => {
                     if legs.is_empty() {
@@ -8037,6 +8111,18 @@ impl Rollout {
                         *at = Some(*target);
                         lane_updates.push((*lane, false));
                     }
+                    if !aboard.is_empty() && !pieces.is_empty() {
+                        formation_shifts.push((
+                            name.clone(),
+                            aboard.clone(),
+                            pieces.clone(),
+                            legs.is_empty(),
+                        ));
+                    }
+                    if legs.is_empty() {
+                        // Arrived: the members are free again.
+                        aboard.clear();
+                    }
                     if !pieces.is_empty() {
                         vehicle_moves.push(VehicleMove {
                             name: name.clone(),
@@ -8045,6 +8131,7 @@ impl Rollout {
                             frame,
                             parked: legs.is_empty(),
                             extra: Vec::new(),
+                            crew: Vec::new(),
                             pieces,
                         });
                     }
@@ -8107,6 +8194,7 @@ impl Rollout {
                     frame,
                     parked: arriving,
                     extra: extra.clone(),
+                    crew: Vec::new(),
                     pieces: vec![(t - dt, t, VehiclePiece::Lin { velocity })],
                 });
                 if arriving {
@@ -8121,6 +8209,95 @@ impl Rollout {
                     }
                 }
                 break;
+            }
+        }
+        // A formation's members ride its pieces — turns about its centre
+        // included — through the same machinery: body, deck load, mounted
+        // robot and pose track rigid with the formation, and each member's
+        // own aisle checks run as on any moving tick. What moves rigidly
+        // together is carried as far as those checks are concerned.
+        for (formation, crew, pieces, arriving) in formation_shifts {
+            let bodies: Vec<(String, Vec<String>)> = self
+                .devices
+                .iter()
+                .filter_map(|d| match d {
+                    DeviceRuntime::Vehicle { name, body, .. }
+                        if *name == formation || crew.contains(name) =>
+                    {
+                        Some((name.clone(), body.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for member in &crew {
+                let extra: Vec<String> = bodies
+                    .iter()
+                    .filter(|(n, _)| n != member)
+                    .flat_map(|(_, b)| b.iter().cloned())
+                    .collect();
+                let mates: Vec<String> = std::iter::once(&formation)
+                    .chain(crew.iter().filter(|m| *m != member))
+                    .cloned()
+                    .collect();
+                for device in &mut self.devices {
+                    let DeviceRuntime::Vehicle {
+                        name,
+                        waypoints,
+                        body,
+                        tray,
+                        position,
+                        heading,
+                        at,
+                        target,
+                        ..
+                    } = device
+                    else {
+                        continue;
+                    };
+                    if name != member {
+                        continue;
+                    }
+                    let frame = vehicle_frame(position, *heading);
+                    let deck = tray.map(|(pose, half)| (frame * pose, half));
+                    let mut ride = frame;
+                    for (tau0, tau1, piece) in &pieces {
+                        ride = apply_piece(&ride, piece, tau1 - tau0);
+                        if let VehiclePiece::Piv { omega, .. } = piece {
+                            *heading = wrap_angle(*heading + omega * (tau1 - tau0));
+                        }
+                    }
+                    *position = nalgebra::Point3::from(ride.translation.vector);
+                    vehicle_moves.push(VehicleMove {
+                        name: member.clone(),
+                        body: body.clone(),
+                        tray: deck,
+                        frame,
+                        parked: arriving,
+                        extra,
+                        crew: mates,
+                        pieces: pieces.clone(),
+                    });
+                    if arriving {
+                        // Back on its own path where the formation let it
+                        // go — the waypoint `Scene::formation_slot` gives.
+                        *at = waypoints
+                            .iter()
+                            .position(|wp| (wp - *position).norm() <= 1e-3);
+                        if let Some(i) = *at {
+                            *target = i;
+                        }
+                    }
+                    break;
+                }
+            }
+            if let Some(mv) = vehicle_moves.iter_mut().find(|mv| mv.name == formation) {
+                mv.extra.extend(
+                    bodies
+                        .iter()
+                        .filter(|(n, _)| *n != formation)
+                        .flat_map(|(_, b)| b.iter().cloned()),
+                );
+                mv.crew.extend(crew.iter().cloned());
             }
         }
         // A part a conveyor already moved this tick is that conveyor's; one
@@ -8570,7 +8747,35 @@ impl Rollout {
         // The dedicated cross-robot path: a full scene check also prices
         // every self-collision and every obstacle contact — all discarded
         // here — and at line scale that bill *was* the tick.
+        // A load one platform of a formation holds rests on the others'
+        // decks: what the holder carries may touch, on a crewmate, the link
+        // of the same name as the one it rests on — the holding link, or
+        // the link a geometry-less deck frame is fixed to
+        // (design-cooperative-transport.md §4-f).
+        let rests_on_crewmate =
+            |x: botrail_collide::ColliderId, y: botrail_collide::ColliderId| -> bool {
+                let (
+                    botrail_collide::ColliderId::Obstacle(k),
+                    botrail_collide::ColliderId::Link { robot, link },
+                ) = (x, y)
+                else {
+                    return false;
+                };
+                let Some(held) = self.world.attachment(&self.world.obstacles()[k].name) else {
+                    return false;
+                };
+                let robots = self.world.robots();
+                let touched = &robots[robot].model.links[link].name;
+                let holder = &robots[held.robot].model.links;
+                held.robot != robot
+                    && self.same_crew(held.robot, robot)
+                    && (&holder[held.link].name == touched
+                        || &holder[self.support_link(held.robot, held.link)].name == touched)
+            };
         for pair in self.world.check_cross_robot_collisions() {
+            if rests_on_crewmate(pair.a, pair.b) || rests_on_crewmate(pair.b, pair.a) {
+                continue;
+            }
             if let (Some((ra, link_a)), Some((rb, link_b))) = (side(pair.a), side(pair.b)) {
                 if ra != rb {
                     return Err(SeqError::RobotCollision {
@@ -9133,12 +9338,17 @@ impl Rollout {
         self.moving = moves
             .iter()
             .map(|(mv, riders)| {
+                let crew_load = moves
+                    .iter()
+                    .filter(|(other, _)| mv.crew.contains(&other.name))
+                    .flat_map(|(_, load)| load);
                 (
                     mv.name.clone(),
                     mv.body
                         .iter()
                         .chain(riders)
                         .chain(mv.extra.iter())
+                        .chain(crew_load)
                         .cloned()
                         .collect(),
                 )
@@ -9259,8 +9469,18 @@ impl Rollout {
     ) -> Result<(), SeqError> {
         for (mv, riders) in moves {
             let (vehicle, body) = (&mv.name, &mv.body);
+            // A crewmate's deck load rides the same rigid motion — the
+            // load a formation carries rests on its members.
+            let crew_load: Vec<&String> = moves
+                .iter()
+                .filter(|(other, _)| mv.crew.contains(&other.name))
+                .flat_map(|(_, load)| load)
+                .collect();
             let carried = |name: &String| {
-                body.contains(name) || riders.contains(name) || mv.extra.contains(name)
+                body.contains(name)
+                    || riders.contains(name)
+                    || mv.extra.contains(name)
+                    || crew_load.contains(&name)
             };
             // A walking machine stands on walkable surfaces by design —
             // nobody collision-checks a floor against the machine standing
@@ -9337,7 +9557,7 @@ impl Rollout {
                 let rides = self.world.robots()[r]
                     .mount
                     .as_ref()
-                    .is_some_and(|m| m.device == mv.name);
+                    .is_some_and(|m| m.device == mv.name || mv.crew.contains(&m.device));
                 if rides {
                     continue;
                 }
@@ -9358,6 +9578,198 @@ impl Rollout {
             }
         }
         Ok(())
+    }
+
+    /// The formation `vehicle` rides right now: one still on its way with
+    /// the vehicle aboard.
+    fn formation_of(&self, vehicle: &str) -> Option<String> {
+        self.devices.iter().find_map(|d| match d {
+            DeviceRuntime::Vehicle {
+                name, legs, aboard, ..
+            } if !legs.is_empty() && aboard.iter().any(|m| m == vehicle) => Some(name.clone()),
+            _ => None,
+        })
+    }
+
+    /// Boards a formation dispatched this scan. Every member must be
+    /// parked on its slot — within [`crate::formation::SLOT_TOL`] and
+    /// [`crate::formation::SLOT_YAW_TOL`] of where the formation's frame
+    /// puts it — or the dispatch refuses by name; and the route must be
+    /// one each member can drive: a differential member is never asked to
+    /// move sideways. A formation moves as one machine, so this is priced
+    /// once, when it is commanded. The members' wheels turn from here, as
+    /// on a dispatch of their own.
+    fn board_formation(&mut self, device: &str, t: f64) -> Result<(), String> {
+        use crate::formation::{SIDEWAYS_TOL, SLOT_TOL, SLOT_YAW_TOL};
+        let Some((members, legs, position, heading)) = self.devices.iter().find_map(|d| match d {
+            DeviceRuntime::Vehicle {
+                name,
+                members,
+                legs,
+                position,
+                heading,
+                ..
+            } if name == device => Some((members.clone(), legs.clone(), *position, *heading)),
+            _ => None,
+        }) else {
+            return Err(format!("unknown vehicle `{device}`"));
+        };
+        let modes = vec![crate::gait::LegMode::Roll; legs.len()];
+        let profile = body_profile(&legs, &modes, position, heading, t);
+        let frame = vehicle_frame(&position, heading);
+        for (member, slot) in &members {
+            let Some((at, facing, travelling, drive)) = self.devices.iter().find_map(|d| match d {
+                DeviceRuntime::Vehicle {
+                    name,
+                    position,
+                    heading,
+                    legs,
+                    drive,
+                    ..
+                } if name == member => Some((*position, *heading, !legs.is_empty(), *drive)),
+                _ => None,
+            }) else {
+                return Err(format!(
+                    "formation `{device}` names unknown member `{member}`"
+                ));
+            };
+            if travelling {
+                return Err(format!(
+                    "formation `{device}` cannot leave: member `{member}` is still \
+                     travelling; wait for its device_done"
+                ));
+            }
+            if let Some(other) = self.formation_of(member) {
+                return Err(format!(
+                    "formation `{device}` cannot leave: member `{member}` rides \
+                     formation `{other}`"
+                ));
+            }
+            if let Some(lift) = self.devices.iter().find_map(|d| match d {
+                DeviceRuntime::Lift {
+                    name,
+                    position,
+                    target,
+                    cargo_vehicles,
+                    ..
+                } if (position - target).abs() > 1e-9
+                    && cargo_vehicles.iter().any(|v| v == member) =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            }) {
+                return Err(format!(
+                    "formation `{device}` cannot leave: member `{member}` is riding lift `{lift}`"
+                ));
+            }
+            let want = frame * slot;
+            let off = (at - nalgebra::Point3::from(want.translation.vector)).norm();
+            if off > SLOT_TOL {
+                return Err(format!(
+                    "formation `{device}` cannot leave: member `{member}` stands {off:.3} m \
+                     off its slot (at ({:.3}, {:.3}), the slot at ({:.3}, {:.3}))",
+                    at.x, at.y, want.translation.x, want.translation.y
+                ));
+            }
+            let turned = wrap_angle(facing - want.rotation.euler_angles().2);
+            if turned.abs() > SLOT_YAW_TOL {
+                return Err(format!(
+                    "formation `{device}` cannot leave: member `{member}` faces {:.1}° off \
+                     its slot",
+                    turned.to_degrees()
+                ));
+            }
+            if !matches!(drive, crate::seq::Drive::Differential { .. }) {
+                continue;
+            }
+            // Riding rigidly, the member moves as the formation moves its
+            // slot: along the formation's straights, round its centre on
+            // a turn. A differential drive can do that only along its
+            // heading.
+            for (_, _, start, piece) in &profile.pieces {
+                let ride = start * slot;
+                let velocity = match piece {
+                    VehiclePiece::Lin { velocity } => *velocity,
+                    VehiclePiece::Piv { center, omega } => {
+                        let r = ride.translation.vector - center.coords;
+                        Vector3::new(-omega * r.y, omega * r.x, 0.0)
+                    }
+                };
+                let sideways = velocity.dot(&(ride.rotation * Vector3::y()));
+                if sideways.abs() > SIDEWAYS_TOL {
+                    return Err(format!(
+                        "formation `{device}`: member `{member}` (differential) would slide \
+                         sideways at {:.3} m/s as the formation {} at ({:.2}, {:.2}) — a \
+                         differential machine moves only along its heading; turn its slot \
+                         to face that way, or give the formation holonomic members",
+                        sideways.abs(),
+                        match piece {
+                            VehiclePiece::Lin { .. } => "drives off",
+                            VehiclePiece::Piv { .. } => "turns",
+                        },
+                        start.translation.x,
+                        start.translation.y
+                    ));
+                }
+            }
+        }
+        for d in &mut self.devices {
+            if let DeviceRuntime::Vehicle { name, aboard, .. } = d {
+                if name == device {
+                    *aboard = members.iter().map(|(m, _)| m.clone()).collect();
+                }
+            }
+        }
+        let spans = profile.locomotion();
+        for (member, _) in &members {
+            self.start_wheels(member, &profile);
+            for r in 0..self.robots.len() {
+                let rides = self.world.robots()[r]
+                    .mount
+                    .as_ref()
+                    .is_some_and(|m| &m.device == member);
+                if rides && self.robots[r].wheels.is_some() {
+                    self.robots[r].locomotion.extend(spans.iter().cloned());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The link a load held on `link` of robot `r` rests on: the link
+    /// itself, or — for a frame link with no geometry, a catalog's `deck` —
+    /// the first link with geometry it is fixed to.
+    fn support_link(&self, r: usize, link: usize) -> usize {
+        let robot = &self.world.robots()[r];
+        let mut at = link;
+        while !robot.collider().link_has_geometry(at) {
+            let Some(joint) = robot.model.joints.iter().find(|j| {
+                j.child_link == at && matches!(j.joint_type, botrail_model::JointType::Fixed)
+            }) else {
+                break;
+            };
+            at = joint.parent_link;
+        }
+        at
+    }
+
+    /// Whether robots `a` and `b` ride vehicles of one formation — the
+    /// platforms under one load.
+    fn same_crew(&self, a: usize, b: usize) -> bool {
+        let vehicle = |r: usize| {
+            self.world.robots()[r]
+                .mount
+                .as_ref()
+                .map(|m| m.device.clone())
+        };
+        let (Some(va), Some(vb)) = (vehicle(a), vehicle(b)) else {
+            return false;
+        };
+        self.devices.iter().any(|d| {
+            matches!(d, DeviceRuntime::Vehicle { members, .. }
+                if members.iter().any(|(m, _)| *m == va) && members.iter().any(|(m, _)| *m == vb))
+        })
     }
 
     /// Fixes a lift's cargo at dispatch: every vehicle whose reference
@@ -9910,8 +10322,11 @@ impl Rollout {
                     target,
                     ..
                 } => name == device && (target - position).abs() < 1e-9,
-                // Parked at the commanded station (in-position).
-                DeviceRuntime::Vehicle { name, legs, .. } => name == device && legs.is_empty(),
+                // Parked at the commanded station (in-position) — not
+                // riding a formation that is still on its way.
+                DeviceRuntime::Vehicle { name, legs, .. } => {
+                    name == device && legs.is_empty() && self.formation_of(device).is_none()
+                }
                 // In-position for a conveyor means "no fixed advance
                 // pending" — the await for `Advance`.
                 DeviceRuntime::Conveyor {
@@ -10817,6 +11232,11 @@ impl Rollout {
                     }
                     _ => None,
                 });
+                // ... or a member riding a formation that is still travelling?
+                let riding_formation = self.formation_of(device);
+                // A formation dispatched this scan: its members board once
+                // the borrow below ends.
+                let mut board = false;
                 let found = self.devices.iter_mut().find(|d| match d {
                     DeviceRuntime::Conveyor { name, .. }
                     | DeviceRuntime::Axis { name, .. }
@@ -10943,6 +11363,7 @@ impl Rollout {
                             target,
                             legs,
                             lane,
+                            members,
                             ..
                         },
                         DeviceCommand::Goto { station },
@@ -10959,6 +11380,12 @@ impl Rollout {
                             return Err(err(format!(
                                 "vehicle `{device}` is riding lift `{lift}`; wait for \
                                  the lift's device_done before the next goto"
+                            )));
+                        }
+                        if let Some(formation) = &riding_formation {
+                            return Err(err(format!(
+                                "vehicle `{device}` rides formation `{formation}`; wait for \
+                                 the formation's device_done before the next goto"
                             )));
                         }
                         let to = stations
@@ -11014,6 +11441,7 @@ impl Rollout {
                             *at = None;
                             lane_update = Some((*lane, true));
                             dispatched = Some((*position, *heading));
+                            board = !members.is_empty();
                         }
                     }
                     (
@@ -11062,7 +11490,12 @@ impl Rollout {
                 if lift_capture {
                     // The boarding is priced when the ride is commanded —
                     // an elevator moves after the doors close.
-                    self.capture_lift(device).map_err(err)?;
+                    self.capture_lift(device).map_err(&err)?;
+                }
+                if board {
+                    // So is a formation's: every member on its slot, and
+                    // the route one each of them can drive.
+                    self.board_formation(device, t).map_err(err)?;
                 }
             }
         }
@@ -12422,7 +12855,7 @@ impl Rollout {
             let parked = !self.devices.iter().any(|device| {
                 matches!(device, DeviceRuntime::Vehicle { name, legs, .. }
                     if *name == wheels.device && !legs.is_empty())
-            });
+            }) && self.formation_of(&wheels.device).is_none();
             let rt = &mut self.robots[r];
             // A tracked tick bakes itself once its arm is solved, a
             // dynamic robot's is the engine's read-back; both carry the
@@ -16960,6 +17393,7 @@ mod vehicle_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -17647,6 +18081,7 @@ mod vehicle_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -17956,6 +18391,7 @@ mod vehicle_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((iso(0.0, 0.0, 0.35), Vector3::new(0.5, 0.4, 0.2))),
+                members: Vec::new(),
             },
         });
         scene.upsert_device(Device {
@@ -18202,6 +18638,7 @@ mod vehicle_tests {
                     yaw,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -18771,6 +19208,7 @@ mod vehicle_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         });
         scene.upsert_sequence(Sequence {
@@ -18818,6 +19256,7 @@ mod vehicle_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         });
         scene.upsert_sequence(Sequence {
@@ -18948,6 +19387,7 @@ mod tray_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((iso(0.0, 0.0, 0.25), Vector3::new(0.35, 0.3, 0.2))),
+                members: Vec::new(),
             },
         });
         scene.upsert_sequence(Sequence {
@@ -19017,6 +19457,7 @@ mod tray_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: Some((iso(0.0, 0.0, 0.2), Vector3::new(0.4, 0.3, 0.2))),
+                members: Vec::new(),
             },
         });
         // The sample arm used to stand (unchecked) inside the parked
@@ -19458,6 +19899,7 @@ mod mount_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         });
         scene.mount_robot(0, "amr", iso(0.0, 0.0, 0.3)).unwrap();
@@ -19827,6 +20269,7 @@ mod wheel_mount_tests {
                 start: "a".into(),
                 drive,
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -21063,6 +21506,7 @@ mod gait_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -22240,6 +22684,7 @@ mod biped_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -24151,6 +24596,7 @@ mod physics_tests {
                     Isometry3::translation(0.0, 0.0, 0.25),
                     Vector3::new(0.35, 0.3, 0.2),
                 )),
+                members: Vec::new(),
             },
         });
         scene.upsert_sequence(Sequence {
@@ -25604,6 +26050,7 @@ mod wheel_leg_tests {
                     prefer: crate::seq::Gear::Forward,
                 },
                 tray: None,
+                members: Vec::new(),
             },
         }
     }
@@ -26410,5 +26857,504 @@ mod wheel_leg_tests {
                 assert!((q[qi] - stance[qi]).abs() < 1e-6, "{leg} {j}: {}", q[qi]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod formation_tests {
+    //! Formations (design-cooperative-transport.md K0): members ride the
+    //! formation's motion from their slots, rigidly; the boarding and the
+    //! rates are checked by name.
+    use super::tests::*;
+    use super::*;
+    use crate::seq::{Device, DeviceKind, Drive, FormationMember, Gear, Step, VehiclePath};
+    use botrail_model::Geometry;
+    use nalgebra::{Point3, Translation3, UnitQuaternion};
+    use std::f64::consts::PI;
+
+    const DIFF: Drive = Drive::Differential {
+        allow_reverse: false,
+        max_grade: None,
+        reverse_speed: None,
+        prefer: Gear::Forward,
+    };
+    const OMNI: Drive = Drive::Holonomic { max_grade: None };
+
+    fn iso(x: f64, y: f64, z: f64) -> Isometry3<f64> {
+        Isometry3::from_parts(Translation3::new(x, y, z), UnitQuaternion::identity())
+    }
+
+    fn step(name: &str, actions: Vec<Action>, transition: Condition) -> Step {
+        Step {
+            name: name.to_string(),
+            actions,
+            transition,
+            select: Vec::new(),
+        }
+    }
+
+    fn goto(device: &str, station: &str) -> Action {
+        Action::Device {
+            device: device.into(),
+            command: DeviceCommand::Goto {
+                station: station.into(),
+            },
+        }
+    }
+
+    fn done(device: &str) -> Condition {
+        Condition::DeviceDone {
+            device: device.into(),
+        }
+    }
+
+    fn path(points: &[(f64, f64)], stations: &[(&str, usize)]) -> VehiclePath {
+        VehiclePath {
+            waypoints: points
+                .iter()
+                .map(|&(x, y)| Point3::new(x, y, 0.0))
+                .collect(),
+            stations: stations.iter().map(|&(n, i)| (n.to_string(), i)).collect(),
+            ring: false,
+            arrivals: Vec::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn vehicle(
+        name: &str,
+        path: VehiclePath,
+        body: Vec<String>,
+        speed: f64,
+        turn_speed: f64,
+        start: &str,
+        drive: Drive,
+        members: Vec<FormationMember>,
+    ) -> Device {
+        Device {
+            name: name.into(),
+            kind: DeviceKind::Vehicle {
+                path,
+                wheels: Vec::new(),
+                body,
+                speed,
+                turn_speed,
+                start: start.into(),
+                drive,
+                tray: None,
+                members,
+            },
+        }
+    }
+
+    /// Formation `f` drives 3 m along +x, turns left about its centre at
+    /// 0.5 rad/s and drives 3 m along +y, at 0.5 m/s: 6 + π + 6 s. Its
+    /// members (`m1`, `m2`, …) stand on `slots` — (x, y) in its frame,
+    /// facing its way — each a 0.4 × 0.3 m body at 0.5 m/s and 1 rad/s,
+    /// its own path running from the slot (`home`) to where the formation
+    /// sets it down (`there`: the end frame faces +y about (3, 3), so the
+    /// slot (x, y) lands on (3 − y, 3 + x)). The scene's robot is parked
+    /// out of the way.
+    fn crew_scene(slots: &[(f64, f64)], member_drive: Drive) -> Scene {
+        let mut scene = sample_scene();
+        scene.set_robot_base_pose_for(0, iso(10.0, 10.0, 0.0));
+        let mut members = Vec::new();
+        for (i, &(x, y)) in slots.iter().enumerate() {
+            let name = format!("m{}", i + 1);
+            let body = format!("{name}/body");
+            scene
+                .add_obstacle(
+                    &body,
+                    Geometry::Box {
+                        size: Vector3::new(0.4, 0.3, 0.2),
+                    },
+                    iso(x, y, 0.1),
+                )
+                .unwrap();
+            scene.upsert_device(vehicle(
+                &name,
+                path(
+                    &[(x, y), (x + 1.0, y), (3.0 - y, 3.0 + x)],
+                    &[("home", 0), ("there", 2)],
+                ),
+                vec![body],
+                0.5,
+                1.0,
+                "home",
+                member_drive,
+                Vec::new(),
+            ));
+            members.push(FormationMember {
+                vehicle: name,
+                slot: iso(x, y, 0.0),
+            });
+        }
+        scene.upsert_device(vehicle(
+            "f",
+            path(&[(0.0, 0.0), (3.0, 0.0), (3.0, 3.0)], &[("a", 0), ("c", 2)]),
+            Vec::new(),
+            0.5,
+            0.5,
+            "a",
+            DIFF,
+            members,
+        ));
+        scene
+    }
+
+    fn carry(scene: &mut Scene, steps: Vec<Step>) -> Result<SequenceTimeline, String> {
+        scene.upsert_sequence(Sequence {
+            name: "carry".into(),
+            steps,
+        });
+        scene
+            .simulate_sequence("carry", &RolloutOptions::default())
+            .map_err(|e| e.to_string())
+    }
+
+    fn frame(tl: &SequenceTimeline, name: &str, t: f64) -> Isometry3<f64> {
+        let track = tl.vehicles.iter().find(|v| v.name == name).unwrap();
+        SequenceTimeline::span_pose(&track.spans, &[], t).unwrap()
+    }
+
+    const CARRY: f64 = 12.0 + PI;
+
+    /// Holonomic members hold their slots through the straights and the
+    /// turn about the centre, are set down where `formation_slot` says —
+    /// back on their own paths — and drive home on their own.
+    #[test]
+    fn holonomic_members_ride_the_formation_rigidly() {
+        let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+        let tl = carry(
+            &mut scene,
+            vec![
+                step("carry", vec![goto("f", "c")], done("f")),
+                step(
+                    "off",
+                    vec![goto("m1", "home"), goto("m2", "home")],
+                    Condition::All(vec![done("m1"), done("m2")]),
+                ),
+            ],
+        )
+        .unwrap();
+        let mut t = 0.0;
+        while t <= CARRY {
+            for (m, x) in [("m1", 0.6), ("m2", -0.6)] {
+                let rel = frame(&tl, "f", t).inverse() * frame(&tl, m, t);
+                assert!(
+                    (rel.translation.vector - Vector3::new(x, 0.0, 0.0)).norm() < 1e-9
+                        && rel.rotation.angle() < 1e-9,
+                    "{m} off its slot at t = {t}: {rel:?}"
+                );
+            }
+            t += 0.37;
+        }
+        let end = frame(&tl, "f", CARRY);
+        assert!((end.translation.vector - Vector3::new(3.0, 3.0, 0.0)).norm() < 1e-9);
+        assert!((end.rotation.angle() - PI / 2.0).abs() < 1e-9);
+        // The body rides with its vehicle.
+        let body = tl.objects.iter().find(|o| o.name == "m1/body").unwrap();
+        let at = SequenceTimeline::object_pose(body, &[vec![], vec![]], CARRY).unwrap();
+        assert!((at.translation.vector - Vector3::new(3.0, 3.6, 0.1)).norm() < 1e-9);
+        let there = scene.formation_slot("f", "m1", "c", None).unwrap();
+        assert!((there.translation.vector - Vector3::new(3.0, 3.6, 0.0)).norm() < 1e-9);
+        assert!((there.rotation.angle() - PI / 2.0).abs() < 1e-9);
+        // ... then home under their own power, holding the heading the
+        // formation left them with.
+        assert!(tl.duration > CARRY + 1.0, "{}", tl.duration);
+        for (m, x) in [("m1", 0.6), ("m2", -0.6)] {
+            let home = frame(&tl, m, tl.duration);
+            assert!(
+                (home.translation.vector - Vector3::new(x, 0.0, 0.0)).norm() < 1e-9,
+                "{m} ends at {:?}",
+                home.translation.vector
+            );
+        }
+    }
+
+    /// A differential member ahead of the centre would be dragged sideways
+    /// round the turn: refused by name, at dispatch.
+    #[test]
+    fn a_differential_member_is_never_asked_to_slide_sideways() {
+        let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], DIFF);
+        let err = carry(
+            &mut scene,
+            vec![step("carry", vec![goto("f", "c")], done("f"))],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("member `m1` (differential) would slide sideways at 0.300 m/s")
+                && err.contains("turns at (3.00, 0.00)"),
+            "{err}"
+        );
+    }
+
+    /// Side by side, two differential members turn about the centre
+    /// between them like the wheels of one large differential drive.
+    #[test]
+    fn a_side_by_side_pair_turns_like_one_differential_drive() {
+        let mut scene = crew_scene(&[(0.0, 0.6), (0.0, -0.6)], DIFF);
+        let tl = carry(
+            &mut scene,
+            vec![step("carry", vec![goto("f", "c")], done("f"))],
+        )
+        .unwrap();
+        for (m, y) in [("m1", 0.6), ("m2", -0.6)] {
+            let rel = frame(&tl, "f", CARRY).inverse() * frame(&tl, m, CARRY);
+            assert!((rel.translation.vector - Vector3::new(0.0, y, 0.0)).norm() < 1e-9);
+        }
+    }
+
+    /// A member that does not stand on its slot when the formation leaves
+    /// is named, with how far off it is.
+    #[test]
+    fn a_member_off_its_slot_holds_the_formation() {
+        let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+        let mut m1 = scene
+            .devices()
+            .iter()
+            .find(|d| d.name == "m1")
+            .unwrap()
+            .clone();
+        if let DeviceKind::Vehicle { path, .. } = &mut m1.kind {
+            path.waypoints[0].x += 0.02;
+        }
+        scene.upsert_device(m1);
+        let err = carry(
+            &mut scene,
+            vec![step("carry", vec![goto("f", "c")], done("f"))],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("formation `f` cannot leave: member `m1` stands 0.020 m off its slot"),
+            "{err}"
+        );
+    }
+
+    /// Aboard, a member is the formation's: its own goto waits, and its
+    /// device_done holds until the formation has arrived.
+    #[test]
+    fn a_member_aboard_is_the_formations() {
+        let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+        let err = carry(
+            &mut scene,
+            vec![step(
+                "carry",
+                vec![goto("f", "c"), goto("m1", "there")],
+                done("f"),
+            )],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("vehicle `m1` rides formation `f`; wait for the formation's device_done"),
+            "{err}"
+        );
+        let tl = carry(
+            &mut scene,
+            vec![
+                step("carry", vec![goto("f", "c")], done("m1")),
+                step("next", vec![], Condition::Immediately),
+            ],
+        )
+        .unwrap();
+        let span = tl.step_spans.iter().find(|s| s.name == "carry").unwrap();
+        assert!(
+            (span.end - CARRY).abs() < 0.011,
+            "carry ends at {}",
+            span.end
+        );
+    }
+
+    /// A formation goes no faster than its slowest member, and turning
+    /// about its centre drives the outer members fastest.
+    #[test]
+    fn a_formation_is_held_to_its_members_rates() {
+        let rates = |speed: f64, turn_speed: f64| {
+            let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+            let mut f = scene
+                .devices()
+                .iter()
+                .find(|d| d.name == "f")
+                .unwrap()
+                .clone();
+            if let DeviceKind::Vehicle {
+                speed: s,
+                turn_speed: w,
+                ..
+            } = &mut f.kind
+            {
+                *s = speed;
+                *w = turn_speed;
+            }
+            scene.upsert_device(f);
+            carry(
+                &mut scene,
+                vec![step("carry", vec![goto("f", "c")], done("f"))],
+            )
+            .unwrap_err()
+        };
+        let err = rates(0.6, 0.5);
+        assert!(
+            err.contains("formation `f` drives at 0.600 m/s, over member `m1`'s 0.500 m/s"),
+            "{err}"
+        );
+        let err = rates(0.5, 1.0);
+        assert!(
+            err.contains("drives member `m1` (0.600 m from the centre) at 0.600 m/s")
+                && err.contains("turn_speed ≤ 0.833 rad/s"),
+            "{err}"
+        );
+    }
+
+    /// The leg a member is carried along is no tape on the plan: its own
+    /// path from where the formation picks it up to where it sets it down
+    /// is ridden, so the layout draws the member's tape around it.
+    #[test]
+    fn the_layout_leaves_out_the_leg_a_member_rides() {
+        let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+        let mut m1 = scene
+            .devices()
+            .iter()
+            .find(|d| d.name == "m1")
+            .unwrap()
+            .clone();
+        if let DeviceKind::Vehicle { path, .. } = &mut m1.kind {
+            // In from the west, picked up on the slot, set down at `c`, out east.
+            path.waypoints = vec![
+                Point3::new(-0.4, 0.0, 0.0),
+                Point3::new(0.6, 0.0, 0.0),
+                Point3::new(3.0, 3.6, 0.0),
+                Point3::new(4.0, 3.6, 0.0),
+            ];
+            path.stations = vec![("home".into(), 0), ("there".into(), 3)];
+        }
+        scene.upsert_device(m1);
+        let sheet = scene.layout(&crate::layout::LayoutOptions::default());
+        let tapes: Vec<Vec<[f64; 2]>> = sheet
+            .items
+            .iter()
+            .filter(|item| item.name == "m1")
+            .filter_map(|item| match &item.shape {
+                crate::layout::LayoutShape::Polyline { points } => Some(points.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tapes,
+            vec![vec![[-0.4, 0.0], [0.6, 0.0]], vec![[3.0, 3.6], [4.0, 3.6]]]
+        );
+    }
+
+    /// A catalog platform's seat is a frame link with no geometry (`deck`,
+    /// fixed to the lift plate): a load held there rests on the crewmate's
+    /// plate, the link the deck is fixed to.
+    #[test]
+    fn a_load_held_on_a_deck_frame_rests_on_the_crewmates_plate() {
+        let urdf = r#"
+        <robot name="platform">
+          <link name="chassis"><collision><geometry><box size="0.3 0.3 0.2"/></geometry></collision></link>
+          <link name="plate"><collision><origin xyz="0 0 0.01"/><geometry><box size="0.3 0.3 0.02"/></geometry></collision></link>
+          <link name="deck"/>
+          <joint name="lift" type="prismatic">
+            <parent link="chassis"/><child link="plate"/><origin xyz="0 0 0.1"/><axis xyz="0 0 1"/>
+            <limit lower="0" upper="0.1" effort="1" velocity="0.1"/>
+          </joint>
+          <joint name="deck_joint" type="fixed">
+            <parent link="plate"/><child link="deck"/><origin xyz="0 0 0.02"/>
+          </joint>
+        </robot>"#;
+        let model = std::sync::Arc::new(botrail_model::RobotModel::from_urdf_str(urdf).unwrap());
+        let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+        let first = scene.add_robot(model.clone(), Some("p1"), Isometry3::identity());
+        let second = scene.add_robot(model, Some("p2"), Isometry3::identity());
+        let index = |name: &str| scene.robots().iter().position(|r| r.name == name).unwrap();
+        let (i1, i2) = (index(&first), index(&second));
+        scene.mount_robot(i1, "m1", iso(0.0, 0.0, 0.3)).unwrap();
+        scene.mount_robot(i2, "m2", iso(0.0, 0.0, 0.3)).unwrap();
+        // The beam rests on both plates: its underside 1 mm into them.
+        scene
+            .add_obstacle(
+                "beam",
+                Geometry::Box {
+                    size: Vector3::new(1.6, 0.2, 0.05),
+                },
+                iso(0.0, 0.0, 0.3 + 0.12 + 0.025 - 0.001),
+            )
+            .unwrap();
+        let tl = carry(
+            &mut scene,
+            vec![
+                step(
+                    "hold",
+                    vec![Action::Attach {
+                        robot: Some(first),
+                        object: "beam".into(),
+                        link: Some("deck".into()),
+                        touch_links: None,
+                        group: None,
+                    }],
+                    Condition::Immediately,
+                ),
+                step("carry", vec![goto("f", "c")], done("f")),
+            ],
+        )
+        .unwrap();
+        assert!((tl.duration - CARRY).abs() < 0.021, "{}", tl.duration);
+    }
+
+    /// A beam one platform holds rests on its crewmate's deck — the link
+    /// of the same name on the robot riding the other member. Within a
+    /// formation that touch is the load bearing; outside one it is a
+    /// collision.
+    #[test]
+    fn a_load_rests_on_its_crewmates_deck() {
+        let build = |crew: &[&str]| {
+            let mut scene = crew_scene(&[(0.6, 0.0), (-0.6, 0.0)], OMNI);
+            let model = scene.robots()[0].model.clone();
+            scene.add_robot(model, Some("r2"), Isometry3::identity());
+            scene.mount_robot(0, "m1", iso(0.0, 0.0, 0.3)).unwrap();
+            scene.mount_robot(1, "m2", iso(0.0, 0.0, 0.3)).unwrap();
+            scene
+                .add_obstacle(
+                    "beam",
+                    Geometry::Box {
+                        size: Vector3::new(1.6, 0.2, 0.1),
+                    },
+                    iso(0.0, 0.0, 0.8),
+                )
+                .unwrap();
+            let mut f = scene
+                .devices()
+                .iter()
+                .find(|d| d.name == "f")
+                .unwrap()
+                .clone();
+            if let DeviceKind::Vehicle { members, .. } = &mut f.kind {
+                members.retain(|m| crew.contains(&m.vehicle.as_str()));
+            }
+            scene.upsert_device(f);
+            let robot = scene.robots()[0].name.clone();
+            carry(
+                &mut scene,
+                vec![
+                    step(
+                        "hold",
+                        vec![Action::Attach {
+                            robot: Some(robot),
+                            object: "beam".into(),
+                            link: Some("b".into()),
+                            touch_links: None,
+                            group: None,
+                        }],
+                        Condition::Immediately,
+                    ),
+                    step("carry", vec![goto("f", "c")], done("f")),
+                ],
+            )
+        };
+        let tl = build(&["m1", "m2"]).unwrap();
+        assert!((tl.duration - CARRY).abs() < 0.021, "{}", tl.duration);
+        let err = build(&["m1"]).unwrap_err();
+        assert!(err.contains("collide") && err.contains("beam"), "{err}");
     }
 }

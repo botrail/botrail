@@ -1095,6 +1095,10 @@ pub enum DeviceKindMsg {
         /// Load deck in the vehicle frame: pose plus full size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tray: Option<VehicleTrayMsg>,
+        /// Present makes the vehicle a formation: these vehicles board at
+        /// their slots on a goto and ride its motion to the station.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        members: Vec<FormationMemberMsg>,
     },
     /// A lift (elevator): the car obstacles ride along `axis` between
     /// named stops, carrying what the capture zone held at dispatch —
@@ -1188,6 +1192,16 @@ pub struct AerialMsg {
     /// Hold this yaw over the whole flight; absent flies course-facing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_yaw: Option<f64>,
+}
+
+/// One vehicle of a formation and its slot — its vehicle frame in the
+/// formation's frame.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FormationMemberMsg {
+    pub vehicle: String,
+    pub slot: PoseMsg,
 }
 
 /// A vehicle's load deck, in the vehicle frame.
@@ -3247,7 +3261,15 @@ pub fn device_msg(device: &Device) -> DeviceMsg {
                 start,
                 drive,
                 tray,
+                members,
             } => DeviceKindMsg::Vehicle {
+                members: members
+                    .iter()
+                    .map(|m| FormationMemberMsg {
+                        vehicle: m.vehicle.clone(),
+                        slot: PoseMsg::from(&m.slot),
+                    })
+                    .collect(),
                 wheels: wheels.clone(),
                 allow_reverse: drive.allow_reverse(),
                 max_grade: drive.max_grade(),
@@ -3403,7 +3425,15 @@ pub fn device_from_msg(msg: &DeviceMsg) -> Device {
                 holonomic,
                 aerial,
                 tray,
+                members,
             } => DeviceKind::Vehicle {
+                members: members
+                    .iter()
+                    .map(|m| crate::seq::FormationMember {
+                        vehicle: m.vehicle.clone(),
+                        slot: (&m.slot).into(),
+                    })
+                    .collect(),
                 wheels: wheels.clone(),
                 drive: match aerial {
                     Some(a) => crate::seq::Drive::Aerial {
