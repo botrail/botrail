@@ -4,6 +4,7 @@ import { highlightLink, restoreLinkMaterials } from "three-usd-robot/helpers";
 
 import type { PoseMsg, RobotDescMsg } from "../protocol";
 import { playbackRig } from "../playbackRig";
+import { robotRig } from "../three/robotRig";
 import { collidingLinkNames, useStudioStore } from "../store";
 import { cursorEnter, cursorLeave } from "../three/cursor";
 import { hoverEnter, hoverLeave } from "../three/hover";
@@ -71,6 +72,16 @@ function UsdRobotInstance({ name }: { name: string }) {
   }, [url]);
 
   const desc = state?.desc ?? null;
+
+  // The object itself, for what works on the robot's three.js side (the
+  // TCP handle follows its tool link).
+  useEffect(() => {
+    if (!robot) return;
+    robotRig.setUsd(name, robot);
+    return () => {
+      robotRig.setUsd(name, null);
+    };
+  }, [robot, name]);
 
   // Displayed joints: playback override wins over the live state. While a
   // link-pose (baked) override runs, setJointValues must stay silent — it

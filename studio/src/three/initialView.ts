@@ -1,5 +1,5 @@
-type Point = [number, number, number];
-type View = { position: Point; target: Point };
+export type Point = [number, number, number];
+export type View = { position: Point; target: Point };
 
 /** Optional launch view; invalid links fall back to the usual orbit view. */
 export function initialView(search: string): View {

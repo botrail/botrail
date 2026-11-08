@@ -39,6 +39,9 @@ deployed by CI on every push).
 * **Trying botrail before installing it** — the demo is the pitch.
 * **Sharing a cell as a URL** — no "install this first" in the email.
 * **Machines you can't install on** — a shop-floor terminal with a browser.
+* **A headset** — the page is HTTPS, so a Quest's browser offers the
+  header's **VR** button ([the studio guide](studio.md#vr--the-cell-in-a-headset)
+  has the controls); the robot comes from the CDN as on the desktop.
 
 The Python API is, of course, the one thing a static page cannot give you:
 scripted authoring, baking from code, pytest, exports to disk. The browser

@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 
 import { backendSupportsHttp } from "../backend";
 import { useStudioStore } from "../store";
+import { enterVr, exitVr } from "../xr/XrSession";
 
 export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -20,6 +21,11 @@ export function Header() {
   const setSelectedRobot = useStudioStore((s) => s.setSelectedRobot);
   const connection = useStudioStore((s) => s.connection);
   const connected = connection === "connected";
+  // The VR button shows wherever an immersive-vr session could start (a
+  // headset's browser, a PC with a runtime, the emulator) — in wasm mode
+  // too. A running video export owns the renderer, so no entering then.
+  const xr = useStudioStore((s) => s.xr);
+  const exporting = useStudioStore((s) => s.camExport !== null);
 
   // Errors from the HTTP save/load/export round-trips (kept out of the store).
   const [ioError, setIoError] = useState<string | null>(null);
@@ -113,6 +119,31 @@ export function Header() {
             }}
           />
         </span>
+      )}
+      {xr.supported && (
+        <button
+          className="vr-button"
+          disabled={exporting && !xr.presenting}
+          title={
+            xr.presenting
+              ? "end the VR session"
+              : exporting
+                ? "a video export owns the renderer"
+                : "enter the cell in a headset (WebXR)"
+          }
+          onClick={() => {
+            if (xr.presenting) {
+              exitVr();
+              return;
+            }
+            enterVr().then(
+              () => setIoError(null),
+              (e) => setIoError(`VR failed: ${String(e)}`),
+            );
+          }}
+        >
+          {xr.presenting ? "Exit VR" : "VR"}
+        </button>
       )}
       <span className={`status ${connected ? "ok" : "bad"}`}>
         <span className="dot" />

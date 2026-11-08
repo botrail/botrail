@@ -33,7 +33,7 @@ import { ToolpathView } from "./ToolpathView";
 import { LegendHud } from "./LegendHud";
 import { SprayView } from "./SprayView";
 import { VehiclePathView } from "./VehiclePathView";
-import { TcpGizmo } from "./TcpGizmo";
+import { TcpHandleView } from "./TcpHandleView";
 import { DragLineView, PickBridge } from "./DragLineView";
 import { IoOverlay } from "./IoOverlay";
 import { BomOverlay } from "./BomOverlay";
@@ -45,6 +45,7 @@ import { UsdRobotView } from "./UsdRobotView";
 import { WasmStageView } from "./WasmStageView";
 import { floorFinish } from "../three/floorFinish";
 import { initialView } from "../three/initialView";
+import { XrSession } from "../xr/XrSession";
 
 /**
  * Image-based lighting, so the robot's PBR materials (the Isaac Franka ships
@@ -89,6 +90,13 @@ function IndoorLighting() {
 export function Viewport() {
   const view = useMemo(() => initialView(window.location.search), []);
   const connected = useStudioStore((s) => s.connection === "connected");
+  // WebXR (`.internal/design-vr.md` §3.2, §3.8). `supported` is decided
+  // before this mounts and never changes; `presenting` flips with the
+  // session, and while it is on the renderer draws the XR layer itself:
+  // the camera pass (OutputPass, PiP) and the mouse-driven controls and
+  // gizmos stand down until the session ends.
+  const xrSupported = useStudioStore((s) => s.xr.supported);
+  const presenting = useStudioStore((s) => s.xr.presenting);
   // The hover chip follows the pointer over this element.
   const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null);
 
@@ -116,7 +124,11 @@ export function Viewport() {
     >
       <Canvas
         shadows="soft"
-        gl={{ antialias: false }}
+        // No canvas AA on the desktop: every pixel goes through the camera
+        // pass's MSAA target and OutputPass. The XR layer's MSAA follows
+        // this attribute (three r169 WebXRManager), so a headset turns it
+        // on — the desktop pass still renders through its own target.
+        gl={{ antialias: xrSupported }}
         dpr={[1, 2]}
         camera={{
           position: view.position,
@@ -127,107 +139,115 @@ export function Viewport() {
         }}
         onPointerMissed={() => useStudioStore.getState().selectTcp()}
       >
-        <color attach="background" args={["#15171c"]} />
-        <CameraRigBridge />
-        {/* The environment map does the ambient work, so the lights below it
-            are only the key and a fill; stacking a bright ambient on top of
-            an IBL is what flattens a scene out. */}
-        <IndoorLighting />
-        <ambientLight intensity={0.12} />
-        {/* Shadow bounds follow the cell. */}
-        <ShadowFollow />
-        {/* Broad factory lighting keeps faces below portal beams readable. */}
-        <directionalLight position={[-3, -2, 2]} intensity={1.0} />
-        <hemisphereLight position={[0, 0, 1]} args={["#8899aa", "#20242c", 0.25]} />
+        <XrSession>
+          <color attach="background" args={["#15171c"]} />
+          <CameraRigBridge />
+          {/* The environment map does the ambient work, so the lights below it
+              are only the key and a fill; stacking a bright ambient on top of
+              an IBL is what flattens a scene out. */}
+          <IndoorLighting />
+          <ambientLight intensity={0.12} />
+          {/* Shadow bounds follow the cell. */}
+          <ShadowFollow />
+          {/* Broad factory lighting keeps faces below portal beams readable. */}
+          <directionalLight position={[-3, -2, 2]} intensity={1.0} />
+          <hemisphereLight position={[0, 0, 1]} args={["#8899aa", "#20242c", 0.25]} />
 
-        {/* Something for the cell to stand on. A grid alone reads as graph
-            paper, and a shadow with nothing to land on leaves every object
-            floating; a plain matte floor under it is what turns a diagram
-            into a room. It sits a hair below z = 0 so the grid still draws
-            on top, and it only receives — a floor that cast shadows would
-            shadow itself. Kept to a cell's worth of floor rather than a
-            horizon: every pixel of it costs a shadow lookup, and a plane
-            big enough to fill the view is what makes a soft renderer
-            crawl. Beyond it the grid carries on. */}
-        <Floor />
+          {/* Something for the cell to stand on. A grid alone reads as graph
+              paper, and a shadow with nothing to land on leaves every object
+              floating; a plain matte floor under it is what turns a diagram
+              into a room. It sits a hair below z = 0 so the grid still draws
+              on top, and it only receives — a floor that cast shadows would
+              shadow itself. Kept to a cell's worth of floor rather than a
+              horizon: every pixel of it costs a shadow lookup, and a plane
+              big enough to fill the view is what makes a soft renderer
+              crawl. Beyond it the grid carries on. */}
+          <Floor />
 
-        {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor).
-            An authoring aid — wrapped so the camera pass hides it (the
-            floor above stays: a camera does see the floor). */}
-        <Aid>
-          <Grid
-            rotation={[Math.PI / 2, 0, 0]}
-            infiniteGrid
-            cellSize={0.1}
-            cellThickness={0.6}
-            cellColor="#50565a"
-            sectionSize={1}
-            sectionThickness={1}
-            sectionColor="#626b71"
-            fadeDistance={16}
-            fadeStrength={1}
-          />
-        </Aid>
-        <Aid>
-          <axesHelper args={[0.3]} />
-        </Aid>
+          {/* drei's Grid lies in the XZ plane; rotate it onto XY (Z-up floor).
+              An authoring aid — wrapped so the camera pass hides it (the
+              floor above stays: a camera does see the floor). */}
+          <Aid>
+            <Grid
+              rotation={[Math.PI / 2, 0, 0]}
+              infiniteGrid
+              cellSize={0.1}
+              cellThickness={0.6}
+              cellColor="#50565a"
+              sectionSize={1}
+              sectionThickness={1}
+              sectionColor="#626b71"
+              fadeDistance={16}
+              fadeStrength={1}
+            />
+          </Aid>
+          <Aid>
+            <axesHelper args={[0.3]} />
+          </Aid>
 
-        <OrbitControls makeDefault target={view.target} />
-        <PickBridge />
+          <OrbitControls makeDefault target={view.target} enabled={!presenting} />
+          <PickBridge />
 
-        <Suspense fallback={null}>
-          <SceneView />
-          <UsdRobotView />
-          <WasmStageView />
-          <ObstacleView />
-          <ClothView />
-          <RopeView />
-          <RouteView />
-          {/* Aids the camera pass hides: sensor volumes, camera gizmos,
-              guide paths, toolpath overlays, contact markers, transform
-              gizmos. Process light (flash/spray/trace) stays — a camera
-              would see it. */}
-          <Aid>
-            <DragLineView />
-          </Aid>
-          <Aid>
-            <SensorView />
-          </Aid>
-          <Aid>
-            <CameraView />
-          </Aid>
-          <Aid>
-            <LidarView />
-          </Aid>
-          <FlashView />
-          <LampView />
-          <Aid>
-            <ContactMarkerView />
-          </Aid>
-          <SprayView />
-          <Aid>
-            <VehiclePathView />
-          </Aid>
-          <Aid>
-            <RouteAidView />
-          </Aid>
-          <Aid>
-            <ToolpathView />
-          </Aid>
-          <CutTraceView />
-          <Aid>
-            <TcpGizmo />
-          </Aid>
-          <Aid>
-            <RobotBaseGizmo />
-          </Aid>
-          <Aid>
-            <RouteViaGizmo />
-          </Aid>
-          <PlaybackDriver />
-          <CameraPass />
-          <CameraExporter />
-        </Suspense>
+          <Suspense fallback={null}>
+            <SceneView />
+            <UsdRobotView />
+            <WasmStageView />
+            <ObstacleView />
+            <ClothView />
+            <RopeView />
+            <RouteView />
+            {/* Aids the camera pass hides: sensor volumes, camera gizmos,
+                guide paths, toolpath overlays, contact markers, transform
+                gizmos. Process light (flash/spray/trace) stays — a camera
+                would see it. */}
+            <Aid>
+              <DragLineView />
+            </Aid>
+            <Aid>
+              <SensorView />
+            </Aid>
+            <Aid>
+              <CameraView />
+            </Aid>
+            <Aid>
+              <LidarView />
+            </Aid>
+            <FlashView />
+            <LampView />
+            <Aid>
+              <ContactMarkerView />
+            </Aid>
+            <SprayView />
+            <Aid>
+              <VehiclePathView />
+            </Aid>
+            <Aid>
+              <RouteAidView />
+            </Aid>
+            <Aid>
+              <ToolpathView />
+            </Aid>
+            <CutTraceView />
+            {/* The TCP handle serves both inputs: the mouse gizmo on the
+                desktop, the right grip in a headset. */}
+            <Aid>
+              <TcpHandleView />
+            </Aid>
+            {!presenting && (
+              <>
+                <Aid>
+                  <RobotBaseGizmo />
+                </Aid>
+                <Aid>
+                  <RouteViaGizmo />
+                </Aid>
+              </>
+            )}
+            <PlaybackDriver />
+            {!presenting && <CameraPass />}
+            <CameraExporter />
+          </Suspense>
+        </XrSession>
       </Canvas>
 
       <FocusCard />
@@ -280,6 +300,10 @@ function Floor() {
  * clamped to at most a 52 m square, and 2048 px keeps a robot-sized
  * shadow crisp across that range. */
 const SHADOW_MAP_SIZE = 2048;
+/** In a headset the shadow pass runs for both eyes at 72 Hz; half the
+ * resolution is a quarter of its fill, and at arm's length from a robot
+ * a 4 mm texel still reads as a shadow. */
+const XR_SHADOW_MAP_SIZE = 1024;
 
 /** The key light, with its shadow frustum resized to the scene.
  *
@@ -291,6 +315,8 @@ function ShadowFollow() {
   const light = useRef<THREE.DirectionalLight | null>(null);
   const obstacles = useStudioStore((s) => s.obstacles);
   const robots = useStudioStore((s) => s.robots);
+  const presenting = useStudioStore((s) => s.xr.presenting);
+  const mapSize = presenting ? XR_SHADOW_MAP_SIZE : SHADOW_MAP_SIZE;
 
   const frame = useMemo(() => {
     let minX = -1;
@@ -336,6 +362,17 @@ function ShadowFollow() {
     l.shadow.needsUpdate = true;
   }, [frame]);
 
+  // A resized map is a new render target: drop the old one so three
+  // allocates at the new size on the next shadow pass.
+  useEffect(() => {
+    const l = light.current;
+    if (!l || l.shadow.mapSize.x === mapSize) return;
+    l.shadow.mapSize.set(mapSize, mapSize);
+    l.shadow.map?.dispose();
+    l.shadow.map = null;
+    l.shadow.needsUpdate = true;
+  }, [mapSize]);
+
   return (
     <directionalLight
       ref={light}
@@ -346,7 +383,7 @@ function ShadowFollow() {
       shadow-bias={-0.00015}
       // Offset by a fraction of a shadow texel in world units. A fixed
       // 3 mm offset leaves self-shadow stripes on warehouse-scale panels.
-      shadow-normalBias={Math.max(0.003, 1.5 * frame.half / SHADOW_MAP_SIZE)}
+      shadow-normalBias={Math.max(0.003, 1.5 * frame.half / mapSize)}
       shadow-camera-near={0.1}
       shadow-camera-far={40}
     />

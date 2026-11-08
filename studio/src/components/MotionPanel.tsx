@@ -1,6 +1,5 @@
-import { useState } from "react";
-
-import type { ConstraintMsg, MotionMsg, SegmentKindMsg } from "../protocol";
+import type { MotionMsg, SegmentKindMsg } from "../protocol";
+import { freshMotionName, motionTarget, waypointSegment } from "../motions";
 import { robotArms, robotByName, useStudioStore } from "../store";
 import {
   sendAddSegment,
@@ -9,43 +8,6 @@ import {
   sendRemoveSegment,
 } from "../ws";
 import { Section } from "./Section";
-
-// "Upright" keeps the TCP's local +Z within a 30° cone of world +Z.
-const UPRIGHT_CONE: ConstraintMsg = {
-  type: "orientation_cone",
-  axis_local: [0, 0, 1],
-  axis_world: [0, 0, 1],
-  angle: (Math.PI / 180) * 30,
-};
-
-/** The conventional first motion name: `main` for the first robot,
- * `main_<robot>` for the rest, with `_<arm>` appended on a dual-arm robot
- * (`main_left`). */
-function conventionalName(
-  robotName: string,
-  firstRobot: string | undefined,
-  arm: string | null,
-): string {
-  const base = robotName === firstRobot ? "main" : `main_${robotName}`;
-  return arm === null ? base : `${base}_${arm}`;
-}
-
-/** The conventional name when free; when taken, `motion_2`, `motion_3`,
- * … — whatever is free scene-wide. */
-function freshMotionName(
-  motions: MotionMsg[],
-  robotName: string,
-  firstRobot: string | undefined,
-  arm: string | null,
-): string {
-  const taken = new Set(motions.map((m) => m.name));
-  const base = conventionalName(robotName, firstRobot, arm);
-  if (!taken.has(base)) return base;
-  for (let i = 2; ; i++) {
-    const candidate = `motion_${i}`;
-    if (!taken.has(candidate)) return candidate;
-  }
-}
 
 /**
  * Every motion in the scene (Python-authored ones included), one of them
@@ -66,7 +28,9 @@ export function MotionPanel() {
   const playback = useStudioStore((s) => s.playback);
   const beginMotionPlanning = useStudioStore((s) => s.beginMotionPlanning);
 
-  const [upright, setUpright] = useState(false);
+  // Shared with the headset's `+ point`: both teach with the same cone.
+  const upright = useStudioStore((s) => s.motionUpright);
+  const setMotionUpright = useStudioStore((s) => s.setMotionUpright);
 
   if (!robot) return null;
   const robotName = robot.desc.name;
@@ -87,27 +51,23 @@ export function MotionPanel() {
     return parts.length > 0 ? ` · ${parts.join(" · ")}` : null;
   };
 
-  // The edit target: the picked motion, else the selected robot's (arm's)
-  // first motion, else the conventional fresh name (created on the first
-  // waypoint — same implicit-create the server does).
-  const owned = motions.filter(
-    (m) => ownerOf(m) === robotName && (!dualArm || armOf(m) === arm),
+  // The edit target (`motions.ts`, shared with the headset): the picked
+  // motion, else the selected robot's (arm's) first motion, else the
+  // conventional fresh name (created on the first waypoint — the same
+  // implicit create the server does).
+  const { motionName, motion } = motionTarget(
+    motions,
+    selectedMotion,
+    { name: robotName, dualArm, selectedGroup: robot.selectedGroup },
+    firstRobot,
   );
-  const fallbackName =
-    owned[0]?.name ?? conventionalName(robotName, firstRobot, arm);
-  const motionName = selectedMotion ?? fallbackName;
-  const motion = motions.find((m) => m.name === motionName) ?? null;
   const segments = motion?.segments ?? [];
 
   const addSegment = (kind: SegmentKindMsg) => {
     sendAddSegment(
       motionName,
       robotName,
-      {
-        kind,
-        goal_positions: robot.jointPositions.slice(),
-        constraints: upright ? [UPRIGHT_CONE] : [],
-      },
+      waypointSegment(robot.jointPositions, kind, upright),
       arm,
     );
   };
@@ -203,7 +163,7 @@ export function MotionPanel() {
           <button
             className={`upright-toggle${upright ? " active" : ""}`}
             title="Constrain the TCP upright (30° cone) on added waypoints"
-            onClick={() => setUpright((v) => !v)}
+            onClick={() => setMotionUpright(!upright)}
           >
             ⊙ upright
           </button>

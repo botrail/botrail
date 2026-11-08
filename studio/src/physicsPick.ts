@@ -45,7 +45,10 @@ const raycaster = new THREE.Raycaster();
  * physics world streams live and the viewport follows it — what is drawn
  * is what the world is doing now, not a paused or reviewed past. */
 export function pickable(): boolean {
-  return followsLive(useStudioStore.getState());
+  const s = useStudioStore.getState();
+  // Not from a headset: the ray's pointer-down selects, the grip is the
+  // TCP handle's (V2); a body in hand under physics is a V3 candidate.
+  return followsLive(s) && !s.xr.presenting;
 }
 
 /** The body in hand and where it is held, for the line the viewport

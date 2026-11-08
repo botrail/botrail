@@ -541,6 +541,8 @@ export interface StudioState {
   /** Motion the Motion tab edits; null adopts the selected robot's first
    * motion (or the conventional fresh name when it has none yet). */
   selectedMotion: string | null;
+  /** "Upright" (a 30° cone) on the waypoints the panel or the headset adds. */
+  motionUpright: boolean;
   /** Last playable result (plan/motion/sequence/recording tracks). */
   playback: PlaybackTracks | null;
   playbackTime: number;
@@ -617,6 +619,11 @@ export interface StudioState {
   /** Export progress in [0, 1] — separate from `camExport` so per-frame
    * updates don't remount the exporter. */
   camExportProgress: number;
+  /** WebXR (`.internal/design-vr.md` §3.8): whether an immersive-vr session
+   * can start here — probed before the canvas is created (xr/probe.ts) —
+   * and whether one is presenting now, during which the camera pass, the
+   * orbit controls, the PiP and the transform gizmos stand down. */
+  xr: { supported: boolean; presenting: boolean };
   /** Scenarios (named initial-state deltas); re-sent in full on change. */
   scenarios: ScenarioMsg[];
   /** The bill of materials as the host derives it (`Scene::bom`): every
@@ -804,6 +811,8 @@ export interface StudioState {
   ) => void;
   setCamExportProgress: (p: number) => void;
   endCamExport: () => void;
+  setXrSupported: (supported: boolean) => void;
+  setXrPresenting: (presenting: boolean) => void;
   selectIoNode: (name: string) => void;
   /** A derived line of the bill (`arm/tool`, `arm/controller`) from the
    * scene tree: no gizmo, its identity in Layout. */
@@ -811,6 +820,7 @@ export interface StudioState {
   /** Motion-tab list click; an existing motion also retargets the robot
    * to its owner, so added waypoints always fit the motion's DOF. */
   selectMotion: (name: string) => void;
+  setMotionUpright: (upright: boolean) => void;
   /** Viewport click: the machine first, a further click drills in. */
   selectFromViewport: (name: string) => void;
   /** Focus a robot's base for placement (also panel-selects it). */
@@ -893,6 +903,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   activeTab: initialTab(),
   ...initialOverlays(),
   selectedMotion: null,
+  motionUpright: false,
   playback: null,
   playbackTime: 0,
   playing: false,
@@ -921,6 +932,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   pipMode: "rgb",
   camExport: null,
   camExportProgress: 0,
+  xr: { supported: false, presenting: false },
   scenarios: [],
   bom: [],
   bomIndex: new Map(),
@@ -1544,6 +1556,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     const s = get();
     if (s.camExport)
       throw new Error("depth capture: a video export owns the canvas");
+    if (s.xr.presenting)
+      throw new Error("depth capture: a VR session owns the renderer");
     const msg = s.cameras.find((c) => c.name === camera);
     if (!msg) throw new Error(`depth capture: no camera named "${camera}"`);
     const ctx = cameraRig.ctx;
@@ -1633,6 +1647,10 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     }),
   setCamExportProgress: (p) => set({ camExportProgress: p }),
   endCamExport: () => set({ camExport: null, camExportProgress: 0 }),
+  setXrSupported: (supported) =>
+    set((s) => ({ xr: { ...s.xr, supported } })),
+  setXrPresenting: (presenting) =>
+    set((s) => (s.xr.presenting === presenting ? {} : { xr: { ...s.xr, presenting } })),
   selectIoNode: (name) => set({ selection: { type: "io_node", name } }),
   selectLine: (kind, name) => set({ selection: { type: "line", kind, name } }),
   selectMotion: (name) =>
@@ -1702,6 +1720,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           : null,
     })),
   setActiveTab: (tab) => set({ activeTab: persistTab(tab) }),
+  setMotionUpright: (motionUpright) => set({ motionUpright }),
   setHover: (hover) => set({ hover }),
   setFocusCard: (mode) => set({ focusCard: persistFocusCard(mode) }),
   revealPart: () =>

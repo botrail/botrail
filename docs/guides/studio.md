@@ -354,11 +354,62 @@ right-click on a lane's name sets a breakpoint on its rising edge (shift:
 falling), a click on a panel button in the viewport presses it, and the
 panel's lamps light with their signals.
 
+## VR — the cell in a headset
+
+When the browser can run WebXR, a **VR** button appears at the right of the
+header. It enters the cell in a headset at real scale: you stand on the floor
+1.5 m from the view's target, facing it — the `view=` the studio opened with
+decides where a headset wearer starts, as it decides the orbit camera. The
+desktop page keeps running underneath, so a cycle playing there plays in the
+headset, and **Exit VR** (the header button, or the panel's) brings the
+desktop view back.
+
+| In the headset | What it does |
+|---|---|
+| point the right ray at a robot or an obstacle | the label over the controller names it — kind, name, product — as the hover chip does |
+| trigger | selects it; the label's second line is the selection and its product |
+| either thumbstick forward, hold, let go | throws a teleport arc; letting go lands you on the green ring (red: nothing to stand on) |
+| thumbstick left / right | snap-turns 45° about you |
+| right grip near the TCP handle, hold | takes the focused robot's TCP target: the arm follows your hand (the server's IK), the handle turns red out of reach, and letting go drops it back on the real TCP |
+| right **A** / **B** | play ⇄ pause the baked cycle / speed 1× → 2× → 4× → 8× |
+| left **X** / **Y** | recenter on the launch stance / teach the pose: a joint waypoint of the motion the MOTION panel shows (its **upright** toggle applies) |
+| the panel on the left controller | the playhead; play / pause, speed, **+ point**, recenter and exit VR under the trigger |
+
+WebXR needs a secure context. On the desktop `http://localhost` already is
+one (a headset emulator in the browser works as is). A **Meta Quest** on a
+USB cable needs no network between it and the PC: with developer mode on and
+`adb` installed,
+
+```bash
+python examples/basics/sequence_demo.py --studio   # prints http://127.0.0.1:PORT
+adb reverse tcp:PORT tcp:PORT
+```
+
+then `http://localhost:PORT/` in the headset's browser shows the VR button.
+The tunnel carries the page and its websocket; it lasts one connection, so
+run it again after replugging (on Linux, `no permissions` from `adb devices`
+wants a udev rule for vendor `2833`). Without a cable the page has to be
+HTTPS: the studio's own server speaks plain HTTP, so put a TLS proxy
+(caddy's `tls internal`, or mkcert) in front of
+`botrail studio cell.botrail --host 0.0.0.0 --port PORT` and accept the
+certificate once in the headset. The [browser-only build](browser-only.md)
+is HTTPS already on its Pages host.
+
+The headset's budget is 13.9 ms for both eyes at 72 Hz. A one-robot cell is
+comfortable; a line of multi-material cartons (thousands of draw calls) is
+not yet. In VR the shadow map halves; nothing else about the picture
+changes. The TCP handle is the same object the mouse gizmo drags, so a
+pose taught in the headset lands in the same motion list as one taught at
+the desk.
+
 ## Serving details
 
 ```python
 bt.studio(scene, host="127.0.0.1", port=0, open_browser=True, block=True)
 ```
+
+`botrail studio cell.botrail --host 0.0.0.0 --port 8765` does the same from
+the command line.
 
 Use `view=((5.9, 4.7, 4.0), (1.25, 0.0, 0.65))` to open at a chosen
 eye position and orbit target, in world metres. This sets the initial view

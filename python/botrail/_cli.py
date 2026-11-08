@@ -457,7 +457,7 @@ def cmd_studio(args) -> int:
     import botrail as bt
 
     scene = load_cell(args.cell)
-    bt.studio(scene, port=args.port)
+    bt.studio(scene, host=args.host, port=args.port)
     return 0
 
 
@@ -589,6 +589,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("studio", help="open the cell in the studio")
     p.add_argument("cell")
     p.add_argument("--port", type=int, default=0, help="port (default: any free)")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="interface to bind (default: localhost only; 0.0.0.0 publishes on the LAN — "
+                        "behind a TLS proxy for a headset, see the studio guide)")
     p.set_defaults(func=cmd_studio)
     return parser
 
