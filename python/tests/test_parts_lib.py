@@ -210,7 +210,10 @@ def test_generated_structures_round_trip_through_the_project(tmp_path: Path) -> 
     # Poses round-trip through JSON with float noise, so compare the
     # rendered sheet (rounded to a tenth of a pixel) and the extents.
     assert again.layout("svg") == scene.layout("svg")
-    assert again.footprint() == pytest.approx(scene.footprint())
+    footprint, expected = again.footprint(), scene.footprint()
+    assert footprint.keys() == expected.keys()
+    for key, value in expected.items():
+        assert footprint[key] == pytest.approx(value), key
     assert set(again.frames) == set(scene.frames)
 
 

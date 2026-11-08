@@ -52,10 +52,24 @@ def plc_master_cell() -> bt.Scene:
     return scene
 
 
-def tending_cell():
+def tending_demo():
+    """The machine-tending cell and its handshake — or a skip where the
+    UR12e and Hand-E kit cannot be ordered: an offline machine, and CI,
+    which has no `huggingface_hub`."""
     import machine_tending_demo as m
 
-    scene, hs = m.build()
+    pytest.importorskip("huggingface_hub", reason="the tending cell orders its arm from the catalog")
+    try:
+        return m.build()
+    except ValueError as err:
+        # IK, collision and catalog parsing regressions must fail the test.
+        if "cannot reach the catalog dataset" not in str(err):
+            raise
+        pytest.skip(f"catalog unavailable: {err}")
+
+
+def tending_cell():
+    scene, hs = tending_demo()
     return scene, ["tend", hs.program]
 
 

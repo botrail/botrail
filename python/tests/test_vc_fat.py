@@ -210,8 +210,9 @@ def test_safety_inputs_derive_their_own_rows() -> None:
 
 def test_the_machine_tending_fat_rows_as_test_cases_give_the_scenario_verdicts() -> None:
     import machine_tending_demo as demo
+    from test_vc import tending_demo
 
-    scene, hs = demo.build()
+    scene, hs = tending_demo()
     names = ["tend", hs.program]
     tl = scene.simulate_sequences(names, max_duration=240.0)
     runs = scene.simulate_scenarios(names, max_duration=tl.duration + 20.0)

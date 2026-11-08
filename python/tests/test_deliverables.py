@@ -78,10 +78,13 @@ def test_layout_json_draws_the_scene_and_keeps_ground_out_of_the_footprint() -> 
     texts = {i["shape"]["text"] for i in sheet["items"] if i["shape"]["shape"] == "text"}
     assert {"table (T-1000)", "fence (ST20)", "belt", "eye", "mount", "simple_arm"} <= texts
     assert "floor" not in texts
-    # The footprint query says the same thing.
-    assert scene.footprint() == pytest.approx(
-        {"min": [-1.5, -1.2], "max": [2.0, 1.52], "width": 3.5, "depth": 2.72, "area": 3.5 * 2.72, "height": 2.0}
-    )
+    # The footprint query says the same thing (key by key: `approx` takes
+    # no nested containers since pytest 9.2).
+    footprint = scene.footprint()
+    expected = {"min": [-1.5, -1.2], "max": [2.0, 1.52], "width": 3.5, "depth": 2.72, "area": 3.5 * 2.72, "height": 2.0}
+    assert footprint.keys() == expected.keys()
+    for key, value in expected.items():
+        assert footprint[key] == pytest.approx(value), key
     # A higher ground threshold swallows the table.
     assert scene.footprint(ground_z=1.0)["height"] == pytest.approx(2.0)
     assert scene.footprint(ground_z=1.0)["min"] == pytest.approx([-1.5, -1.2])

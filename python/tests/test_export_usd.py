@@ -121,7 +121,8 @@ def test_meshes_are_written_once_beside_the_layer_and_compose(tmp_path: Path) ->
     assert len(painted.GetFaceVertexIndicesAttr().Get()) == 36
     # The scene's colour is one constant over the file's own faces; the
     # obstacle that asked for none shows the mtllib's two.
-    assert list(painted.GetDisplayColorAttr().Get()) == pytest.approx([(0.8, 0.2, 0.1)])
+    (colour,) = painted.GetDisplayColorAttr().Get()
+    assert tuple(colour) == pytest.approx((0.8, 0.2, 0.1))
     assert painted.GetDisplayColorPrimvar().GetInterpolation() == "constant"
     own = UsdGeom.Mesh(stage.GetPrimAtPath("/World/Env/stock/part1"))
     assert len(own.GetDisplayColorAttr().Get()) == 12

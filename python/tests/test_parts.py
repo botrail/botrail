@@ -261,11 +261,12 @@ def test_parts_round_trip_through_project_and_generated_python(tmp_path: Path) -
 @pytest.mark.skipif(not (HAS_FRANKA and HAS_CATALOG),
                     reason="the demo cell needs the Isaac Franka and the botrail catalog")
 def test_sequence_demo_bom_is_complete() -> None:
-    """The flagship demo types four lines of identity; the rest of the bill
-    comes off the catalog packages the cell was ordered from. Nothing is
-    left unidentified, the pedestal subtree and the pallet are still single
-    parts, and every catalog line carries the part number it would be
-    ordered by and the revision it was resolved at."""
+    """The flagship demo types five lines of identity; the rest of the bill
+    comes off the catalog packages the cell was ordered from. What stays
+    unidentified is only the layout `demo.identify_layout` classifies
+    without naming (scenery and stock), the pedestal subtree and the pallet
+    are still single parts, and every catalog line carries the part number
+    it would be ordered by and the revision it was resolved at."""
     import sequence_demo as sd
     from demo import build_scene
 
@@ -273,11 +274,26 @@ def test_sequence_demo_bom_is_complete() -> None:
     sd.build_cycle(scene)
     sd.identify_parts(scene)
     bom = scene.bom()
-    assert bom.unidentified() == []
+    # What the bill still cannot name is the hand-authored layout that
+    # `demo.identify_layout` only classifies — the far pedestal and pallet,
+    # the photo-eye's housing, the site works and the stock — never a
+    # catalog line or a typed one.
+    left = bom.unidentified()
+    assert all(
+        row["catalog"] is None and row["manufacturer"] is None and row["model"] is None for row in left
+    )
+    assert {row["category"] for row in left} == {
+        "structure.pedestal", "pallet", "sensor.photoelectric",
+        "structure.marking", "structure.cable_duct", "hmi.stack_light", "workpiece",
+    }
+    assert sorted(n for row in left for n in row["names"] if row["category"] != "workpiece") == [
+        "/World/CableDuct", "/World/Conveyor/PickSensor", "/World/FloorMarkings",
+        "/World/PalletFar", "/World/PedestalFar", "stack_light",
+    ]
 
     # The five typed lines — the robot, its controller, the photo-eye, and
     # the two whole USD subtrees pinned as one part each.
-    typed = [row for row in bom.rows if row["catalog"] is None]
+    typed = [row for row in bom.rows if row["catalog"] is None and row["model"] is not None]
     assert [row["names"] for row in typed] == [
         ["panda"],
         ["panda/controller"],
