@@ -2035,16 +2035,18 @@ fn author_referenced_robot(
 
     // Per-frame stage-coordinate body poses, then parent-relative locals.
     let n = codes.len();
-    let mut body_stage: Vec<Vec<Isometry3<f64>>> = Vec::with_capacity(n);
-    for f in 0..n {
-        body_stage.push(
+    let body_stage: Vec<Vec<Isometry3<f64>>> = robot
+        .link_poses
+        .iter()
+        .take(n)
+        .map(|frame| {
             info.links
                 .iter()
                 .enumerate()
-                .map(|(i, link)| info.frame.to_stage(&robot.link_poses[f][i]) * link.k_inv)
-                .collect(),
-        );
-    }
+                .map(|(i, link)| info.frame.to_stage(&frame[i]) * link.k_inv)
+                .collect()
+        })
+        .collect();
     for (i, link) in info.links.iter().enumerate() {
         if link.rel_path.is_empty() {
             continue; // authored on the robot prim above
