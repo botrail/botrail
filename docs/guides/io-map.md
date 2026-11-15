@@ -42,6 +42,9 @@ a point of this map.
 | a device with `encoder=True` | a **Word** `name.encoder` (REAL — the axis's position, the belt's travel) on every host that commands or awaits the device | ⑤ |
 | a zone sensor with `ids=` (an identification reader) | its presence DI as any sensor's, and the word `name.id` (INT) — recorded by the plant, put on a host by `declare_io("name.id", role="input", host="PLC1")` | ①⑦ |
 | a `Source` / `Sink` magazine | a *cosmetic* row — presentation, not counted, not linted | ⑤ |
+| a [word](sequences.md#words-and-analog-inputs) (`define_word`) | the signal rules ②③④ on **Word** channels — with one difference: a word that one controller reads and nothing writes is that controller's own register (a setpoint), not an input candidate; `declare_io(name, role="input")` puts it on the wire (a value keyed in at a panel) | ②③④ |
+| an analog input (`add_analog`) | an **AI** on every host whose programs compare it (`dp` or `dp.raw` — one point), carrying the module's counts as an INT | ⑨ |
+| a program marked `.plant()` | nothing — the equipment's own logic is not a controller; what it reads is an output of whoever writes it, what it writes an input of whoever reads it | — |
 | a robot driven (`motion` / `ramp` / `toolpath`) by a program that does **not** live on that robot's own controller | `robot.start` DO + `robot.done` DI on the driving host; a `robot.program` Word when the program picks among several motions | ⑥ |
 | a program that only reads `robot_done("x")` from another host | `x.done` DI on the reader's host | ⑥ |
 
@@ -56,8 +59,10 @@ to it is exchanged, declared and written as an INT in that unit
 (`feed_position := 300; (* 0.3 m *)`), the way a drive takes a position in
 increments. A REAL left on a word channel without a unit is a `unit`
 warning; a unit the exchange cannot scale by (`m`, `cm`, `mm`, `0.1mm`,
-`0.01mm`, `um`, `m/s`, `mm/s`, `mm/min`, `deg`, `0.1deg` are known) an
-error; a scaled range beyond INT16 a warning.
+`0.01mm`, `um`, `m/s`, `mm/s`, `mm/min`, `deg`, `0.1deg` are known, and a
+bare resolution — `unit="0.1"`: a count is a tenth of the word's own unit,
+for a REAL word such as a pressure setpoint) an error; a scaled range
+beyond INT16 a warning.
 
 ## Hosts: who owns a point
 
@@ -358,6 +363,20 @@ robots, and the stations on their own controllers with `moving` and
 
 ## The tables
 
+`scene.io_list("comments")` is the device-comment table: one row per bound
+point — `device` (the channel's address, `X20`, `%IX0.2`), `comment` (the
+binding's note, else its tag, else the point's name), then the point, node,
+channel and field device — for a PLC tool's comment import. The columns are
+botrail's own; a vendor tool's header lines and encoding are yours to add.
+
+`scene.io_list("analog")` is the analog loop sheet: one row per analog
+input and host — where it is bound, the word it measures, the range and
+unit at 4 and 20 mA, the module's counts, the counts per unit, the scaling
+the controller applies (`0 + (raw - 0) * 100 / 4000`, the line the ST
+export writes) and what an open loop reads. The "instrument value →
+current → counts → scaled value" table of a loop, derived;
+`tl.analog(t)` fills it in at an instant.
+
 `export_io_list(path)` writes by extension:
 
 * `.csv` — one row per point, then `#` comment lines with the per-host point
@@ -406,8 +425,13 @@ runs.errors
   (a pinned input is a level from t = 0, never an edge), an inverted E-stop
   healthy contact that stays healthy.
 
-The target is a sensor or an internal signal — the things with an input
-lane. A device's running lane is an output and cannot be forced; the DI a
+An analog input takes `bt.io.open` alone: its loop reads 0 mA, the counts
+fall a quarter of the span below the bottom of the range, and whether a
+rung notices is what the run shows. A stuck level has no meaning on a
+current loop and is refused.
+
+The target is a sensor, an internal signal or an analog input — the
+things with an input lane. A device's running lane is an output and cannot be forced; the DI a
 `device_done` / `robot_done` wait reads has no lane of its own (an
 in-position sensor's break is not expressible yet); `open` needs an input
 *wire*, so a relay written and read on one controller is refused with a

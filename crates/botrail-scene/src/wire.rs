@@ -215,6 +215,40 @@ pub struct FrameMsg {
     pub pose: PoseMsg,
 }
 
+/// How a piece of scenery moves (see [`crate::scenery`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum SceneryJointKindMsg {
+    /// Turns about the axis; the position is an angle (rad).
+    Hinge,
+    /// Travels along the axis; the position is a distance (m).
+    Slide,
+}
+
+/// A door, a drawer, a rack: the obstacles that move together on a hinge
+/// or a slide, and where they stand on it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SceneryJointMsg {
+    pub name: String,
+    pub kind: SceneryJointKindMsg,
+    /// The obstacle the joint is mounted on: `axis` and `origin` are in
+    /// its frame, so they follow it. World coordinates without one.
+    #[serde(default)]
+    pub base: Option<String>,
+    pub axis: [f64; 3],
+    /// A point on the axis.
+    pub origin: [f64; 3],
+    /// `[lower, upper]` of the position.
+    pub range: [f64; 2],
+    pub position: f64,
+    /// The obstacles that move with it.
+    pub objects: Vec<String>,
+}
+
 /// One cable or tube route as the studio draws and lists it: the
 /// resolved centerline (bends tessellated) at the line's radius, its
 /// anchors, spans and lengths, and the findings of the static checks.
@@ -738,6 +772,93 @@ pub struct MotionMsg {
 pub struct SignalDefMsg {
     pub name: String,
     pub initial: bool,
+}
+
+/// A user-defined internal word (a PLC data register).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WordDefMsg {
+    pub name: String,
+    pub initial: f64,
+    /// An `INT` rather than a `REAL`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integer: bool,
+}
+
+/// An analog input: a 4–20 mA transmitter measuring a word lane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AnalogMsg {
+    pub name: String,
+    /// The word lane measured.
+    pub source: String,
+    /// Engineering value at 4 mA and at 20 mA.
+    pub range: [f64; 2],
+    #[serde(default)]
+    pub unit: String,
+    /// The input module's counts at 4 mA and at 20 mA.
+    pub raw: [i64; 2],
+    /// The obstacle that is the transmitter's body (where its tag hangs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+}
+
+/// One side of a comparison or a word expression: a word's name, or a
+/// constant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum OperandMsg {
+    Word(String),
+    Const(f64),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum CompareOpMsg {
+    #[serde(rename = ">=")]
+    Ge,
+    #[serde(rename = ">")]
+    Gt,
+    #[serde(rename = "<=")]
+    Le,
+    #[serde(rename = "<")]
+    Lt,
+    #[serde(rename = "==")]
+    Eq,
+    #[serde(rename = "!=")]
+    Ne,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ArithOpMsg {
+    #[serde(rename = "+")]
+    Add,
+    #[serde(rename = "-")]
+    Sub,
+    #[serde(rename = "*")]
+    Mul,
+    #[serde(rename = "/")]
+    Div,
+}
+
+/// What a word is written with: one operand, or one arithmetic
+/// instruction over two.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WordExprMsg {
+    pub left: OperandMsg,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<ArithOpMsg>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<OperandMsg>,
 }
 
 /// A named initial-state delta — one row of the cell's test-case matrix.
@@ -1362,6 +1483,46 @@ pub struct PlantBreakMsg {
     pub rising: bool,
 }
 
+/// Where the controller's reading of a point and the model's lane parted
+/// for longer than the tolerance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct DeviationMsg {
+    /// The point's lane (`s1`, `press/extended`, `dp.raw`).
+    pub lane: String,
+    /// The stretch the two disagreed over, seconds.
+    pub start: f64,
+    pub end: f64,
+    /// `late` / `early` (the machine's edge against the model's),
+    /// `level` (the two stand apart to the end of the run, or never
+    /// agreed), `value` (a word outside its band).
+    pub kind: String,
+    /// One line for a person: `s1 rose 0.50 s later than the model`.
+    pub note: String,
+}
+
+/// A controller's own I/O image as it was read over a run — from a
+/// machine's log, or by a read-only monitor — beside the model's lanes:
+/// the points the model computes itself (sensors, limit switches,
+/// feedback words) are *compared*, never overwritten.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct ReadingsMsg {
+    /// The controller the image is of.
+    pub host: String,
+    /// Where it came from: `log line.csv`, `modbus read 10.0.0.5:502`.
+    pub source: String,
+    /// How long a disagreement may last before it counts, seconds.
+    pub tolerance: f64,
+    /// The read levels by lane; `times[0]` is the first reading.
+    #[serde(default)]
+    pub signals: Vec<SignalTrackMsg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<WordTrackMsg>,
+    #[serde(default)]
+    pub deviations: Vec<DeviationMsg>,
+}
+
 /// The state of the live plant session a studio watches: who the
 /// controllers are and how the loop keeps time, what is forced, where it
 /// breaks, whether it records. Sent whenever it changes and with every
@@ -1396,6 +1557,9 @@ pub struct PlantStatusMsg {
     /// Lanes pinned by a force, with the level.
     #[serde(default)]
     pub forced: Vec<(String, bool)>,
+    /// Word lanes pinned by a force, with the value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forced_words: Vec<(String, f64)>,
     #[serde(default)]
     pub breaks: Vec<PlantBreakMsg>,
     /// Since when the session records a clip (plant seconds); absent when
@@ -1412,6 +1576,18 @@ pub struct PlantStatusMsg {
     /// The clips published so far, newest last.
     #[serde(default)]
     pub clips: Vec<String>,
+    /// A monitor (`bt.vc.monitor`): the session only reads the controller
+    /// — nothing is forced, pressed or written, and the studio's hands on
+    /// the plant are off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    /// The controller's image as read so far (a monitor), the last
+    /// stretch of it; the finished timeline carries the whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readings: Option<ReadingsMsg>,
+    /// Why the last command from the studio was refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
 }
 
 /// A hand on the live plant session from the studio: the transport, a
@@ -1441,6 +1617,17 @@ pub enum PlantCommandMsg {
     Unforce {
         lane: String,
     },
+    /// Pin a word lane to a number until `unforce`: a register, or what
+    /// an analog input's transmitter measures.
+    ForceWord {
+        lane: String,
+        value: f64,
+    },
+    /// Key a value into a defined word (a setpoint), once.
+    Write {
+        word: String,
+        value: f64,
+    },
     /// Press a push button: its lane high for `hold_s` plant seconds (the
     /// session's default when absent).
     Press {
@@ -1469,6 +1656,65 @@ pub enum PlantCommandMsg {
 pub struct SequenceMsg {
     pub name: String,
     pub steps: Vec<StepMsg>,
+    /// The program's rungs and gates, when it has any (absent from older
+    /// files; a program with rungs alone has no steps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logic: Option<LogicMsg>,
+}
+
+/// The continuous half of a program (`crate::seq::Logic`): rungs scanned
+/// every scan after the step transitions, and the step chain's gates.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LogicMsg {
+    #[serde(default)]
+    pub rungs: Vec<RungMsg>,
+    /// The step chain advances only while this holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable: Option<ConditionMsg>,
+    /// While this holds the step chain is held in its first step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<ConditionMsg>,
+    /// The step chain starts over when it ends.
+    #[serde(default)]
+    pub cycle: bool,
+    /// The program is the equipment's, not a controller's: it runs with
+    /// the plant and stays out of the I/O map.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plant: bool,
+}
+
+/// One rung: a contact network and the outputs it drives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RungMsg {
+    #[serde(default)]
+    pub comment: String,
+    pub condition: ConditionMsg,
+    pub outputs: Vec<RungOutputMsg>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RungOutputMsg {
+    /// The target follows the rung: a signal, a run coil (a device's
+    /// name) or a solenoid coil (`<axis>/<coil>`).
+    Coil { target: String },
+    /// Latches the signal on.
+    Set { signal: String },
+    /// Latches the signal off (and clears a counter of that name).
+    Reset { signal: String },
+    /// On-delay timer: the signal comes on after `seconds` of the rung.
+    Ton { signal: String, seconds: f64 },
+    /// Up-counter: the signal is on from `preset` rising edges.
+    Ctu { signal: String, preset: u32 },
+    /// A transfer or an arithmetic instruction into a word, every scan
+    /// the rung conducts.
+    Move { word: String, value: WordExprMsg },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1584,6 +1830,8 @@ pub enum ActionMsg {
     },
     /// Write an internal signal.
     Set { signal: String, value: bool },
+    /// Write a word: a transfer or one arithmetic instruction.
+    SetWord { word: String, value: WordExprMsg },
     /// Command an auxiliary device (output coil).
     Device {
         device: String,
@@ -1635,6 +1883,16 @@ pub enum ConditionMsg {
     All { conditions: Vec<ConditionMsg> },
     /// Parallel contacts (OR).
     Any { conditions: Vec<ConditionMsg> },
+    /// The inverse of a condition.
+    Not { condition: Box<ConditionMsg> },
+    /// A program stands in the named step (its step relay as a contact).
+    StepActive { sequence: String, step: String },
+    /// A comparison contact over words.
+    Compare {
+        left: OperandMsg,
+        op: CompareOpMsg,
+        right: OperandMsg,
+    },
 }
 
 /// One step's interval on a baked timeline.
@@ -1762,6 +2020,10 @@ pub struct TimelineMsg {
     /// filled when the cycle carries a `bt.routing.animate` replay.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub route_findings: Vec<RouteFindingMsg>,
+    /// What the controller's own I/O image read over this run, and where
+    /// it parted from the model — a replayed machine log, or a monitor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readings: Option<ReadingsMsg>,
     /// Reference-frame track per vehicle that drove, on the same grid.
     #[serde(default)]
     pub vehicles: Vec<VehicleTrackMsg>,
@@ -1824,6 +2086,11 @@ pub enum ServerMessage {
     Frames {
         frames: Vec<FrameMsg>,
     },
+    /// Every door, drawer and rack; resent whenever one is declared,
+    /// removed or moved (the members' new poses come as `obstacles`).
+    SceneryJoints {
+        joints: Vec<SceneryJointMsg>,
+    },
     /// Every cable / tube route, resolved at the current poses; resent
     /// whenever the plan, an obstacle, a frame or a robot pose changes.
     Routes {
@@ -1867,6 +2134,11 @@ pub enum ServerMessage {
     Sequences {
         sequences: Vec<SequenceMsg>,
         signals: Vec<SignalDefMsg>,
+        /// Internal words and analog inputs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        words: Vec<WordDefMsg>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        analogs: Vec<AnalogMsg>,
     },
     /// The full pseudo-sensor list; resent on every change.
     Sensors {
@@ -2071,6 +2343,12 @@ pub enum ClientMessage {
         obstacles: Vec<(String, PoseMsg)>,
         #[serde(default)]
         frames: Vec<(String, PoseMsg)>,
+    },
+    /// Moves a door, a drawer or a rack to `position` (rad / m, held
+    /// within its range); its members' poses and the joint come back.
+    SetSceneryJoint {
+        name: String,
+        position: f64,
     },
     UpdateObstacleGeometry {
         name: String,
@@ -2704,6 +2982,10 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             signal: signal.clone(),
             value: *value,
         },
+        Action::SetWord { word, value } => ActionMsg::SetWord {
+            word: word.clone(),
+            value: word_expr_msg(value),
+        },
         Action::Device { device, command } => ActionMsg::Device {
             device: device.clone(),
             command: match command {
@@ -2806,6 +3088,10 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
             signal: signal.clone(),
             value: *value,
         },
+        ActionMsg::SetWord { word, value } => Action::SetWord {
+            word: word.clone(),
+            value: word_expr_from_msg(value),
+        },
         ActionMsg::Device { device, command } => Action::Device {
             device: device.clone(),
             command: match command {
@@ -2861,6 +3147,25 @@ pub fn seq_condition_msg(condition: &Condition) -> ConditionMsg {
         Condition::Any(cs) => ConditionMsg::Any {
             conditions: cs.iter().map(seq_condition_msg).collect(),
         },
+        Condition::Not(c) => ConditionMsg::Not {
+            condition: Box::new(seq_condition_msg(c)),
+        },
+        Condition::StepActive { sequence, step } => ConditionMsg::StepActive {
+            sequence: sequence.clone(),
+            step: step.clone(),
+        },
+        Condition::Compare { left, op, right } => ConditionMsg::Compare {
+            left: operand_msg(left),
+            op: match op {
+                crate::seq::CompareOp::Ge => CompareOpMsg::Ge,
+                crate::seq::CompareOp::Gt => CompareOpMsg::Gt,
+                crate::seq::CompareOp::Le => CompareOpMsg::Le,
+                crate::seq::CompareOp::Lt => CompareOpMsg::Lt,
+                crate::seq::CompareOp::Eq => CompareOpMsg::Eq,
+                crate::seq::CompareOp::Ne => CompareOpMsg::Ne,
+            },
+            right: operand_msg(right),
+        },
     }
 }
 
@@ -2891,6 +3196,102 @@ pub fn seq_condition_from_msg(msg: &ConditionMsg) -> Condition {
         ConditionMsg::Any { conditions } => {
             Condition::Any(conditions.iter().map(seq_condition_from_msg).collect())
         }
+        ConditionMsg::Not { condition } => {
+            Condition::Not(Box::new(seq_condition_from_msg(condition)))
+        }
+        ConditionMsg::StepActive { sequence, step } => Condition::StepActive {
+            sequence: sequence.clone(),
+            step: step.clone(),
+        },
+        ConditionMsg::Compare { left, op, right } => Condition::Compare {
+            left: operand_from_msg(left),
+            op: match op {
+                CompareOpMsg::Ge => crate::seq::CompareOp::Ge,
+                CompareOpMsg::Gt => crate::seq::CompareOp::Gt,
+                CompareOpMsg::Le => crate::seq::CompareOp::Le,
+                CompareOpMsg::Lt => crate::seq::CompareOp::Lt,
+                CompareOpMsg::Eq => crate::seq::CompareOp::Eq,
+                CompareOpMsg::Ne => crate::seq::CompareOp::Ne,
+            },
+            right: operand_from_msg(right),
+        },
+    }
+}
+
+pub fn operand_msg(operand: &crate::seq::Operand) -> OperandMsg {
+    match operand {
+        crate::seq::Operand::Word(name) => OperandMsg::Word(name.clone()),
+        crate::seq::Operand::Const(x) => OperandMsg::Const(*x),
+    }
+}
+
+pub fn operand_from_msg(msg: &OperandMsg) -> crate::seq::Operand {
+    match msg {
+        OperandMsg::Word(name) => crate::seq::Operand::Word(name.clone()),
+        OperandMsg::Const(x) => crate::seq::Operand::Const(*x),
+    }
+}
+
+pub fn word_expr_msg(value: &crate::seq::WordExpr) -> WordExprMsg {
+    use crate::seq::ArithOp;
+    WordExprMsg {
+        left: operand_msg(&value.left),
+        op: value.op.as_ref().map(|(op, _)| match op {
+            ArithOp::Add => ArithOpMsg::Add,
+            ArithOp::Sub => ArithOpMsg::Sub,
+            ArithOp::Mul => ArithOpMsg::Mul,
+            ArithOp::Div => ArithOpMsg::Div,
+        }),
+        right: value.op.as_ref().map(|(_, r)| operand_msg(r)),
+    }
+}
+
+pub fn word_expr_from_msg(msg: &WordExprMsg) -> crate::seq::WordExpr {
+    use crate::seq::ArithOp;
+    crate::seq::WordExpr {
+        left: operand_from_msg(&msg.left),
+        op: match (&msg.op, &msg.right) {
+            (Some(op), Some(right)) => Some((
+                match op {
+                    ArithOpMsg::Add => ArithOp::Add,
+                    ArithOpMsg::Sub => ArithOp::Sub,
+                    ArithOpMsg::Mul => ArithOp::Mul,
+                    ArithOpMsg::Div => ArithOp::Div,
+                },
+                operand_from_msg(right),
+            )),
+            _ => None,
+        },
+    }
+}
+
+pub fn word_def_msg(word: &crate::seq::WordDef) -> WordDefMsg {
+    WordDefMsg {
+        name: word.name.clone(),
+        initial: word.initial,
+        integer: word.integer,
+    }
+}
+
+pub fn analog_msg(analog: &crate::seq::Analog) -> AnalogMsg {
+    AnalogMsg {
+        name: analog.name.clone(),
+        source: analog.source.clone(),
+        range: [analog.range.0, analog.range.1],
+        unit: analog.unit.clone(),
+        raw: [analog.raw.0, analog.raw.1],
+        place: analog.place.clone(),
+    }
+}
+
+pub fn analog_from_msg(msg: &AnalogMsg) -> crate::seq::Analog {
+    crate::seq::Analog {
+        name: msg.name.clone(),
+        source: msg.source.clone(),
+        range: (msg.range[0], msg.range[1]),
+        unit: msg.unit.clone(),
+        raw: (msg.raw[0], msg.raw[1]),
+        place: msg.place.clone(),
     }
 }
 
@@ -2930,6 +3331,15 @@ pub fn sequence_msg(sequence: &Sequence) -> SequenceMsg {
     SequenceMsg {
         name: sequence.name.clone(),
         steps: sequence.steps.iter().map(step_msg).collect(),
+        logic: None,
+    }
+}
+
+/// A program as its message: the step chain with its rungs and gates.
+pub fn program_msg(scene: &Scene, sequence: &Sequence) -> SequenceMsg {
+    SequenceMsg {
+        logic: scene.logic(&sequence.name).map(logic_msg),
+        ..sequence_msg(sequence)
     }
 }
 
@@ -2937,6 +3347,105 @@ pub fn sequence_from_msg(msg: &SequenceMsg) -> Sequence {
     Sequence {
         name: msg.name.clone(),
         steps: msg.steps.iter().map(step_from_msg).collect(),
+    }
+}
+
+pub fn logic_msg(logic: &crate::seq::Logic) -> LogicMsg {
+    use crate::seq::RungOutput;
+    LogicMsg {
+        rungs: logic
+            .rungs
+            .iter()
+            .map(|r| RungMsg {
+                comment: r.comment.clone(),
+                condition: seq_condition_msg(&r.condition),
+                outputs: r
+                    .outputs
+                    .iter()
+                    .map(|o| match o {
+                        RungOutput::Coil { target } => RungOutputMsg::Coil {
+                            target: target.clone(),
+                        },
+                        RungOutput::Set { signal } => RungOutputMsg::Set {
+                            signal: signal.clone(),
+                        },
+                        RungOutput::Reset { signal } => RungOutputMsg::Reset {
+                            signal: signal.clone(),
+                        },
+                        RungOutput::Ton { signal, seconds } => RungOutputMsg::Ton {
+                            signal: signal.clone(),
+                            seconds: *seconds,
+                        },
+                        RungOutput::Ctu { signal, preset } => RungOutputMsg::Ctu {
+                            signal: signal.clone(),
+                            preset: *preset,
+                        },
+                        RungOutput::Move { word, value } => RungOutputMsg::Move {
+                            word: word.clone(),
+                            value: word_expr_msg(value),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
+        enable: logic.enable.as_ref().map(seq_condition_msg),
+        reset: logic.reset.as_ref().map(seq_condition_msg),
+        cycle: logic.cycle,
+        plant: logic.plant,
+    }
+}
+
+/// The logic of the program a sequence message carries (empty when the
+/// message has none — storing it clears the program's rungs and gates).
+pub fn logic_from_msg(msg: &SequenceMsg) -> crate::seq::Logic {
+    use crate::seq::{Logic, Rung, RungOutput};
+    let Some(l) = &msg.logic else {
+        return Logic {
+            name: msg.name.clone(),
+            ..Default::default()
+        };
+    };
+    Logic {
+        name: msg.name.clone(),
+        rungs: l
+            .rungs
+            .iter()
+            .map(|r| Rung {
+                comment: r.comment.clone(),
+                condition: seq_condition_from_msg(&r.condition),
+                outputs: r
+                    .outputs
+                    .iter()
+                    .map(|o| match o {
+                        RungOutputMsg::Coil { target } => RungOutput::Coil {
+                            target: target.clone(),
+                        },
+                        RungOutputMsg::Set { signal } => RungOutput::Set {
+                            signal: signal.clone(),
+                        },
+                        RungOutputMsg::Reset { signal } => RungOutput::Reset {
+                            signal: signal.clone(),
+                        },
+                        RungOutputMsg::Ton { signal, seconds } => RungOutput::Ton {
+                            signal: signal.clone(),
+                            seconds: *seconds,
+                        },
+                        RungOutputMsg::Ctu { signal, preset } => RungOutput::Ctu {
+                            signal: signal.clone(),
+                            preset: *preset,
+                        },
+                        RungOutputMsg::Move { word, value } => RungOutput::Move {
+                            word: word.clone(),
+                            value: word_expr_from_msg(value),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
+        enable: l.enable.as_ref().map(seq_condition_from_msg),
+        reset: l.reset.as_ref().map(seq_condition_from_msg),
+        cycle: l.cycle,
+        plant: l.plant,
     }
 }
 
@@ -2950,8 +3459,14 @@ pub fn signal_def_msg(signal: &SignalDef) -> SignalDefMsg {
 /// The full sequence + signal lists as a `sequences` message.
 pub fn sequences_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Sequences {
-        sequences: scene.sequences().iter().map(sequence_msg).collect(),
+        sequences: scene
+            .sequences()
+            .iter()
+            .map(|s| program_msg(scene, s))
+            .collect(),
         signals: scene.signals().iter().map(signal_def_msg).collect(),
+        words: scene.words().iter().map(word_def_msg).collect(),
+        analogs: scene.analogs().iter().map(analog_msg).collect(),
     }
 }
 
@@ -4159,6 +4674,52 @@ pub fn frames_message(scene: &Scene) -> ServerMessage {
     }
 }
 
+/// A scenery joint in wire form (and as a project saves it).
+pub fn scenery_joint_msg(joint: &crate::scenery::SceneryJoint) -> SceneryJointMsg {
+    SceneryJointMsg {
+        name: joint.name.clone(),
+        kind: match joint.kind {
+            crate::scenery::SceneryJointKind::Hinge => SceneryJointKindMsg::Hinge,
+            crate::scenery::SceneryJointKind::Slide => SceneryJointKindMsg::Slide,
+        },
+        base: joint.base.clone(),
+        axis: [joint.axis.x, joint.axis.y, joint.axis.z],
+        origin: [joint.origin.x, joint.origin.y, joint.origin.z],
+        range: [joint.range.0, joint.range.1],
+        position: joint.position,
+        objects: joint.objects.clone(),
+    }
+}
+
+/// The joint a wire form (or a saved project) describes.
+pub fn scenery_joint_from_msg(msg: &SceneryJointMsg) -> crate::scenery::SceneryJoint {
+    let axis = nalgebra::Vector3::from(msg.axis);
+    crate::scenery::SceneryJoint {
+        name: msg.name.clone(),
+        kind: match msg.kind {
+            SceneryJointKindMsg::Hinge => crate::scenery::SceneryJointKind::Hinge,
+            SceneryJointKindMsg::Slide => crate::scenery::SceneryJointKind::Slide,
+        },
+        base: msg.base.clone(),
+        axis: nalgebra::Unit::try_new(axis, 1e-9).unwrap_or_else(nalgebra::Vector3::z_axis),
+        origin: nalgebra::Point3::from(msg.origin),
+        range: (msg.range[0], msg.range[1]),
+        position: msg.position,
+        objects: msg.objects.clone(),
+    }
+}
+
+/// The full scenery-joint list as a `scenery_joints` message.
+pub fn scenery_joints_message(scene: &Scene) -> ServerMessage {
+    ServerMessage::SceneryJoints {
+        joints: scene
+            .scenery_joints()
+            .iter()
+            .map(scenery_joint_msg)
+            .collect(),
+    }
+}
+
 /// A scene attachment in wire form (link indices become link names).
 pub fn attachment_msg(scene: &Scene, attachment: &crate::Attachment) -> AttachmentMsg {
     let model = &scene.robots()[attachment.robot].model;
@@ -4416,6 +4977,7 @@ mod tests {
             objects: vec![],
             cloths: vec![],
             ropes: Vec::new(),
+            readings: None,
             step_spans: vec![StepSpanMsg {
                 name: "a/wait".into(),
                 start: 0.0,

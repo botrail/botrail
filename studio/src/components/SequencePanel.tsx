@@ -80,7 +80,9 @@ export function SequencePanel() {
   }, [motions, motionChoice]);
 
   const commit = (steps: StepMsg[]) =>
-    sendUpsertSequence({ name: sequence.name, steps });
+    // The program's rungs and gates ride along: a message without them
+    // would clear them (they are authored in Python).
+    sendUpsertSequence({ name: sequence.name, steps, logic: sequence.logic });
   const append = (step: StepMsg) => commit([...sequence.steps, step]);
 
   const selectedObstacle = selection.type === "obstacle" ? selection.name : null;

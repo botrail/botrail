@@ -1,4 +1,22 @@
-import type { ActionMsg, ConditionMsg } from "./protocol";
+import type { ActionMsg, ConditionMsg, OperandMsg, WordExprMsg } from "./protocol";
+
+/** A number as the tables print it: whole values bare, the rest trimmed. */
+export function numberText(x: number): string {
+  if (Number.isInteger(x)) return String(x);
+  return String(Number(x.toFixed(4)));
+}
+
+/** A word operand: its name, or the constant. */
+export function operandText(o: OperandMsg): string {
+  return typeof o === "number" ? numberText(o) : o;
+}
+
+/** A word expression: `a`, `a + b`. */
+export function wordExprText(v: WordExprMsg): string {
+  return v.op && v.right !== undefined && v.right !== null
+    ? `${operandText(v.left)} ${v.op} ${operandText(v.right)}`
+    : operandText(v.left);
+}
 
 /** Compact label for an action chip (step rows, SFC chart boxes). */
 export function actionLabel(action: ActionMsg): string {
@@ -22,6 +40,8 @@ export function actionLabel(action: ActionMsg): string {
       return "⇥ untrack";
     case "set":
       return `${action.signal}=${action.value ? "1" : "0"}`;
+    case "set_word":
+      return `${action.word}←${wordExprText(action.value)}`;
     case "crouch":
       return action.depth === 0 && !action.lean ? "⇡ stand" : `⇣ ${action.depth}m`;
     case "device": {
@@ -65,5 +85,15 @@ export function conditionLabel(condition: ConditionMsg): string {
       return condition.conditions.map(conditionLabel).join(" | ");
     case "device_done":
       return `${condition.device} done`;
+    case "not": {
+      const c = condition.condition;
+      return c.type === "signal"
+        ? `${c.name}=${c.value ? "0" : "1"}`
+        : `!(${conditionLabel(c)})`;
+    }
+    case "step_active":
+      return `[${condition.sequence}/${condition.step}]`;
+    case "compare":
+      return `${operandText(condition.left)}${condition.op}${operandText(condition.right)}`;
   }
 }

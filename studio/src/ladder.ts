@@ -1,5 +1,5 @@
-import type { ActionMsg, ConditionMsg, StepMsg } from "./protocol";
-import { actionLabel, conditionLabel } from "./seqLabels";
+import type { ActionMsg, ConditionMsg, LogicMsg, StepMsg, StepSpanMsg } from "./protocol";
+import { actionLabel, conditionLabel, operandText, wordExprText } from "./seqLabels.ts";
 import {
   flattenSteps,
   stepStatus,
@@ -7,7 +7,7 @@ import {
   EDGE_HOLD,
   type ProgramRun,
   type TruthCtx,
-} from "./sfc";
+} from "./sfc.ts";
 
 /**
  * SET/RST step-ladder (歩進回路) projection of the authored sequences —
@@ -31,7 +31,12 @@ const RAIL_R = 24; // right power rail inset from the program's width
 const STEP_W = 50; // the leading step-relay contact cell
 const LABEL_H = 16; // room above a rung line for device labels
 const NOTE_H = 16; // room below it for notes
-const ROW = 32; // pitch of stacked branch / output rows
+const NOTE_H_NAMED = 26; // … when contacts and coils carry their points' names
+const ROW = 32; // pitch of stacked parallel branches
+const ROW_NAMED = 42; // … when each contact carries its point's name under it
+/** The branch pitch of the ladder being laid out (`buildLadder` sets it). */
+let rowPitch = ROW;
+const OUT_ROW = 40; // pitch of stacked outputs: room for a comment under each
 export const COMMENT_H = 15; // the step-comment row over each group
 const GROUP_GAP = 8;
 const MIN_RUN = 20; // shortest wire between network and outputs
@@ -51,7 +56,8 @@ export const relay = (flat: number) => `S${flat}`;
 
 // ------------------------------------------- condition -> contact network
 
-export type ContactKind = "no" | "nc" | "p" | "n";
+/** `cmp` is a comparison instruction: a box, not a contact's bars. */
+export type ContactKind = "no" | "nc" | "p" | "n" | "cmp";
 
 /** Series-parallel contact network of one condition tree: `all` lays its
  * children in series, `any` stacks them as parallel branches, and every
@@ -120,6 +126,23 @@ function buildNet(cond: ConditionMsg, timers: TimerAlloc): Net {
         rows: ch.reduce((m, c) => Math.max(m, c.rows), 1),
       };
     }
+    // A negated contact is its NC twin; a negated network one NC contact
+    // named whole (its truth is the network's, inverted).
+    case "not": {
+      const c = cond.condition;
+      if (c.type === "signal") {
+        return contactNet(c.value ? "nc" : "no", c.name, cond);
+      }
+      return contactNet("nc", conditionLabel(c), cond);
+    }
+    case "step_active":
+      return contactNet("no", cond.step, cond, cond.sequence);
+    case "compare":
+      return contactNet(
+        "cmp",
+        `${operandText(cond.left)} ${cond.op} ${operandText(cond.right)}`,
+        cond,
+      );
     case "any": {
       const ch = cond.conditions.map((c) => buildNet(c, timers));
       if (ch.length === 0) return { k: "wire", w: 18, rows: 1 };
@@ -196,7 +219,10 @@ export type ContactRef =
   | { type: "start" }
   /** A condition leaf; `flat` is the step whose exit it guards (the span
    * that anchors `elapsed` / `done`). */
-  | { type: "cond"; flat: number; cond: ConditionMsg };
+  | { type: "cond"; flat: number; cond: ConditionMsg }
+  /** A contact of a rung (no step behind it); `flat` is the rung's flat
+   * index — the program's steps, then its rungs — for its I/O point. */
+  | { type: "rung"; flat: number; cond: ConditionMsg };
 
 export type LContact = {
   kind: ContactKind;
@@ -208,17 +234,28 @@ export type LContact = {
 };
 
 export type LCoil = {
-  op: "set" | "rst" | "out";
+  /** `mov` is a transfer / arithmetic instruction: a box. */
+  op: "set" | "rst" | "out" | "mov";
   label: string;
   note?: string;
   cx: number;
   y: number;
+  /** A rung's output: the signal, coil or word it drives. */
+  target?: string;
 };
 
-export type LTon = { name: string; seconds: number; x: number; y: number; flat: number };
+export type LTon = {
+  name: string;
+  seconds: number;
+  x: number;
+  y: number;
+  flat: number;
+  /** A rung's timer: the signal that comes on when it has run. */
+  signal?: string;
+};
 
 export type LRung = {
-  kind: "start" | "action" | "timer" | "transition";
+  kind: "start" | "action" | "timer" | "transition" | "rung";
   /** Owning flat step; null for the start rung. */
   flat: number | null;
   /** Guard rung of a branching step: which arm. */
@@ -232,11 +269,15 @@ export type LRung = {
   coils: LCoil[];
   tons: LTon[];
   title: string;
+  /** A program's own rung: its whole network, for "does it conduct". */
+  condition?: ConditionMsg;
 };
 
 export type LGroup = {
-  /** null = the start rung's group. */
+  /** null = the start rung's group, or a rung's (`rung` set). */
   flat: number | null;
+  /** The rung's index among the program's rungs, for a rung's group. */
+  rung?: number;
   name: string;
   branching: boolean;
   top: number;
@@ -246,23 +287,28 @@ export type LGroup = {
 export type Ladder = { groups: LGroup[]; width: number; height: number };
 
 type Out =
-  | { op: "set" | "rst" | "out"; label: string; note?: string }
-  | { op: "ton"; name: string; seconds: number };
+  | { op: "set" | "rst" | "out" | "mov"; label: string; note?: string; target?: string }
+  | { op: "ton"; name: string; seconds: number; signal?: string };
 
 type Skel = {
   kind: LRung["kind"];
   flat: number | null;
   arm: number | null;
   target: number | null;
-  lead: { kind: ContactKind; label: string; ref: ContactRef };
+  /** The step relay leading the rung; a program's own rungs have none. */
+  lead: { kind: ContactKind; label: string; ref: ContactRef } | null;
   net: Net | null;
   outs: Out[];
   title: string;
+  condition?: ConditionMsg;
 };
 
 function actionOut(action: ActionMsg): Out {
   if (action.type === "set") {
     return { op: action.value ? "set" : "rst", label: action.signal };
+  }
+  if (action.type === "set_word") {
+    return { op: "mov", label: action.word, note: wordExprText(action.value), target: action.word };
   }
   return { op: "out", label: actionLabel(action) };
 }
@@ -276,7 +322,14 @@ function outZone(outs: Out[]): number {
 /** Lays a network down from `x` on line `y`; returns the x it ends at.
  * Parallel branches stack downward on the ROW pitch, shorter ones wired
  * out to the rejoin bar. */
-function placeNet(net: Net, x: number, y: number, flat: number, rung: LRung): number {
+function placeNet(
+  net: Net,
+  x: number,
+  y: number,
+  flat: number,
+  rung: LRung,
+  ref: "cond" | "rung" = "cond",
+): number {
   switch (net.k) {
     case "wire":
       rung.wires.push({ x1: x, y1: y, x2: x + net.w, y2: y });
@@ -291,13 +344,13 @@ function placeNet(net: Net, x: number, y: number, flat: number, rung: LRung): nu
         note: net.note,
         cx,
         y,
-        ref: { type: "cond", flat, cond: net.cond },
+        ref: { type: ref, flat, cond: net.cond },
       });
       return x + net.w;
     }
     case "series": {
       let ax = x;
-      for (const c of net.ch) ax = placeNet(c, ax, y, flat, rung);
+      for (const c of net.ch) ax = placeNet(c, ax, y, flat, rung, ref);
       return ax;
     }
     case "parallel": {
@@ -306,13 +359,13 @@ function placeNet(net: Net, x: number, y: number, flat: number, rung: LRung): nu
       let lastY = y;
       for (const c of net.ch) {
         rung.wires.push({ x1: x, y1: by, x2: x + JUNC, y2: by });
-        const end = placeNet(c, x + JUNC, by, flat, rung);
+        const end = placeNet(c, x + JUNC, by, flat, rung, ref);
         if (end < x + JUNC + innerW) {
           rung.wires.push({ x1: end, y1: by, x2: x + JUNC + innerW, y2: by });
         }
         rung.wires.push({ x1: x + JUNC + innerW, y1: by, x2: x + net.w, y2: by });
         lastY = by;
-        by += c.rows * ROW;
+        by += c.rows * rowPitch;
       }
       rung.wires.push({ x1: x, y1: y, x2: x, y2: lastY });
       rung.wires.push({ x1: x + net.w, y1: y, x2: x + net.w, y2: lastY });
@@ -321,7 +374,15 @@ function placeNet(net: Net, x: number, y: number, flat: number, rung: LRung): nu
   }
 }
 
-export function buildLadder(steps: StepMsg[]): Ladder {
+/** Lays the step ladder out. `named`: the contacts and coils will show
+ * an address with the point's name under it (a wired cell), so every rung
+ * keeps room for that comment line. */
+export function buildLadder(
+  steps: StepMsg[],
+  opts?: { named?: boolean; logic?: LogicMsg | null },
+): Ladder {
+  const noteH = opts?.named ? NOTE_H_NAMED : NOTE_H;
+  rowPitch = opts?.named ? ROW_NAMED : ROW;
   const nodes = flattenSteps(steps);
   const exits = flatExits(steps);
   if (exits.length !== nodes.length) {
@@ -334,8 +395,13 @@ export function buildLadder(steps: StepMsg[]): Ladder {
 
   // ---- skeletons: rungs per group, nets built in flat order ----------
   const timers: TimerAlloc = { n: 0, created: [] };
-  const groups: { flat: number | null; name: string; branching: boolean; skels: Skel[] }[] =
-    [];
+  const groups: {
+    flat: number | null;
+    rung?: number;
+    name: string;
+    branching: boolean;
+    skels: Skel[];
+  }[] = [];
 
   if (nodes.length > 0) {
     groups.push({
@@ -415,6 +481,51 @@ export function buildLadder(steps: StepMsg[]): Ladder {
     });
   });
 
+  // ---- the program's own rungs, after its step ladder ----------------
+  // Scanned every scan, top to bottom, after the transitions: one group
+  // per rung, the network straight off the rail, its outputs as written.
+  (opts?.logic?.rungs ?? []).forEach((r, k) => {
+    const flat = nodes.length + k;
+    const label = r.comment.trim() ? r.comment : `rung ${k + 1}`;
+    timers.created = [];
+    const net = buildNet(r.condition, timers);
+    const outs: Out[] = r.outputs.map((o): Out => {
+      switch (o.type) {
+        case "coil":
+          return { op: "out", label: o.target, target: o.target };
+        case "set":
+          return { op: "set", label: o.signal, target: o.signal };
+        case "reset":
+          return { op: "rst", label: o.signal, target: o.signal };
+        case "ton":
+          return { op: "ton", name: o.signal, seconds: o.seconds, signal: o.signal };
+        case "ctu":
+          return { op: "out", label: `CTU ${o.signal}`, note: `PV ${o.preset}`, target: o.signal };
+        case "move":
+          return { op: "mov", label: o.word, note: wordExprText(o.value), target: o.word };
+      }
+    });
+    // A TON block takes a rung of its own; the other outputs share one.
+    const coils = outs.filter((o) => o.op !== "ton");
+    const tons = outs.filter((o) => o.op === "ton");
+    const skels: Skel[] = [];
+    const push = (outs: Out[]) =>
+      skels.push({
+        kind: "rung",
+        flat,
+        arm: null,
+        target: null,
+        lead: null,
+        net,
+        outs,
+        title: `${label} — ${conditionLabel(r.condition)}`,
+        condition: r.condition,
+      });
+    if (coils.length > 0) push(coils);
+    for (const t of tons) push([t]);
+    groups.push({ flat: null, rung: k, name: label, branching: false, skels });
+  });
+
   // ---- width: the widest rung decides the rails ----------------------
   let need = 0;
   for (const g of groups) {
@@ -432,6 +543,7 @@ export function buildLadder(steps: StepMsg[]): Ladder {
   for (const g of groups) {
     const group: LGroup = {
       flat: g.flat,
+      rung: g.rung,
       name: g.name,
       branching: g.branching,
       top: y,
@@ -439,8 +551,10 @@ export function buildLadder(steps: StepMsg[]): Ladder {
     };
     y += COMMENT_H;
     for (const s of g.skels) {
-      const rows = Math.max(s.net?.rows ?? 1, s.outs.length);
-      const h = LABEL_H + (rows - 1) * ROW + NOTE_H;
+      const h =
+        LABEL_H +
+        Math.max(((s.net?.rows ?? 1) - 1) * rowPitch, (s.outs.length - 1) * OUT_ROW) +
+        noteH;
       const rung: LRung = {
         kind: s.kind,
         flat: s.flat,
@@ -453,38 +567,62 @@ export function buildLadder(steps: StepMsg[]): Ladder {
         coils: [],
         tons: [],
         title: s.title,
+        condition: s.condition,
       };
       const ly = y + LABEL_H;
-      // Leading contact (the step relay; `start` on the first rung).
-      const lcx = RAIL_L + STEP_W / 2;
-      rung.wires.push({ x1: RAIL_L, y1: ly, x2: lcx - 6, y2: ly });
-      rung.wires.push({ x1: lcx + 6, y1: ly, x2: RAIL_L + STEP_W, y2: ly });
-      rung.contacts.push({ kind: s.lead.kind, label: s.lead.label, cx: lcx, y: ly, ref: s.lead.ref });
-      let x = RAIL_L + STEP_W;
-      if (s.net) x = placeNet(s.net, x, ly, s.flat ?? 0, rung);
+      // Leading contact (the step relay; `start` on the first rung). A
+      // program's own rung starts at the rail.
+      let x = RAIL_L;
+      if (s.lead) {
+        const lcx = RAIL_L + STEP_W / 2;
+        rung.wires.push({ x1: RAIL_L, y1: ly, x2: lcx - 6, y2: ly });
+        rung.wires.push({ x1: lcx + 6, y1: ly, x2: RAIL_L + STEP_W, y2: ly });
+        rung.contacts.push({
+          kind: s.lead.kind,
+          label: s.lead.label,
+          cx: lcx,
+          y: ly,
+          ref: s.lead.ref,
+        });
+        x = RAIL_L + STEP_W;
+      }
+      if (s.net) {
+        x = placeNet(s.net, x, ly, s.flat ?? 0, rung, s.kind === "rung" ? "rung" : "cond");
+      }
       // Outputs, right-aligned on the rail.
       const ton = s.outs.find((o) => o.op === "ton");
       if (ton && ton.op === "ton") {
         const bx = railR - TON_W - 10;
         rung.wires.push({ x1: x, y1: ly, x2: bx, y2: ly });
         rung.wires.push({ x1: bx + TON_W, y1: ly, x2: railR, y2: ly });
-        rung.tons.push({ name: ton.name, seconds: ton.seconds, x: bx, y: ly, flat: s.flat ?? 0 });
+        rung.tons.push({
+          name: ton.name,
+          seconds: ton.seconds,
+          x: bx,
+          y: ly,
+          flat: s.flat ?? 0,
+          signal: ton.signal,
+        });
       } else if (s.outs.length === 1) {
         const cx = railR - 16;
         rung.wires.push({ x1: x, y1: ly, x2: cx - 7, y2: ly });
         rung.wires.push({ x1: cx + 7, y1: ly, x2: railR, y2: ly });
         const o = s.outs[0];
-        if (o.op !== "ton") rung.coils.push({ op: o.op, label: o.label, note: o.note, cx, y: ly });
+        if (o.op !== "ton") {
+          rung.coils.push({ op: o.op, label: o.label, note: o.note, cx, y: ly, target: o.target });
+        }
       } else {
         const busX = railR - 45;
         const cx = railR - 16;
         rung.wires.push({ x1: x, y1: ly, x2: busX, y2: ly });
-        rung.wires.push({ x1: busX, y1: ly, x2: busX, y2: ly + (s.outs.length - 1) * ROW });
+        rung.wires.push({ x1: busX, y1: ly, x2: busX, y2: ly + (s.outs.length - 1) * OUT_ROW });
         s.outs.forEach((o, i) => {
-          const oy = ly + i * ROW;
+          const oy = ly + i * OUT_ROW;
           rung.wires.push({ x1: busX, y1: oy, x2: cx - 7, y2: oy });
           rung.wires.push({ x1: cx + 7, y1: oy, x2: railR, y2: oy });
-          if (o.op !== "ton") rung.coils.push({ op: o.op, label: o.label, note: o.note, cx, y: oy });
+          if (o.op !== "ton") {
+            rung.coils.push({ op: o.op, label: o.label, note: o.note, cx, y: oy, target: o.target });
+          }
         });
       }
       group.rungs.push(rung);
@@ -504,7 +642,10 @@ export function rails(width: number): [number, number] {
 
 // ------------------------------------------------------------- live truth
 
-type Lanes = Pick<TruthCtx, "signals" | "robots">;
+type Lanes = Pick<TruthCtx, "signals" | "robots" | "stepSpans" | "words">;
+
+/** A rung belongs to no step: its contacts read against an open span. */
+const NO_STEP: StepSpanMsg = { name: "", start: 0, end: Infinity, sequence: "", step: -1 };
 
 /** The program's t=0: when its first entered step began. */
 export function startTime(run: ProgramRun): number {
@@ -533,6 +674,10 @@ export function contactState(
     const t0 = startTime(run);
     return { holds: t >= t0 && t - t0 <= EDGE_HOLD };
   }
+  if (ref.type === "rung") {
+    const tr = truth(ref.cond, t, { span: NO_STEP, ...lanes });
+    return { holds: tr.holds, level: tr.level };
+  }
   const span = run.spans[ref.flat];
   if (!span) return { holds: false };
   const tr = truth(ref.cond, t, { span, ...lanes });
@@ -540,6 +685,11 @@ export function contactState(
     return { holds: tr.holds && span.start <= t && t < span.end };
   }
   return { holds: tr.holds, level: tr.level };
+}
+
+/** Whether a program's own rung conducts at `t` (its transfers run). */
+export function rungConducts(rung: LRung, t: number, lanes: Lanes): boolean {
+  return !!rung.condition && truth(rung.condition, t, { span: NO_STEP, ...lanes }).holds;
 }
 
 /** TON block state: runs while its step relay is on, done at the preset. */
@@ -569,7 +719,8 @@ export function coilFire(
 ): boolean {
   const windowed = (f: number) => t >= f && t - f <= EDGE_HOLD;
   if (rung.kind === "start") return windowed(startTime(run));
-  if (rung.flat === null) return false;
+  // A rung's coils are levels, lit by their lanes (the chart's job).
+  if (rung.kind === "rung" || rung.flat === null) return false;
   const span = run.spans[rung.flat];
   if (!span) return false;
   if (rung.kind === "action") return windowed(span.start);
@@ -592,7 +743,7 @@ export function rungStatus(
   taken: Map<number, number>,
   rung: LRung,
 ): "" | "off" | "untaken" | "unreached" {
-  if (rung.flat === null) return "";
+  if (rung.kind === "rung" || rung.flat === null) return "";
   const base = stepStatus(run, taken, rung.flat);
   if (base !== "entered") return base;
   if (rung.kind === "transition" && rung.arm !== null) {

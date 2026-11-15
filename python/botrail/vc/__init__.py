@@ -63,6 +63,13 @@ block=False)`) the run streams there live, the dock's plant bar and the I/O
 table's force column send the same commands back, and a stopped recording
 lands on the dock playable and exportable (design-virtual-commissioning.md
 VC3).
+
+Everything above *writes* the controller's inputs, which is for a
+controller under test. A controller that runs a real machine is only ever
+read: `bt.vc.monitor` mirrors it from a log of its I/O (`bt.vc.IoLog`) or
+through a read-only reader (`bt.vc.modbus_reader`, `bt.vc.opcua_reader`),
+moving the model with what the controller wrote and comparing what it read
+with what the model computes — see `monitor.py`.
 """
 
 from __future__ import annotations
@@ -126,6 +133,17 @@ __all__ = [
     "clearance",
     "cycle_within",
     "check",
+    # a machine's log and the read-only monitor (iolog.py, readers.py, monitor.py)
+    "IoLog",
+    "IoTap",
+    "tap",
+    "ModbusReader",
+    "OpcUaReader",
+    "modbus_reader",
+    "opcua_reader",
+    "Deviation",
+    "Monitor",
+    "monitor",
 ]
 
 
@@ -597,6 +615,7 @@ class Session:
         self._breaks: list[tuple[str, bool]] = []
         self._presses: dict[str, float] = {}
         self._forced: dict[str, bool] = {}
+        self._forced_words: dict[str, float] = {}
         self._recording_from: Optional[float] = None
         self._clips: list[tuple[str, object]] = []
         # The studio side.
@@ -645,8 +664,9 @@ class Session:
         return bool(self._live.signal(name))
 
     def word(self, name: str) -> float:
-        """A word lane's current value — an encoder (`feed.encoder`), an
-        identification reader (`reader.id`)."""
+        """A word lane's current value — a defined word (`dp_warn`), an
+        analog input's scaled value or counts (`dp`, `dp.raw`), an encoder
+        (`feed.encoder`), an identification reader (`reader.id`)."""
         return float(self._live.word(name))
 
     def steps(self) -> list[tuple[str, Optional[str]]]:
@@ -832,24 +852,43 @@ class Session:
 
     # -- the hand on the wire -----------------------------------------------
 
-    def force(self, name: str, value: bool) -> None:
-        """Pins a lane (a PLC force) until `unforce`."""
-        self._live.force(name, value)
-        self._forced[name] = bool(value)
+    def force(self, name: str, value: Union[bool, int, float]) -> None:
+        """Pins a lane (a PLC force) until `unforce`: a contact or a coil
+        to a level (`True` / `False`), a word to a number — a register, or
+        on an analog input what its transmitter measures, in its
+        engineering unit (the current, the counts and the scaled value
+        follow through the loop)."""
+        if isinstance(value, bool):
+            self._live.force(name, value)
+            self._forced[name] = value
+        else:
+            self._live.force_word(name, float(value))
+            self._forced_words[name] = float(value)
+        self._status_dirty = True
+
+    def write(self, word: str, value: float) -> None:
+        """Keys a value into a defined word — a setpoint changed while
+        the line runs. The programs read it from their next scan; nothing
+        is pinned (a program that writes the word overwrites it). A
+        register an external controller keeps is out of the plant's reach:
+        declare the word an input (`scene.declare_io(word, role="input")`)
+        so the controller reads it from the wire."""
+        self._live.write_word(word, float(value))
         self._status_dirty = True
 
     def unforce(self, name: str) -> None:
         self._live.unforce(name)
         self._forced.pop(name, None)
+        self._forced_words.pop(name, None)
         self._presses.pop(name, None)
         self._status_dirty = True
 
     release = unforce
 
     @property
-    def forced(self) -> dict[str, bool]:
-        """The lanes pinned now, with their level."""
-        return dict(self._forced)
+    def forced(self) -> dict[str, Union[bool, float]]:
+        """The lanes pinned now, with their level (a word's number)."""
+        return {**self._forced, **self._forced_words}
 
     def press(self, lane: str, hold_s: Optional[float] = None) -> None:
         """Presses a push button: its lane (a panel button's zone sensor,
@@ -978,6 +1017,7 @@ class Session:
             "lag_max_ms": 1000.0 * max(lags) if lags else 0.0,
             "overruns": self._overruns,
             "forced": [[lane, value] for lane, value in self._forced.items()],
+            "forced_words": [[lane, value] for lane, value in self._forced_words.items()],
             "breaks": [{"lane": lane, "rising": rising} for lane, rising in self._breaks],
             "recording_from": self._recording_from,
             "following": self._following,
@@ -1009,7 +1049,12 @@ class Session:
         elif kind == "speed":
             self.speed = float(cmd["speed"])
         elif kind == "force":
-            self.force(cmd["lane"], bool(cmd["value"]))
+            value = cmd["value"]
+            self.force(cmd["lane"], value if isinstance(value, bool) else float(value))
+        elif kind == "force_word":
+            self.force(cmd["lane"], float(cmd["value"]))
+        elif kind == "write":
+            self.write(cmd["word"], float(cmd["value"]))
         elif kind == "unforce":
             self.unforce(cmd["lane"])
         elif kind == "press":
@@ -1084,6 +1129,26 @@ class Session:
         """The timeline so far, without closing the session."""
         return self._live.timeline()
 
+    def waiting(self) -> list[dict]:
+        """What every program waits on now — `SequenceTimeline.waiting` at
+        the plant's clock: the step each program stands in and the
+        contacts of its exits that do not conduct, with the I/O point the
+        program reads there and its address. A program on an external
+        controller shows only when its node reports its steps
+        (`monitor=True`): otherwise the plant cannot know where it
+        stands. After `finish`, the waits at the end of the run."""
+        if self._finished is not None:
+            return self._finished.waiting(self._finished.duration)
+        return self._live.timeline().waiting(self.t)
+
+    def analog(self) -> list[dict]:
+        """Every analog input's loop now — `SequenceTimeline.analog` at the
+        plant's clock: what the transmitter measures, the loop current,
+        the module's counts, the value the programs read."""
+        if self._finished is not None:
+            return self._finished.analog(self._finished.duration)
+        return self._live.timeline().analog(self.t)
+
     def finish(self, publish: Optional[bool] = None):
         """Closes the session into its timeline (the ordinary
         `SequenceTimeline`); `publish` broadcasts it to open studios — by
@@ -1146,3 +1211,9 @@ from .fat import (  # noqa: E402
     stalls,
     step_reached,
 )
+
+# A machine's log and the read-only monitor (design-plc-resolution.md §11).
+# Imported last: the monitor is built on the session above.
+from .iolog import IoLog, IoTap, tap  # noqa: E402
+from .monitor import Deviation, Monitor, monitor  # noqa: E402
+from .readers import ModbusReader, OpcUaReader, modbus_reader, opcua_reader  # noqa: E402

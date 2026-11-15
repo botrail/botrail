@@ -252,7 +252,14 @@ def test_coils_encoders_ids_and_stoppers_survive_the_project_file(tmp_path) -> N
 
 
 def test_the_feed_line_demo_indexes_three_parts_and_writes_millimetres() -> None:
-    import run_demo as feed
+    # By path: other demos are `run_demo.py` too, and whichever folder is
+    # first on `sys.path` would answer a plain import.
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "examples" / "commissioning" / "openplc_feed_line" / "run_demo.py"
+    spec = importlib.util.spec_from_file_location("openplc_feed_line_demo", path)
+    feed = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(feed)
 
     scene = feed.build()
     xc = bt.vc.exchange(scene, "PLC1")

@@ -377,6 +377,23 @@ def test_force_and_release_pin_a_lane_and_let_it_go() -> None:
             s.force("nothing", True)
 
 
+def test_a_forced_run_coil_holds_the_belt_against_its_program() -> None:
+    scene = pick_cell()
+    with bt.vc.loopback(scene, ["pick"], host="UR") as s:
+        s.tick(20)  # feeding: the program has started the belt
+        assert s.signal("conv") is True
+        x = lambda: s._live.object_pose("part")[0][0]  # noqa: E731
+        s.force("conv", False)  # the belt's coil pinned off from the table
+        held = x()
+        s.run(for_=0.5)
+        assert s.signal("conv") is False
+        assert x() == pytest.approx(held, abs=1e-9)  # the part stands still
+        s.unforce("conv")  # back to the program's word: running
+        s.run(for_=0.3)
+        assert s.signal("conv") is True
+        assert x() > held + 0.02
+
+
 def test_anchored_injection_waits_for_its_moment() -> None:
     scene = pick_cell()
     bake = scene.simulate_sequence("pick")

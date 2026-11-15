@@ -121,6 +121,9 @@ fn walk_conditions(
                 visit(c, f)?;
             }
         }
+        if let Condition::Not(c) = c {
+            visit(c, f)?;
+        }
         Ok(())
     }
     for step in steps {
@@ -206,8 +209,19 @@ impl Scene {
                     .sequence(program)
                     .ok_or_else(|| SeqError::UnknownSequence(program.clone()))?;
                 let mut held: BTreeMap<String, usize> = BTreeMap::new();
-                crate::seq::walk_actions(&sequence.steps, &mut |action: &Action| {
+                let steps = self.program_steps(sequence);
+                crate::seq::walk_actions(&steps, &mut |action: &Action| {
                     match action {
+                        Action::SetWord { word, .. } => {
+                            if exchange.point(word, None, PlantSide::Input).is_none()
+                                && !exchange.internal.iter().any(|n| n == word)
+                            {
+                                return Err(format!(
+                                    "program `{program}` writes the word `{word}`, which host \
+                                     `{host}` has no output for"
+                                ));
+                            }
+                        }
                         Action::Set { signal, .. } => {
                             if exchange.point(signal, None, PlantSide::Input).is_none()
                                 && !exchange.internal.iter().any(|n| n == signal)
@@ -227,7 +241,10 @@ impl Scene {
                                     )
                             });
                             if magazine {
-                                if !loopback {
+                                // Declared an output it has a run coil,
+                                // and crosses like a belt.
+                                let coil = exchange.point(device, None, PlantSide::Input).is_some();
+                                if !loopback && !coil {
                                     return Err(format!(
                                         "program `{program}` commands `{device}`, a magazine with no \
                                          coil (cosmetic in the I/O map) — an external controller \
@@ -283,12 +300,15 @@ impl Scene {
                     Ok(())
                 })
                 .map_err(validation)?;
-                walk_conditions(&sequence.steps, &mut |condition: &Condition| {
+                walk_conditions(&steps, &mut |condition: &Condition| {
                     match condition {
                         Condition::Signal { name, .. }
                         | Condition::Rising { name }
                         | Condition::Falling { name } => {
+                            // (a controller reads back what it writes: a
+                            // self-holding coil another host also reads)
                             if exchange.point(name, None, PlantSide::Output).is_none()
+                                && exchange.point(name, None, PlantSide::Input).is_none()
                                 && !exchange.internal.iter().any(|n| n == name)
                             {
                                 return Err(format!(
@@ -326,7 +346,28 @@ impl Scene {
                         | Condition::Done
                         | Condition::Elapsed { .. }
                         | Condition::All(_)
-                        | Condition::Any(_) => {}
+                        | Condition::Any(_)
+                        | Condition::Not(_)
+                        | Condition::StepActive { .. } => {}
+                        Condition::Compare { left, right, .. } => {
+                            for operand in [left, right] {
+                                let crate::seq::Operand::Word(word) = operand else {
+                                    continue;
+                                };
+                                let Some((name, aspect)) = iomap::word_point(self, word) else {
+                                    continue; // a counter's count: the host's own
+                                };
+                                if exchange.point(&name, aspect, PlantSide::Output).is_none()
+                                    && exchange.point(&name, aspect, PlantSide::Input).is_none()
+                                    && !exchange.internal.iter().any(|n| n == &name)
+                                {
+                                    return Err(format!(
+                                        "program `{program}` compares `{word}`, which host `{host}` \
+                                         has no input for"
+                                    ));
+                                }
+                            }
+                        }
                     }
                     Ok(())
                 })
@@ -664,6 +705,20 @@ impl Rollout {
     /// Loopback: the current (external) program's action, encoded onto
     /// its host's exchange and decoded back into the world.
     pub(super) fn fire_through_exchange(&mut self, action: &Action) -> Result<(), SeqError> {
+        // A word's expression is the controller's arithmetic: what
+        // crosses is its value.
+        let resolved;
+        let action = match action {
+            Action::SetWord { word, value } => {
+                let v = self.word_expr(value).map_err(|m| self.live_err(m))?;
+                resolved = Action::SetWord {
+                    word: word.clone(),
+                    value: crate::seq::WordExpr::constant(v),
+                };
+                &resolved
+            }
+            other => other,
+        };
         let p = self.current;
         let h = self
             .plant
@@ -722,6 +777,18 @@ impl Rollout {
                         .find(|w| w.name == p.label())
                         .and_then(|w| w.samples.last().map(|s| Value::Real(s.1)))
                         .unwrap_or(p.initial),
+                    // An analog input's counts; a word register.
+                    _ if p.value != ValueKind::Bool => {
+                        let lane = match p.source {
+                            IoSource::Analog => format!("{}.raw", p.id.name),
+                            _ => p.id.name.clone(),
+                        };
+                        self.words
+                            .iter()
+                            .find(|w| w.name == lane)
+                            .and_then(|w| w.samples.last().map(|s| Value::Real(s.1)))
+                            .unwrap_or(p.initial)
+                    }
                     _ => Value::Bool(
                         self.lane_index(&p.id.name)
                             .map(|l| self.lane_value(l))
@@ -736,6 +803,14 @@ impl Rollout {
     /// Pins a lane to `value` from now on (a PLC force): sensor geometry
     /// and program writes are dropped until [`plant_release`](Self::plant_release).
     pub(super) fn plant_force(&mut self, lane: &str, value: bool) -> Result<(), SeqError> {
+        // An analog input has no level to pin: a fault on it opens its
+        // loop (0 mA) — [`plant_release`](Self::plant_release) mends it.
+        if let Some(k) = self.analogs.iter().position(|a| a.def.name == lane) {
+            if !self.open_analogs.contains(&k) {
+                self.open_analogs.push(k);
+            }
+            return Ok(());
+        }
         let l = self.lane_index(lane).ok_or_else(|| {
             validation(format!(
                 "`{lane}` is not a lane (a sensor, an internal signal, a device's running state)"
@@ -764,15 +839,128 @@ impl Rollout {
         if self.lane_value(l) != before {
             self.grasp_follow(l)?;
         }
+        // A forced run coil drives its belt or feeder, and keeps what was
+        // commanded before so the release can hand the device back.
+        if let Some(device) = self.run_device_mut(l) {
+            let commanded = set_run(device, value);
+            if !self.held_runs.iter().any(|(x, _)| *x == l) {
+                self.held_runs.push((l, commanded));
+            }
+        }
+        Ok(())
+    }
+
+    /// Pins a word lane to `value` (a force on a register): program
+    /// writes are dropped until the release. On an analog input the value
+    /// is what the transmitter measures — the current, the counts and the
+    /// scaled value follow through the chain.
+    pub(super) fn plant_force_word(&mut self, word: &str, value: f64) -> Result<(), SeqError> {
+        if !value.is_finite() {
+            return Err(validation(format!(
+                "`{word}`: a forced value must be finite"
+            )));
+        }
+        let lane = self.word_index(word).ok_or_else(|| {
+            validation(format!(
+                "`{word}` is not a word lane (a defined word, an analog input, an encoder, a reader's id)"
+            ))
+        })?;
+        if self.analogs.iter().any(|a| a.raw == lane) {
+            return Err(validation(format!(
+                "`{word}` is the module's counts — force the analog input itself, in its engineering unit"
+            )));
+        }
+        let value = if self.words[lane].integer {
+            value.round()
+        } else {
+            value
+        };
+        self.forced_words.retain(|(l, _)| *l != lane);
+        self.forced_words.push((lane, value));
+        if !self.analogs.iter().any(|a| a.lane == lane) {
+            let t = self.t;
+            self.put_word(lane, t, value);
+        }
+        Ok(())
+    }
+
+    /// Writes a defined word once — an operator keying in a setpoint. The
+    /// programs see it from their next scan; a program that writes the
+    /// word itself overwrites it.
+    pub(super) fn plant_write_word(&mut self, word: &str, value: f64) -> Result<(), SeqError> {
+        if !value.is_finite() {
+            return Err(validation(format!(
+                "`{word}`: a written value must be finite"
+            )));
+        }
+        if !self.world.words().iter().any(|w| w.name == word) {
+            return Err(validation(format!(
+                "`{word}` is not a defined word (define_word) — a measured word is forced, not written"
+            )));
+        }
+        // A register an external controller keeps is out of the plant's
+        // reach: only what crosses the exchange can be keyed in from here.
+        if let Some(state) = self.plant.as_ref().filter(|s| !s.loopback) {
+            if let Some(host) = state
+                .hosts
+                .iter()
+                .find(|h| h.exchange.internal.iter().any(|n| n == word))
+            {
+                return Err(validation(format!(
+                    "`{word}` is a register of the controller on `{}` — the plant cannot reach it. \
+                     Declare it an input (declare_io(\"{word}\", role=\"input\")) and bind it, so the \
+                     controller reads it from the wire",
+                    host.name
+                )));
+            }
+        }
+        let lane = self.word_index(word).expect("a defined word has a lane");
+        let value = if self.words[lane].integer {
+            value.round()
+        } else {
+            value
+        };
+        let t = self.t;
+        self.set_word(lane, t, value);
         Ok(())
     }
 
     pub(super) fn plant_release(&mut self, lane: &str) -> Result<(), SeqError> {
+        // A word's force, an analog input's open loop.
+        if let Some(w) = self.word_index(lane) {
+            self.forced_words.retain(|(l, _)| *l != w);
+            if let Some(k) = self.analogs.iter().position(|a| a.lane == w) {
+                self.open_analogs.retain(|x| *x != k);
+            }
+            return Ok(());
+        }
         let l = self
             .lane_index(lane)
             .ok_or_else(|| validation(format!("`{lane}` is not a lane")))?;
         self.forced.retain(|(x, _)| *x != l);
+        // A released run coil goes back to the level last commanded —
+        // before the force, or while it held the device.
+        if let Some(i) = self.held_runs.iter().position(|(x, _)| *x == l) {
+            let (_, commanded) = self.held_runs.remove(i);
+            if let Some(device) = self.run_device_mut(l) {
+                set_run(device, commanded);
+            }
+            let t = self.t;
+            self.set_lane(l, t, commanded);
+        }
         Ok(())
+    }
+
+    /// The belt or feeder whose run lane is `l` — the devices a force on
+    /// that lane drives (an axis's or a vehicle's lane is its motion, not
+    /// a coil, and is only pinned).
+    fn run_device_mut(&mut self, l: usize) -> Option<&mut DeviceRuntime> {
+        self.devices.iter_mut().find(|d| {
+            matches!(
+                d,
+                DeviceRuntime::Conveyor { lane, .. } | DeviceRuntime::Source { lane, .. } if *lane == l
+            )
+        })
     }
 
     /// Injects a fault: resolved through the scene's bindings like a
@@ -1010,6 +1198,17 @@ impl LiveRollout {
         self.inner.plant_release(lane)
     }
 
+    /// Pins a word lane to a value until [`unforce_lane`](Self::unforce_lane):
+    /// a register, or what an analog input's transmitter measures.
+    pub fn force_word(&mut self, word: &str, value: f64) -> Result<(), SeqError> {
+        self.inner.plant_force_word(word, value)
+    }
+
+    /// Writes a defined word once (a setpoint keyed in).
+    pub fn write_word(&mut self, word: &str, value: f64) -> Result<(), SeqError> {
+        self.inner.plant_write_word(word, value)
+    }
+
     /// Injects a fault (a stuck contact, an open wire, a node down) at an
     /// anchor.
     /// What a streamed robot's controller says about itself: idle (no
@@ -1040,6 +1239,22 @@ impl LiveRollout {
             .as_ref()
             .map(|s| s.log.as_slice())
             .unwrap_or(&[])
+    }
+}
+
+/// Sets a belt's or a feeder's running state the way `Start` / `Stop`
+/// would (a feeder switched on is due at once), returning the state it
+/// had.
+fn set_run(device: &mut DeviceRuntime, on: bool) -> bool {
+    match device {
+        DeviceRuntime::Conveyor { running, .. } => std::mem::replace(running, on),
+        DeviceRuntime::Source { running, due, .. } => {
+            if on && !*running {
+                *due = 0.0;
+            }
+            std::mem::replace(running, on)
+        }
+        _ => false,
     }
 }
 
@@ -1433,6 +1648,76 @@ mod tests {
         // from that very scan, so it never rose.
         let fed = tl.signals.iter().find(|s| s.name == "fed").unwrap();
         assert_eq!(fed.edges, vec![(0.0, false)]);
+    }
+
+    /// A forced run coil is the belt's level, not just its lane: forced
+    /// high the belt carries the box, forced low it stops it whatever the
+    /// controller writes meanwhile, and the release hands the belt back to
+    /// the controller's last word.
+    #[test]
+    fn a_forced_run_coil_drives_the_belt_and_the_release_hands_it_back() {
+        let scene = feed_cell();
+        let options = RolloutOptions::default();
+        let mut live = scene
+            .open_plant(&["feed"], &options, None, &["PLC1"], false, false, &[])
+            .unwrap();
+        let conv = IoPointId {
+            name: "conv".into(),
+            aspect: None,
+            direction: IoDirection::Output,
+        };
+        let x = |live: &LiveRollout| live.view().obstacle_pose("box").unwrap().translation.x;
+        let run = |live: &mut LiveRollout, ticks: usize| {
+            for _ in 0..ticks {
+                live.tick().unwrap();
+            }
+        };
+        live.tick().unwrap();
+        let x0 = x(&live);
+
+        // Forced high with no controller write: the belt runs.
+        live.force_lane("conv", true).unwrap();
+        run(&mut live, 20);
+        let x1 = x(&live);
+        assert!(
+            x1 - x0 > 0.04,
+            "the forced belt carried the box {:.3} m",
+            x1 - x0
+        );
+        assert_eq!(live.view().signal("conv"), Some(true));
+
+        // Forced low: it stops, and a controller Start meanwhile is held,
+        // not obeyed.
+        live.force_lane("conv", false).unwrap();
+        live.apply("PLC1", vec![(conv.clone(), Value::Bool(true))])
+            .unwrap();
+        run(&mut live, 20);
+        let x2 = x(&live);
+        assert!(x2 - x1 < 0.003, "a belt forced low moved {:.4} m", x2 - x1);
+        assert_eq!(live.view().signal("conv"), Some(false));
+
+        // Released: the controller's Start stands, the belt runs again.
+        live.unforce_lane("conv").unwrap();
+        run(&mut live, 20);
+        assert!(x(&live) - x2 > 0.04);
+        assert_eq!(live.view().signal("conv"), Some(true));
+
+        // Released with nothing commanded while forced: back to the level
+        // the belt had before the force.
+        live.apply("PLC1", vec![(conv.clone(), Value::Bool(false))])
+            .unwrap();
+        live.tick().unwrap();
+        live.force_lane("conv", true).unwrap();
+        run(&mut live, 5);
+        live.unforce_lane("conv").unwrap();
+        live.tick().unwrap();
+        let x3 = x(&live);
+        run(&mut live, 20);
+        assert!(
+            (x(&live) - x3).abs() < 1e-9,
+            "the belt ran on after the release"
+        );
+        assert_eq!(live.view().signal("conv"), Some(false));
     }
 
     /// A solenoid cylinder: `move_to` a stop is its coils, `device_done`

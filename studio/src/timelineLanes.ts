@@ -111,14 +111,19 @@ export function wordPolyline(
   duration: number,
   width = 1000,
   height = 8,
+  /** The scale, when the lane shares it with another trace. */
+  low?: number,
+  high?: number,
 ): string {
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const v of word.values) {
-    if (v < lo) lo = v;
-    if (v > hi) hi = v;
+  let lo = low ?? Infinity;
+  let hi = high ?? -Infinity;
+  if (low === undefined || high === undefined) {
+    for (const v of word.values) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
   }
-  if (!Number.isFinite(lo)) return "";
+  if (!Number.isFinite(lo) || word.values.length === 0) return "";
   const span = hi - lo;
   const y = (v: number) => (span > 0 ? height - 1 - ((v - lo) / span) * (height - 2) : height / 2);
   const x = (t: number) => (duration > 0 ? (t / duration) * width : 0);

@@ -17,11 +17,18 @@ export const xrRig = {
   head: null as THREE.Camera | null,
   stance: null as Stance | null,
   rays: { left: null, right: null } as Record<Hand, THREE.Object3D | null>,
-  /** Each controller's grip space object (`XrHands`) — what grabs the TCP handle. */
+  /** Each controller's grip space object (`XrHands`) — what takes the TCP
+   * handle and the things of the cell (`XrGrab`). */
   grips: { left: null, right: null } as Record<Hand, THREE.Object3D | null>,
   panel: null as THREE.Mesh | null,
   /** The teleport preview of the moment (for the report). */
   teleport: { hand: null as Hand | null, hit: null as number[] | null, valid: false },
+  /** The glide of the moment (for the report): its velocity (world XY,
+   * m/s) and the floor direction the head faces. */
+  glide: { velocity: [0, 0] as number[], heading: null as number[] | null },
+  /** What each hand holds (for the report): an obstacle's name, or the
+   * tree path of a group taken as one. */
+  held: { left: null, right: null } as Record<Hand, string | null>,
 };
 
 export function resetRig(): void {
@@ -31,6 +38,8 @@ export function resetRig(): void {
   xrRig.grips.left = null;
   xrRig.grips.right = null;
   xrRig.teleport = { hand: null, hit: null, valid: false };
+  xrRig.glide = { velocity: [0, 0], heading: null };
+  xrRig.held = { left: null, right: null };
 }
 
 export type HeadPose = { position: THREE.Vector3; quaternion: THREE.Quaternion };

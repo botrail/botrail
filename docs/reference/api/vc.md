@@ -36,6 +36,29 @@ s.word("feed.encoder")                             # … and reads live
 
 ::: botrail.vc
 
+## A machine's log and the monitor
+
+A controller that runs a real machine is read, never written: its I/O log
+replayed, or its image followed through a read-only reader, and compared
+with the model. See [Monitoring](../../guides/monitoring.md).
+
+```python
+log = bt.vc.IoLog.load("line_io.csv", xc)          # columns by address, tag, variable or name
+with bt.vc.monitor(scene, programs, log) as m:     # the log replayed on the model
+    m.run()
+    m.deviations()                                 # where the machine and the model parted
+reader = bt.vc.modbus_reader(xc, "10.0.0.5:502")   # function codes 1-4, nothing else
+with bt.vc.monitor(scene, programs, reader) as m:  # a running PLC, in wall-clock time
+    m.run(for_=600.0)
+    m.log().save("shift.csv")
+```
+
+::: botrail.vc.iolog
+
+::: botrail.vc.monitor
+
+::: botrail.vc.readers
+
 ## Interfaces (`bt.vc.interfaces`)
 
 ::: botrail.vc.interfaces

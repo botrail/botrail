@@ -5,10 +5,10 @@ import { XR } from "@react-three/xr";
 import { useStudioStore } from "../store";
 import { robotRig } from "../three/robotRig";
 import { resetRig } from "./rig";
+import { XrGrab } from "./XrGrab";
 import { XrHands } from "./XrHands";
 import { XrLocomotion } from "./XrLocomotion";
 import { XrOrigin } from "./XrOrigin";
-import { XrTcpGrab } from "./XrTcpGrab";
 import { xrStore } from "./xrStore";
 
 export { enterVr, exitVr, xrStore } from "./xrStore";
@@ -18,8 +18,8 @@ export { enterVr, exitVr, xrStore } from "./xrStore";
  * otherwise renders the children as they are, so the desktop path is the
  * one it always was (no combined pointer, no XR camera in the graph).
  * `xr.supported` is set before the Canvas mounts and never changes.
- * Inside: the origin with the hand-anchored pieces, the locomotion, then
- * the scene itself.
+ * Inside: the origin with the hand-anchored pieces, the locomotion, the
+ * grips, then the scene itself.
  */
 export function XrSession({ children }: { children: ReactNode }) {
   const supported = useStudioStore((s) => s.xr.supported);
@@ -31,7 +31,7 @@ export function XrSession({ children }: { children: ReactNode }) {
         <XrHands />
       </XrOrigin>
       <XrLocomotion />
-      <XrTcpGrab />
+      <XrGrab />
       {children}
     </XR>
   );

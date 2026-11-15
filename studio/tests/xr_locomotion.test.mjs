@@ -3,10 +3,15 @@ import { test } from "node:test";
 import * as THREE from "three";
 import { xrOriginQuaternion } from "three-usd-robot/xr";
 import {
+  FLOOR_HALF,
+  GLIDE,
   SNAP_TURN,
   applyPlacement,
+  floorHeading,
+  glideStep,
   snapTurnPlacement,
   stancePlacement,
+  stickDemand,
   teleportArc,
   teleportPlacement,
   withinFloor,
@@ -120,4 +125,125 @@ test("the launch stance faces the target and a recenter returns to it", () => {
   const back = headWorld(origin, pose);
   close(back.x, 1.5, 1e-9, "back (x)");
   close(back.y, -1.5, 1e-9, "back (y)");
+});
+
+// ------------------------------------------------------------------ glide
+
+/** Runs a glide for `seconds` at `hz`, returning the velocity and the distance covered. */
+function glide(velocity, demand, heading, seconds, hz, from) {
+  let v = velocity;
+  const moved = { x: 0, y: 0 };
+  const at = from ? { ...from } : undefined;
+  const frames = Math.round(seconds * hz);
+  for (let i = 0; i < frames; i++) {
+    const out = glideStep(v, demand, heading, 1 / hz, at);
+    v = out.velocity;
+    moved.x += out.step.x;
+    moved.y += out.step.y;
+    if (at) {
+      at.x += out.step.x;
+      at.y += out.step.y;
+    }
+  }
+  return { velocity: v, moved, at };
+}
+
+test("the stick asks for nothing at rest, creeps on a light push and runs at the rim", () => {
+  assert.deepEqual(stickDemand(0, 0), { x: 0, y: 0 });
+  assert.deepEqual(stickDemand(0.1, -0.1), { x: 0, y: 0 }, "inside the dead zone");
+  assert.deepEqual(stickDemand(Number.NaN, 0.5), { x: 0, y: 0 }, "a broken axis asks for nothing");
+  const full = stickDemand(0, 1);
+  close(full.x, 0, 1e-12, "full forward x");
+  close(full.y, 1, 1e-12, "full forward y");
+  // Half of the live travel is a quarter of the speed.
+  const half = stickDemand(0, GLIDE.deadzone + (1 - GLIDE.deadzone) / 2);
+  close(half.y, 0.25, 1e-12, "squared response");
+  // A square gate's corner is still length 1, in the stick's direction.
+  const corner = stickDemand(-0.9, 0.9);
+  close(Math.hypot(corner.x, corner.y), 1, 1e-12, "capped at 1");
+  close(corner.x, -corner.y, 1e-12, "direction kept");
+  // Just past the dead zone the demand starts from 0, not from a step.
+  assert.ok(Math.hypot(...Object.values(stickDemand(0, GLIDE.deadzone + 0.01))) < 1e-3);
+});
+
+test("the heading is where the head faces on the floor, whatever its pitch", () => {
+  const pose = head();
+  for (const yaw of [0, 0.7, -2.2]) {
+    const origin = teleportPlacement(new THREE.Vector3(1, 2, 0), yaw, pose).quaternion;
+    const gaze = new THREE.Vector3(0, 0, -1).applyQuaternion(origin);
+    const level = floorHeading(origin.clone());
+    close(level.x, gaze.x, 1e-9, `level head, yaw ${yaw} (x)`);
+    close(level.y, gaze.y, 1e-9, `level head, yaw ${yaw} (y)`);
+    close(Math.hypot(level.x, level.y), 1, 1e-12, "unit");
+    // Looking down at a fixture, straight down, up at a gantry, and past
+    // the zenith: the gaze shrinks or flips, the heading does not.
+    for (const pitch of [-1.0, -Math.PI / 2, 1.3, 1.8]) {
+      const tilted = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), pitch);
+      const h = floorHeading(origin.clone().multiply(tilted));
+      close(h.x, level.x, 1e-9, `pitch ${pitch} (x)`);
+      close(h.y, level.y, 1e-9, `pitch ${pitch} (y)`);
+    }
+    // An ear on the shoulder leaves the gaze to decide.
+    const rolled = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+    const r = floorHeading(origin.clone().multiply(rolled));
+    close(r.x, level.x, 1e-9, "rolled (x)");
+    close(r.y, level.y, 1e-9, "rolled (y)");
+  }
+  // Only a pose that is not one has no floor direction.
+  assert.equal(floorHeading(new THREE.Quaternion(Number.NaN, 0, 0, 1)), null);
+});
+
+test("a glide eases up to the stick's speed along the heading, the same at any frame rate", () => {
+  const heading = { x: Math.cos(0.5), y: Math.sin(0.5) };
+  const forward = { x: 0, y: 1 };
+  const a = glide({ x: 0, y: 0 }, forward, heading, 1, 72);
+  const b = glide({ x: 0, y: 0 }, forward, heading, 1, 36);
+  close(Math.hypot(a.velocity.x, a.velocity.y), GLIDE.speed, 1e-3, "full speed after a second");
+  close(a.velocity.x / GLIDE.speed, heading.x, 1e-3, "along the heading (x)");
+  close(a.velocity.y / GLIDE.speed, heading.y, 1e-3, "along the heading (y)");
+  // v(t) = s (1 − e^(−t/τ)) integrates to s (T − τ (1 − e^(−T/τ))).
+  const expected = GLIDE.speed * (1 - GLIDE.ease * (1 - Math.exp(-1 / GLIDE.ease)));
+  close(Math.hypot(a.moved.x, a.moved.y), expected, 1e-9, "distance at 72 Hz");
+  close(Math.hypot(b.moved.x, b.moved.y), expected, 1e-9, "distance at 36 Hz");
+  // The first frame is not a step to full speed.
+  const first = glideStep({ x: 0, y: 0 }, forward, heading, 1 / 72);
+  const v1 = Math.hypot(first.velocity.x, first.velocity.y);
+  assert.ok(v1 > 0 && v1 < 0.2 * GLIDE.speed, `eased start: ${v1}`);
+  // Half the demand is half the speed.
+  const slow = glide({ x: 0, y: 0 }, { x: 0, y: 0.5 }, heading, 1, 72);
+  close(Math.hypot(slow.velocity.x, slow.velocity.y), GLIDE.speed / 2, 1e-3, "analog");
+});
+
+test("the stick's right is the heading's right, back is back, and letting go coasts to a stop", () => {
+  const north = { x: 0, y: 1 };
+  const right = glide({ x: 0, y: 0 }, { x: 1, y: 0 }, north, 1, 72);
+  close(right.velocity.x, GLIDE.speed, 1e-3, "strafe right is +x when facing +y");
+  close(right.velocity.y, 0, 1e-9, "no forward drift");
+  const back = glide({ x: 0, y: 0 }, { x: 0, y: -1 }, north, 1, 72);
+  close(back.velocity.y, -GLIDE.speed, 1e-3, "backwards");
+  const stop = glide(right.velocity, { x: 0, y: 0 }, north, 1, 72);
+  assert.deepEqual(stop.velocity, { x: 0, y: 0 }, "at rest, exactly");
+  // Coasting covers v τ: 0.2 m from full speed.
+  close(stop.moved.x, GLIDE.speed * GLIDE.ease, 2e-3, "stopping distance");
+  // A head without a floor direction asks for nothing either.
+  const lost = glide(right.velocity, { x: 0, y: 1 }, null, 1, 72);
+  assert.deepEqual(lost.velocity, { x: 0, y: 0 });
+});
+
+test("a glide stops at the floor's edge and a hitch is not a jump", () => {
+  const east = { x: 1, y: 0 };
+  const run = glide({ x: 0, y: 0 }, { x: 0.3, y: 1 }, east, 3, 72, { x: FLOOR_HALF - 1, y: 0 });
+  close(run.at.x, FLOOR_HALF, 1e-9, "held at the edge");
+  assert.equal(run.velocity.x, 0, "no speed into the edge");
+  assert.ok(run.at.y < -0.5, `still slides along it: ${run.at.y}`);
+  // Already beyond the edge (a cell bigger than the floor): no farther
+  // out, but free to walk back in.
+  const out = glideStep({ x: 2, y: 0 }, { x: 0, y: 1 }, east, 1 / 72, { x: FLOOR_HALF + 3, y: 0 });
+  assert.equal(out.step.x, 0);
+  const back = glideStep({ x: -2, y: 0 }, { x: 0, y: -1 }, east, 1 / 72, { x: FLOOR_HALF + 3, y: 0 });
+  assert.ok(back.step.x < 0);
+  // A 5 s frame is integrated as the longest step, a broken one as none.
+  const hitch = glideStep({ x: 2, y: 0 }, { x: 0, y: 1 }, east, 5);
+  close(hitch.step.x, GLIDE.speed * GLIDE.maxStep, 1e-9, "capped");
+  assert.deepEqual(glideStep({ x: 2, y: 0 }, { x: 0, y: 1 }, east, Number.NaN).step, { x: 0, y: 0 });
 });

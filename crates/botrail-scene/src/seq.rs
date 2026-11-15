@@ -20,6 +20,265 @@ pub struct SignalDef {
     pub initial: bool,
 }
 
+/// A user-defined internal word (a PLC data register): a number programs
+/// compare ([`Condition::Compare`]) and write ([`Action::SetWord`], a
+/// rung's [`RungOutput::Move`]) — a setpoint, a computed value, a process
+/// quantity a plant-side program integrates (design-plc-resolution.md
+/// PF2). Recorded as a word lane under its own name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordDef {
+    pub name: String,
+    pub initial: f64,
+    /// An `INT` (counts, a selector) rather than a `REAL` measurement:
+    /// every write is rounded to the nearest whole number.
+    pub integer: bool,
+}
+
+/// An analog input: a transmitter on a 4–20 mA loop into an input module.
+/// It measures `source` — a word lane (a defined word, a device's
+/// encoder) — over `range` (engineering units at 4 and 20 mA); the module
+/// converts the current to counts over `raw`; the controller scales the
+/// counts back. Every scan the plant records the counts as the word lane
+/// `<name>.raw` (the value on the wire, an `INT`) and the scaled value a
+/// program reads as the word `<name>` — what the controller computes from
+/// the counts, so the quantisation is in the bake too.
+///
+/// An open wire ([`FaultKind::Open`]) reads 0 mA: the counts fall below
+/// `raw.0`, which is what a wire-break rung compares against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Analog {
+    pub name: String,
+    /// The word lane measured.
+    pub source: String,
+    /// Engineering value at 4 mA and at 20 mA.
+    pub range: (f64, f64),
+    /// The engineering unit (`"kPa"`, `"%"`), for the tables.
+    pub unit: String,
+    /// The input module's counts at 4 mA and at 20 mA (`(0, 4000)`).
+    pub raw: (i64, i64),
+    /// The obstacle that is the transmitter's body, when it has one —
+    /// where the studio hangs the input's tag. Display only.
+    pub place: Option<String>,
+}
+
+/// The current a transmitter sends past its range before it saturates
+/// (NAMUR NE 43's measuring band): 3.8 … 20.5 mA.
+pub const ANALOG_MA: (f64, f64) = (3.8, 20.5);
+
+impl Analog {
+    /// The loop current for an engineering value: linear over the range,
+    /// saturating at [`ANALOG_MA`]. `None` (an open wire) is 0 mA.
+    pub fn current(&self, value: Option<f64>) -> f64 {
+        match value {
+            None => 0.0,
+            Some(x) => {
+                let span = self.range.1 - self.range.0;
+                (4.0 + 16.0 * (x - self.range.0) / span).clamp(ANALOG_MA.0, ANALOG_MA.1)
+            }
+        }
+    }
+
+    /// The module's counts for a loop current.
+    pub fn counts(&self, ma: f64) -> i64 {
+        let span = (self.raw.1 - self.raw.0) as f64;
+        (self.raw.0 as f64 + (ma - 4.0) * span / 16.0).round() as i64
+    }
+
+    /// The engineering value the controller scales the counts back to —
+    /// the same expression, in the same order, the ST export writes.
+    pub fn scaled(&self, counts: i64) -> f64 {
+        self.range.0
+            + (counts - self.raw.0) as f64 * (self.range.1 - self.range.0)
+                / (self.raw.1 - self.raw.0) as f64
+    }
+}
+
+/// One side of a comparison or of a word expression: a word by name, or
+/// a constant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operand {
+    /// A word lane: a defined word, an analog input (`lvl`, or its counts
+    /// `lvl.raw`), a device's `<device>.encoder`, a reader's
+    /// `<sensor>.id`, a counter's `<signal>.count`.
+    Word(String),
+    Const(f64),
+}
+
+/// A number as the tables print it: whole numbers without a fraction.
+pub fn word_text(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x}")
+    }
+}
+
+impl std::fmt::Display for Operand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Operand::Word(name) => write!(f, "{name}"),
+            Operand::Const(x) => write!(f, "{}", word_text(*x)),
+        }
+    }
+}
+
+impl std::fmt::Display for WordExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.op {
+            None => write!(f, "{}", self.left),
+            Some((op, right)) => write!(f, "{} {} {right}", self.left, op.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Ge,
+    Gt,
+    Le,
+    Lt,
+    Eq,
+    Ne,
+}
+
+impl CompareOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompareOp::Ge => ">=",
+            CompareOp::Gt => ">",
+            CompareOp::Le => "<=",
+            CompareOp::Lt => "<",
+            CompareOp::Eq => "==",
+            CompareOp::Ne => "!=",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<CompareOp> {
+        Some(match s {
+            ">=" => CompareOp::Ge,
+            ">" => CompareOp::Gt,
+            "<=" => CompareOp::Le,
+            "<" => CompareOp::Lt,
+            "==" => CompareOp::Eq,
+            "!=" => CompareOp::Ne,
+            _ => return None,
+        })
+    }
+
+    /// The operator as Structured Text spells it.
+    pub fn st(self) -> &'static str {
+        match self {
+            CompareOp::Eq => "=",
+            CompareOp::Ne => "<>",
+            other => other.as_str(),
+        }
+    }
+
+    pub fn holds(self, a: f64, b: f64) -> bool {
+        match self {
+            CompareOp::Ge => a >= b,
+            CompareOp::Gt => a > b,
+            CompareOp::Le => a <= b,
+            CompareOp::Lt => a < b,
+            CompareOp::Eq => a == b,
+            CompareOp::Ne => a != b,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl ArithOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ArithOp> {
+        Some(match s {
+            "+" => ArithOp::Add,
+            "-" => ArithOp::Sub,
+            "*" => ArithOp::Mul,
+            "/" => ArithOp::Div,
+            _ => return None,
+        })
+    }
+}
+
+/// What a word is written with: an operand (a transfer, `MOV`), or one
+/// arithmetic instruction over two (`+ - * /`). No nesting — a longer
+/// formula is a rung per instruction, as on a PLC.
+///
+/// An expression over two whole operands (integer words, whole constants)
+/// is integer arithmetic — the division truncates toward zero, as IEC
+/// `INT / INT` does; any other is `f64` arithmetic. A write to an integer
+/// word rounds to the nearest whole number (halves away from zero).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordExpr {
+    pub left: Operand,
+    pub op: Option<(ArithOp, Operand)>,
+}
+
+impl WordExpr {
+    pub fn constant(value: f64) -> WordExpr {
+        WordExpr {
+            left: Operand::Const(value),
+            op: None,
+        }
+    }
+
+    /// The operands, left then right.
+    pub fn operands(&self) -> impl Iterator<Item = &Operand> {
+        std::iter::once(&self.left).chain(self.op.iter().map(|(_, r)| r))
+    }
+
+    /// The word lanes the expression reads.
+    pub fn words(&self) -> impl Iterator<Item = &str> {
+        self.operands().filter_map(|o| match o {
+            Operand::Word(name) => Some(name.as_str()),
+            Operand::Const(_) => None,
+        })
+    }
+}
+
+/// What a word name turned out to be ([`Scene::word_kind`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WordKind {
+    /// A defined word.
+    Defined { integer: bool },
+    /// An analog input's scaled value.
+    Analog,
+    /// An analog input's counts (`<name>.raw`).
+    AnalogRaw { analog: String },
+    /// A device's encoder (`<device>.encoder`).
+    Encoder { device: String },
+    /// An identification reader's word (`<sensor>.id`).
+    Id { sensor: String },
+    /// A counter's count (`<signal>.count`).
+    Count { signal: String },
+}
+
+impl WordKind {
+    /// Whether the word holds whole numbers (an `INT`).
+    pub fn integer(&self) -> bool {
+        match self {
+            WordKind::Defined { integer } => *integer,
+            WordKind::Analog | WordKind::Encoder { .. } => false,
+            WordKind::AnalogRaw { .. } | WordKind::Id { .. } | WordKind::Count { .. } => true,
+        }
+    }
+}
+
 /// A pseudo-sensor, evaluated geometrically each scan tick and published
 /// as a read-only *input* signal under its own name (PLC input contact).
 #[derive(Debug, Clone)]
@@ -1214,6 +1473,9 @@ pub enum Action {
     Detach { object: String },
     /// Write an internal signal (self-holding relay style).
     Set { signal: String, value: bool },
+    /// Write a word (a transfer, or one arithmetic instruction): a
+    /// setpoint moved in on a step's entry, a rung's `MOV`.
+    SetWord { word: String, value: WordExpr },
     /// Command an auxiliary device (output coil: conveyor start/stop,
     /// axis positioning). Instantaneous state change.
     Device {
@@ -1278,6 +1540,136 @@ pub enum Condition {
     All(Vec<Condition>),
     /// Parallel contacts (OR).
     Any(Vec<Condition>),
+    /// The inverse of a condition (a normally-closed contact over a
+    /// whole network).
+    Not(Box<Condition>),
+    /// A program stands in the named step — the step relay of a step
+    /// ladder, read as a contact (output circuits are written from it).
+    StepActive { sequence: String, step: String },
+    /// A comparison contact over words: `dp >= dp_limit`, `lvl.raw < 0`.
+    Compare {
+        left: Operand,
+        op: CompareOp,
+        right: Operand,
+    },
+}
+
+/// The continuous half of a program: rungs scanned every scan, after the
+/// program's step transitions, top to bottom — and the gates of its step
+/// chain (design-plc-resolution.md PF1). A program is a step chain
+/// ([`Sequence`]), rungs, or both; stored beside the sequence of the same
+/// name.
+///
+/// This is the evaluation of a rung model, not an IEC 61131-3 runtime:
+/// contacts are [`Condition`] trees, outputs are the five of
+/// [`RungOutput`].
+#[derive(Debug, Clone, Default)]
+pub struct Logic {
+    pub name: String,
+    pub rungs: Vec<Rung>,
+    /// The step chain advances only while this holds (a step-mode switch,
+    /// a pause): ANDed onto every transition. `None` = always.
+    pub enable: Option<Condition>,
+    /// While this holds the step chain is put back in — and held in — its
+    /// first step (工程クリア). Moves already started run on.
+    pub reset: Option<Condition>,
+    /// The step chain starts over when it ends, in the same scan — the
+    /// PLCopen export's jump to the first step, in the bake too.
+    pub cycle: bool,
+    /// The program is the equipment, not a controller: what a pump, a
+    /// tank or a machine's own logic does (a pressure that climbs while
+    /// liquid flows). It runs with the plant in every mode — batch, live,
+    /// with the controllers outside — and is left out of the I/O map:
+    /// what it reads and writes is physics, not wiring. A signal it reads
+    /// is then an output of whoever writes it (the pump's contactor), one
+    /// it writes an input of whoever reads it (a flow switch).
+    pub plant: bool,
+}
+
+impl Logic {
+    /// Nothing authored: no rungs and no gate.
+    pub fn is_empty(&self) -> bool {
+        self.rungs.is_empty()
+            && self.enable.is_none()
+            && self.reset.is_none()
+            && !self.cycle
+            && !self.plant
+    }
+}
+
+/// One rung: a contact network and the outputs it drives.
+#[derive(Debug, Clone)]
+pub struct Rung {
+    /// The rung's comment (shown over it; names it in tables).
+    pub comment: String,
+    pub condition: Condition,
+    pub outputs: Vec<RungOutput>,
+}
+
+impl Rung {
+    /// The name a rung goes by in tables: its comment, or `rung k`.
+    pub fn label(&self, index: usize) -> String {
+        if self.comment.trim().is_empty() {
+            format!("rung {}", index + 1)
+        } else {
+            self.comment.clone()
+        }
+    }
+}
+
+/// What a rung drives.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RungOutput {
+    /// `-( )-`: the target follows the rung every scan. The target is an
+    /// internal signal, a belt's or a feeder's run coil (the device's
+    /// name), or a cylinder's solenoid coil (`<axis>/<coil>`).
+    Coil { target: String },
+    /// `-(S)-`: latches the signal on while the rung conducts.
+    Set { signal: String },
+    /// `-(R)-`: latches the signal off while the rung conducts; on a
+    /// counter's signal it also clears the count.
+    Reset { signal: String },
+    /// On-delay timer: the signal comes on once the rung has conducted
+    /// for `seconds`, and drops with it.
+    Ton { signal: String, seconds: f64 },
+    /// Up-counter: counts the rung's rising edges; the signal is on from
+    /// `preset` counts until a `Reset` of it. The count is the word lane
+    /// `<signal>.count`.
+    Ctu { signal: String, preset: u32 },
+    /// A transfer or an arithmetic instruction: while the rung conducts,
+    /// the word is written with the expression every scan (`MOV`, `+`,
+    /// `-`, `*`, `/`). Gate it with an edge contact to run it once.
+    Move { word: String, value: WordExpr },
+}
+
+impl RungOutput {
+    /// The signal or coil this output writes.
+    pub fn target(&self) -> &str {
+        match self {
+            RungOutput::Coil { target } => target,
+            RungOutput::Set { signal }
+            | RungOutput::Reset { signal }
+            | RungOutput::Ton { signal, .. }
+            | RungOutput::Ctu { signal, .. } => signal,
+            RungOutput::Move { word, .. } => word,
+        }
+    }
+}
+
+/// What a coil's target turned out to be.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoilTarget {
+    /// An internal signal.
+    Signal,
+    /// A belt's or a feeder's run coil.
+    Run,
+    /// A solenoid coil of an axis: energised it drives to `stop`; dropped,
+    /// a single-solenoid axis returns to `rest`.
+    AxisCoil {
+        device: String,
+        stop: String,
+        rest: Option<String>,
+    },
 }
 
 /// One arm's track while a sequence is walked for validation: which arm
@@ -1316,6 +1708,18 @@ impl Condition {
         match self {
             Condition::Done => true,
             Condition::All(cs) | Condition::Any(cs) => cs.iter().any(|c| c.mentions_done()),
+            Condition::Not(c) => c.mentions_done(),
+            _ => false,
+        }
+    }
+
+    /// Whether the condition is relative to a step (its moves, its entry
+    /// time) — meaningless on a rung or a gate, which belong to no step.
+    fn step_relative(&self) -> bool {
+        match self {
+            Condition::Done | Condition::Elapsed { .. } => true,
+            Condition::All(cs) | Condition::Any(cs) => cs.iter().any(|c| c.step_relative()),
+            Condition::Not(c) => c.step_relative(),
             _ => false,
         }
     }
@@ -1346,6 +1750,264 @@ impl Scene {
         self.sequences.retain(|s| s.name != name);
         if self.sequences.len() == before {
             return Err(SceneError::UnknownSequence(name.to_string()));
+        }
+        self.logics.retain(|l| l.name != name);
+        Ok(())
+    }
+
+    /// The rungs and gates of every program that has any.
+    pub fn logics(&self) -> &[Logic] {
+        &self.logics
+    }
+
+    /// The rungs and gates of program `name`, when it has any.
+    pub fn logic(&self, name: &str) -> Option<&Logic> {
+        self.logics.iter().find(|l| l.name == name)
+    }
+
+    /// Sets (or, when empty, clears) the rungs and gates of program
+    /// `logic.name`. A program with rungs alone — no step chain — is a
+    /// sequence with no steps; one is made when none exists.
+    pub fn upsert_logic(&mut self, logic: Logic) {
+        self.logics.retain(|l| l.name != logic.name);
+        if logic.is_empty() {
+            return;
+        }
+        // A timer's or a counter's signal is declared by its use (a PLC's
+        // T / C device); coils and latches write relays the cell defines.
+        for output in logic.rungs.iter().flat_map(|r| &r.outputs) {
+            if let RungOutput::Ton { signal, .. } | RungOutput::Ctu { signal, .. } = output {
+                if !self.signals.iter().any(|s| &s.name == signal) {
+                    self.define_signal(signal, false);
+                }
+            }
+        }
+        if self.sequence(&logic.name).is_none() {
+            self.sequences.push(Sequence {
+                name: logic.name.clone(),
+                steps: Vec::new(),
+            });
+        }
+        self.logics.push(logic);
+    }
+
+    /// What a coil's target is: a belt's or feeder's run coil, an axis's
+    /// solenoid coil, or an internal signal.
+    pub fn coil_target(&self, target: &str) -> Result<CoilTarget, String> {
+        if let Some(d) = self.devices.iter().find(|d| d.name == target) {
+            return match d.kind {
+                DeviceKind::Conveyor { .. } | DeviceKind::Source { .. } => Ok(CoilTarget::Run),
+                _ => Err(format!(
+                    "`{target}` has no run coil (a coil drives a conveyor, a source, a cylinder's                      `<axis>/<coil>`, or an internal signal)"
+                )),
+            };
+        }
+        if let Some((device, coil)) = target.rsplit_once('/') {
+            if let Some(DeviceKind::LinearAxis { stops, coils, .. }) = self
+                .devices
+                .iter()
+                .find(|d| d.name == device)
+                .map(|d| &d.kind)
+            {
+                let stop = coils
+                    .iter()
+                    .find(|(c, _)| c == coil)
+                    .map(|(_, s)| s.clone())
+                    .ok_or_else(|| format!("axis `{device}` has no coil `{coil}`"))?;
+                let rest = stops
+                    .iter()
+                    .map(|(s, _)| s)
+                    .find(|s| !coils.iter().any(|(_, t)| &t == s))
+                    .cloned();
+                return Ok(CoilTarget::AxisCoil {
+                    device: device.to_string(),
+                    stop,
+                    rest,
+                });
+            }
+        }
+        if self.signals.iter().any(|s| s.name == target) {
+            return Ok(CoilTarget::Signal);
+        }
+        Err(format!(
+            "unknown coil target `{target}` (define the signal, or name a conveyor, a source or              an axis coil `<axis>/<coil>`)"
+        ))
+    }
+
+    /// A program's rungs as steps, for the walks that ask what a program
+    /// reads and writes (the I/O map, the single-owner rule): each rung a
+    /// step named by its label, its condition as the transition, its
+    /// outputs as the actions they amount to. They follow the program's
+    /// real steps, so rung `k` has flat index `flat steps + k`; the gates
+    /// follow as steps `enable` and `reset`.
+    pub fn rung_steps(&self, name: &str) -> Vec<Step> {
+        let Some(logic) = self.logic(name) else {
+            return Vec::new();
+        };
+        logic
+            .rungs
+            .iter()
+            .enumerate()
+            .map(|(k, rung)| Step {
+                name: rung.label(k),
+                actions: rung
+                    .outputs
+                    .iter()
+                    .filter_map(|o| self.output_action(o, true))
+                    .collect(),
+                transition: rung.condition.clone(),
+                select: Vec::new(),
+            })
+            // The gates read signals too: a step each, after the rungs.
+            .chain(
+                [("enable", &logic.enable), ("reset", &logic.reset)]
+                    .into_iter()
+                    .filter_map(|(name, gate)| {
+                        gate.as_ref().map(|c| Step {
+                            name: name.to_string(),
+                            actions: Vec::new(),
+                            transition: c.clone(),
+                            select: Vec::new(),
+                        })
+                    }),
+            )
+            .collect()
+    }
+
+    /// The action an output fires when it turns `on` (or off): a write of
+    /// its signal, a start / stop of its device, a move of its axis.
+    /// `None` when turning it that way does nothing (a double-solenoid
+    /// coil dropped) or the target does not resolve.
+    pub fn output_action(&self, output: &RungOutput, on: bool) -> Option<Action> {
+        let set = |signal: &String, value: bool| Action::Set {
+            signal: signal.clone(),
+            value,
+        };
+        match output {
+            RungOutput::Set { signal } => Some(set(signal, true)),
+            RungOutput::Reset { signal } => Some(set(signal, false)),
+            RungOutput::Ton { signal, .. } | RungOutput::Ctu { signal, .. } => {
+                Some(set(signal, on))
+            }
+            RungOutput::Move { word, value } => on.then(|| Action::SetWord {
+                word: word.clone(),
+                value: value.clone(),
+            }),
+            RungOutput::Coil { target } => match self.coil_target(target).ok()? {
+                CoilTarget::Signal => Some(set(target, on)),
+                CoilTarget::Run => Some(Action::Device {
+                    device: target.clone(),
+                    command: if on {
+                        DeviceCommand::Start
+                    } else {
+                        DeviceCommand::Stop
+                    },
+                }),
+                CoilTarget::AxisCoil { device, stop, rest } => {
+                    let to = if on { Some(stop) } else { rest };
+                    to.map(|stop| Action::Device {
+                        device,
+                        command: DeviceCommand::MoveToStop(stop),
+                    })
+                }
+            },
+        }
+    }
+
+    /// A program's step chain followed by its rungs as steps
+    /// ([`rung_steps`](Self::rung_steps)) — what the usage walks read.
+    pub fn program_steps(&self, sequence: &Sequence) -> Vec<Step> {
+        let mut steps = sequence.steps.clone();
+        steps.extend(self.rung_steps(&sequence.name));
+        steps
+    }
+
+    /// Authoring-time validation of a program's rungs and gates.
+    fn validate_logic(&self, logic: &Logic) -> Result<(), String> {
+        let gate = |what: &str, c: &Option<Condition>| -> Result<(), String> {
+            let Some(c) = c else { return Ok(()) };
+            if c.step_relative() {
+                return Err(format!(
+                    "{what}: `done` / `elapsed` belong to a step — a gate reads signals"
+                ));
+            }
+            self.validate_condition(c)
+                .map_err(|m| format!("{what}: {m}"))
+        };
+        gate("enable", &logic.enable)?;
+        gate("reset", &logic.reset)?;
+        // One driver per signal: a coil, a timer or a counter owns its
+        // target; SET / RST share theirs with each other (and a counter's
+        // RST with its counter) but not with a coil.
+        let mut driven: Vec<&str> = Vec::new();
+        let mut latched: Vec<&str> = Vec::new();
+        for (k, rung) in logic.rungs.iter().enumerate() {
+            let at = format!("rung {} `{}`", k + 1, rung.label(k));
+            if rung.condition.step_relative() {
+                return Err(format!(
+                    "{at}: `done` / `elapsed` belong to a step — time a rung with a `ton` output                      and read its signal"
+                ));
+            }
+            self.validate_condition(&rung.condition)
+                .map_err(|m| format!("{at}: {m}"))?;
+            if rung.outputs.is_empty() {
+                return Err(format!("{at}: a rung needs an output"));
+            }
+            for output in &rung.outputs {
+                let target = output.target();
+                match output {
+                    RungOutput::Coil { target } => {
+                        self.coil_target(target).map_err(|m| format!("{at}: {m}"))?;
+                    }
+                    RungOutput::Move { word, value } => {
+                        self.validate_word_write(word, value)
+                            .map_err(|m| format!("{at}: {m}"))?;
+                    }
+                    _ => {
+                        if !self.signals.iter().any(|s| s.name == target) {
+                            return Err(format!(
+                                "{at}: unknown signal `{target}` (declare it with define_signal)"
+                            ));
+                        }
+                    }
+                }
+                match output {
+                    RungOutput::Ton { seconds, .. }
+                        if !(seconds.is_finite() && *seconds >= 0.0) =>
+                    {
+                        return Err(format!("{at}: timer seconds must be >= 0, got {seconds}"));
+                    }
+                    RungOutput::Ctu { preset: 0, .. } => {
+                        return Err(format!("{at}: a counter's preset is at least 1"));
+                    }
+                    _ => {}
+                }
+                match output {
+                    RungOutput::Coil { .. } | RungOutput::Ton { .. } | RungOutput::Ctu { .. } => {
+                        if driven.contains(&target) {
+                            return Err(format!(
+                                "{at}: `{target}` is driven by two outputs (a double coil) — one                                  coil, timer or counter per target"
+                            ));
+                        }
+                        driven.push(target);
+                    }
+                    RungOutput::Set { .. } | RungOutput::Reset { .. } => latched.push(target),
+                    // Several rungs may write one register, like SET / RST.
+                    RungOutput::Move { .. } => {}
+                }
+            }
+        }
+        for target in latched {
+            let counter = logic
+                .rungs
+                .iter()
+                .flat_map(|r| &r.outputs)
+                .any(|o| matches!(o, RungOutput::Ctu { signal, .. } if signal == target));
+            if driven.contains(&target) && !counter {
+                return Err(format!(
+                    "`{target}` is both a coil / timer and set or reset — a latched signal is                      written by SET / RST alone"
+                ));
+            }
         }
         Ok(())
     }
@@ -1380,6 +2042,212 @@ impl Scene {
 
     pub fn set_signals(&mut self, signals: Vec<SignalDef>) {
         self.signals = signals;
+    }
+
+    pub fn words(&self) -> &[WordDef] {
+        &self.words
+    }
+
+    /// Declares (or re-initializes) an internal word.
+    pub fn define_word(
+        &mut self,
+        name: &str,
+        initial: f64,
+        integer: bool,
+    ) -> Result<(), SceneError> {
+        if !initial.is_finite() {
+            return Err(SceneError::BadWord(format!(
+                "word `{name}`: the initial value must be finite, got {initial}"
+            )));
+        }
+        if self.signal_readable(name) || self.analogs.iter().any(|a| a.name == name) {
+            return Err(SceneError::BadWord(format!(
+                "`{name}` is already a signal, a sensor or an analog input — a word needs its own name"
+            )));
+        }
+        let initial = if integer { initial.round() } else { initial };
+        match self.words.iter_mut().find(|w| w.name == name) {
+            Some(slot) => {
+                slot.initial = initial;
+                slot.integer = integer;
+            }
+            None => self.words.push(WordDef {
+                name: name.to_string(),
+                initial,
+                integer,
+            }),
+        }
+        Ok(())
+    }
+
+    pub fn remove_word(&mut self, name: &str) -> Result<(), SceneError> {
+        let before = self.words.len();
+        self.words.retain(|w| w.name != name);
+        if self.words.len() == before {
+            return Err(SceneError::UnknownWord(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_words(&mut self, words: Vec<WordDef>) {
+        self.words = words;
+    }
+
+    pub fn analogs(&self) -> &[Analog] {
+        &self.analogs
+    }
+
+    pub fn analog(&self, name: &str) -> Option<&Analog> {
+        self.analogs.iter().find(|a| a.name == name)
+    }
+
+    /// Adds or replaces an analog input (a 4–20 mA transmitter measuring
+    /// a word lane).
+    pub fn upsert_analog(&mut self, analog: Analog) -> Result<(), SceneError> {
+        let bad = |m: String| {
+            Err(SceneError::BadWord(format!(
+                "analog `{}`: {m}",
+                analog.name
+            )))
+        };
+        if self.signal_readable(&analog.name) || self.words.iter().any(|w| w.name == analog.name) {
+            return bad("the name is already a signal, a sensor or a word".into());
+        }
+        let (lo, hi) = analog.range;
+        if !(lo.is_finite() && hi.is_finite()) || lo == hi {
+            return bad(format!(
+                "the range is the engineering value at 4 mA and at 20 mA — two different numbers, got ({lo}, {hi})"
+            ));
+        }
+        if analog.raw.0 == analog.raw.1 {
+            return bad(format!(
+                "the counts at 4 mA and at 20 mA must differ, got ({}, {})",
+                analog.raw.0, analog.raw.1
+            ));
+        }
+        match self.word_kind(&analog.source) {
+            Some(WordKind::Analog) | Some(WordKind::AnalogRaw { .. }) => {
+                return bad(format!(
+                    "`{}` is an analog input itself — a transmitter measures a word or an encoder",
+                    analog.source
+                ));
+            }
+            Some(_) => {}
+            None => {
+                return bad(format!(
+                    "unknown word `{}` to measure (a defined word, `<device>.encoder`)",
+                    analog.source
+                ));
+            }
+        }
+        self.analogs.retain(|a| a.name != analog.name);
+        self.analogs.push(analog);
+        Ok(())
+    }
+
+    pub fn remove_analog(&mut self, name: &str) -> Result<(), SceneError> {
+        let before = self.analogs.len();
+        self.analogs.retain(|a| a.name != name);
+        if self.analogs.len() == before {
+            return Err(SceneError::UnknownWord(name.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn set_analogs(&mut self, analogs: Vec<Analog>) {
+        self.analogs = analogs;
+    }
+
+    /// What word lane `name` is, when it is one a program can read.
+    pub fn word_kind(&self, name: &str) -> Option<WordKind> {
+        if let Some(w) = self.words.iter().find(|w| w.name == name) {
+            return Some(WordKind::Defined { integer: w.integer });
+        }
+        if self.analogs.iter().any(|a| a.name == name) {
+            return Some(WordKind::Analog);
+        }
+        let (head, aspect) = name.rsplit_once('.')?;
+        match aspect {
+            "raw" => self
+                .analogs
+                .iter()
+                .any(|a| a.name == head)
+                .then(|| WordKind::AnalogRaw {
+                    analog: head.to_string(),
+                }),
+            "encoder" => self
+                .devices
+                .iter()
+                .any(|d| {
+                    d.name == head
+                        && matches!(
+                            d.kind,
+                            DeviceKind::LinearAxis { encoder: true, .. }
+                                | DeviceKind::Conveyor { encoder: true, .. }
+                        )
+                })
+                .then(|| WordKind::Encoder {
+                    device: head.to_string(),
+                }),
+            "id" => self
+                .sensors
+                .iter()
+                .any(|s| s.name == head && s.ids.is_some())
+                .then(|| WordKind::Id {
+                    sensor: head.to_string(),
+                }),
+            "count" => self
+                .logics
+                .iter()
+                .flat_map(|l| l.rungs.iter())
+                .flat_map(|r| r.outputs.iter())
+                .any(|o| matches!(o, RungOutput::Ctu { signal, .. } if signal == head))
+                .then(|| WordKind::Count {
+                    signal: head.to_string(),
+                }),
+            _ => None,
+        }
+    }
+
+    /// Whether an expression over these operands is integer arithmetic:
+    /// every operand whole (an integer word, a whole constant).
+    pub fn whole(&self, operand: &Operand) -> bool {
+        match operand {
+            Operand::Const(x) => x.fract() == 0.0,
+            Operand::Word(name) => self.word_kind(name).is_some_and(|k| k.integer()),
+        }
+    }
+
+    fn validate_operand(&self, operand: &Operand) -> Result<(), String> {
+        match operand {
+            Operand::Const(x) if !x.is_finite() => {
+                Err(format!("a constant must be finite, got {x}"))
+            }
+            Operand::Const(_) => Ok(()),
+            Operand::Word(name) => self.word_kind(name).map(|_| ()).ok_or_else(|| {
+                format!(
+                    "unknown word `{name}` (declare it with define_word, add an analog input, or                      name a recorded word: `<device>.encoder`, `<sensor>.id`, `<counter>.count`)"
+                )
+            }),
+        }
+    }
+
+    fn validate_word_write(&self, word: &str, value: &WordExpr) -> Result<(), String> {
+        if !self.words.iter().any(|w| w.name == word) {
+            return Err(match self.word_kind(word) {
+                Some(_) => format!("`{word}` is a measured word — read-only"),
+                None => format!("unknown word `{word}` (declare it with define_word)"),
+            });
+        }
+        value
+            .operands()
+            .try_for_each(|o| self.validate_operand(o))?;
+        if let Some((ArithOp::Div, Operand::Const(d))) = &value.op {
+            if *d == 0.0 {
+                return Err(format!("`{word}`: division by the constant 0"));
+            }
+        }
+        Ok(())
     }
 
     pub fn sensors(&self) -> &[Sensor] {
@@ -2024,6 +2892,22 @@ impl Scene {
                 }
                 continue;
             }
+            // An analog input: its loop opens (0 mA); it has no stuck level.
+            if self.analogs.iter().any(|a| a.name == target) {
+                if fault.kind != FaultKind::Open {
+                    return Err(SceneError::BadScenario(format!(
+                        "scenario `{scenario}`: `{target}` is an analog input — open its loop \
+                         (fault kind `open`); a stuck contact has no meaning on a 4–20 mA signal"
+                    )));
+                }
+                if out.iter().any(|(t, _)| t == target) {
+                    return Err(SceneError::BadScenario(format!(
+                        "scenario `{scenario}`: `{target}` is forced twice"
+                    )));
+                }
+                out.push((target.to_string(), false));
+                continue;
+            }
             let is_sensor = self.sensors.iter().any(|s| s.name == target);
             let is_signal = self.signals.iter().any(|s| s.name == target);
             if !(is_sensor || is_signal) {
@@ -2272,7 +3156,9 @@ impl Scene {
             claim(owners, 0, "robot", r.name.clone(), program)
         };
         for (index, sequence) in sequences.iter().enumerate() {
-            walk_actions(&sequence.steps, &mut |action| -> Result<(), String> {
+            // Rungs own what they drive as steps do.
+            let steps = self.program_steps(sequence);
+            walk_actions(&steps, &mut |action| -> Result<(), String> {
                 match action {
                     Action::StartMotion { motion } => {
                         // Validation has already established the motion
@@ -2319,6 +3205,9 @@ impl Scene {
                     Action::Set { signal, .. } => {
                         claim(&mut owners, 1, "signal", signal.clone(), index)?;
                     }
+                    Action::SetWord { word, .. } => {
+                        claim(&mut owners, 3, "word", word.clone(), index)?;
+                    }
                     Action::Device { device, .. } => {
                         claim(&mut owners, 2, "device", device.clone(), index)?;
                     }
@@ -2357,8 +3246,12 @@ impl Scene {
         &self,
         sequence: &Sequence,
     ) -> Result<(), (Option<usize>, String)> {
-        if sequence.steps.is_empty() {
+        let logic = self.logic(&sequence.name);
+        if sequence.steps.is_empty() && logic.is_none_or(|l| l.rungs.is_empty()) {
             return Err((None, "sequence has no steps".to_string()));
+        }
+        if let Some(logic) = logic {
+            self.validate_logic(logic).map_err(|m| (None, m))?;
         }
         for sensor in &self.sensors {
             if self.signals.iter().any(|s| s.name == sensor.name) {
@@ -3353,6 +4246,7 @@ impl Scene {
                 }
                 Ok(())
             }
+            Action::SetWord { word, value } => self.validate_word_write(word, value),
             Action::Set { signal, .. } => {
                 if !self.signals.iter().any(|s| &s.name == signal) {
                     if self.sensors.iter().any(|s| &s.name == signal) {
@@ -3543,6 +4437,27 @@ impl Scene {
                     return Err("empty condition group".to_string());
                 }
                 cs.iter().try_for_each(|c| self.validate_condition(c))
+            }
+            Condition::Not(c) => self.validate_condition(c),
+            Condition::Compare { left, right, .. } => {
+                self.validate_operand(left)?;
+                self.validate_operand(right)
+            }
+            Condition::StepActive { sequence, step } => {
+                let program = self
+                    .sequence(sequence)
+                    .ok_or_else(|| format!("step_active: unknown sequence `{sequence}`"))?;
+                fn has(steps: &[Step], name: &str) -> bool {
+                    steps
+                        .iter()
+                        .any(|s| s.name == name || s.select.iter().any(|a| has(&a.steps, name)))
+                }
+                if !has(&program.steps, step) {
+                    return Err(format!(
+                        "step_active: sequence `{sequence}` has no step `{step}`"
+                    ));
+                }
+                Ok(())
             }
         }
     }

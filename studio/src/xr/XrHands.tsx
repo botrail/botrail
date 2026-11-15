@@ -10,7 +10,7 @@ import { XrPointerLabel } from "./XrPointerLabel";
  * What hangs on the controllers: the panel on the left grip, the pointer
  * label on the right, and for each hand an object tracking the target
  * ray (the teleport arc is thrown along it) and one tracking the grip
- * (the right one grabs the TCP handle). Explicit `<XRSpace>`s rather
+ * (what takes the TCP handle and the things of the cell). Explicit `<XRSpace>`s rather
  * than the controller models' objects, so they exist before any model
  * loads — or when none can (the profile is fetched from a CDN). Lives
  * under `<XrOrigin>`, where XR spaces are resolved.

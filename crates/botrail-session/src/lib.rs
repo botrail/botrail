@@ -159,7 +159,7 @@ pub trait SessionHost {
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
 /// sequences, sensors, devices, cameras, lidars, scenarios, effects, frames,
-/// toolpaths, io, parts, state. Mesh
+/// scenery joints, toolpaths, io, parts, state. Mesh
 /// visuals are mapped to URLs through the host's
 /// [`mesh_url`](SessionHost::mesh_url). This is the single definition of
 /// the handshake — hosts must not hand-roll it.
@@ -171,7 +171,7 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 
 /// Every scene-content message except `scene_init`, in handshake order:
 /// obstacles, motions, sequences, sensors, devices, cameras, lidars, scenarios,
-/// effects, frames, toolpaths, routes, io, parts, state. Re-sent wholesale after
+/// effects, frames, scenery joints, toolpaths, routes, io, parts, state. Re-sent wholesale after
 /// bulk changes (project load),
 /// where the robot — and therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
@@ -187,6 +187,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::scenarios_message(scene),
             wire::effects_message(scene),
             wire::frames_message(scene),
+            wire::scenery_joints_message(scene),
             wire::toolpaths_message(scene),
             wire::routes_message(scene),
             wire::io_message(scene),
@@ -342,6 +343,11 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
         ClientMessage::UpdatePoses { obstacles, frames } => {
             update_poses(host, obstacles, frames).map_err(|e| format!("rejected update_poses: {e}"))
         }
+        ClientMessage::SetSceneryJoint { name, position } => {
+            set_scenery_joint(host, &name, position)
+                .map(|_| ())
+                .map_err(|e| format!("rejected set_scenery_joint: {e}"))
+        }
         ClientMessage::UpdateObstacleGeometry { name, geometry } => {
             wire::geometry_from_msg(&geometry)
                 .and_then(|geometry| {
@@ -445,7 +451,7 @@ fn dispatch(host: &impl SessionHost, msg: ClientMessage) -> Result<(), String> {
             Ok(())
         }
         ClientMessage::UpsertSequence { sequence } => {
-            upsert_sequence(host, wire::sequence_from_msg(&sequence));
+            upsert_program(host, &sequence);
             Ok(())
         }
         ClientMessage::RemoveSequence { name } => {
@@ -1092,6 +1098,58 @@ pub fn detach_obstacle(host: &impl SessionHost, name: &str) -> Result<(), SceneE
     Ok(())
 }
 
+// -------------------------------------------------------- scenery joints
+
+fn emit_scenery_joints(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::scenery_joints_message(scene));
+    host.emit(&msg);
+}
+
+/// Declares (or replaces) a door, a drawer or a rack and rebroadcasts the
+/// list. `origin` and `axis` are world coordinates as the scene stands.
+#[allow(clippy::too_many_arguments)]
+pub fn add_scenery_joint(
+    host: &impl SessionHost,
+    name: &str,
+    kind: botrail_scene::scenery::SceneryJointKind,
+    objects: Vec<String>,
+    origin: nalgebra::Point3<f64>,
+    axis: nalgebra::Vector3<f64>,
+    range: (f64, f64),
+    position: f64,
+    base: Option<String>,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| {
+        scene.add_scenery_joint(name, kind, objects, origin, axis, range, position, base)
+    })?;
+    emit_scenery_joints(host);
+    Ok(())
+}
+
+pub fn remove_scenery_joint(host: &impl SessionHost, name: &str) -> bool {
+    let removed = host.with_scene(|scene| scene.remove_scenery_joint(name));
+    if removed {
+        emit_scenery_joints(host);
+    }
+    removed
+}
+
+/// Moves a scenery joint (held within its range) and rebroadcasts its
+/// members' poses, the collisions and the joint. Returns where it stands.
+pub fn set_scenery_joint(
+    host: &impl SessionHost,
+    name: &str,
+    position: f64,
+) -> Result<f64, SceneError> {
+    let at = host.with_scene(|scene| scene.set_scenery_joint(name, position))?;
+    emit_obstacles_and_state(host);
+    emit_scenery_joints(host);
+    Ok(at)
+}
+
 // --------------------------------------------------------------- frames
 
 fn emit_frames(host: &impl SessionHost) {
@@ -1301,6 +1359,16 @@ pub fn upsert_sequence(host: &impl SessionHost, sequence: botrail_scene::seq::Se
     emit_sequences(host);
 }
 
+/// Adds or replaces a program from its message: the step chain and its
+/// rungs and gates (a message without logic clears them).
+pub fn upsert_program(host: &impl SessionHost, msg: &wire::SequenceMsg) {
+    host.with_scene(|scene| {
+        scene.upsert_sequence(wire::sequence_from_msg(msg));
+        scene.upsert_logic(wire::logic_from_msg(msg));
+    });
+    emit_sequences(host);
+}
+
 pub fn remove_sequence(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_sequence(name))?;
     emit_sequences(host);
@@ -1315,6 +1383,38 @@ pub fn define_signal(host: &impl SessionHost, name: &str, initial: bool) {
 
 pub fn remove_signal(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
     host.with_scene(|scene| scene.remove_signal(name))?;
+    emit_sequences(host);
+    Ok(())
+}
+
+pub fn define_word(
+    host: &impl SessionHost,
+    name: &str,
+    initial: f64,
+    integer: bool,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.define_word(name, initial, integer))?;
+    emit_sequences(host);
+    Ok(())
+}
+
+pub fn remove_word(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_word(name))?;
+    emit_sequences(host);
+    Ok(())
+}
+
+pub fn upsert_analog(
+    host: &impl SessionHost,
+    analog: botrail_scene::seq::Analog,
+) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.upsert_analog(analog))?;
+    emit_sequences(host);
+    Ok(())
+}
+
+pub fn remove_analog(host: &impl SessionHost, name: &str) -> Result<(), SceneError> {
+    host.with_scene(|scene| scene.remove_analog(name))?;
     emit_sequences(host);
     Ok(())
 }
@@ -2433,6 +2533,7 @@ fn timeline_msg_on(
 
     wire::TimelineMsg {
         route_findings: Vec::new(),
+        readings: timeline.readings.clone(),
         duration: timeline.duration,
         physics: timeline.physics.clone(),
         robots,
@@ -2883,6 +2984,7 @@ mod tests {
                     ServerMessage::PlanResult { .. } => "plan_result",
                     ServerMessage::Motions { .. } => "motions",
                     ServerMessage::Frames { .. } => "frames",
+                    ServerMessage::SceneryJoints { .. } => "scenery_joints",
                     ServerMessage::Routes { .. } => "routes",
                     ServerMessage::RouteCandidates { .. } => "route_candidates",
                     ServerMessage::Toolpaths { .. } => "toolpaths",
@@ -3626,11 +3728,12 @@ mod tests {
         assert!(matches!(msgs[8], ServerMessage::Scenarios { .. }));
         assert!(matches!(msgs[9], ServerMessage::Effects { .. }));
         assert!(matches!(msgs[10], ServerMessage::Frames { .. }));
-        assert!(matches!(msgs[11], ServerMessage::Toolpaths { .. }));
-        assert!(matches!(msgs[12], ServerMessage::Routes { .. }));
-        assert!(matches!(msgs[13], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[14], ServerMessage::Bom { .. }));
-        assert!(matches!(msgs[15], ServerMessage::State { .. }));
+        assert!(matches!(msgs[11], ServerMessage::SceneryJoints { .. }));
+        assert!(matches!(msgs[12], ServerMessage::Toolpaths { .. }));
+        assert!(matches!(msgs[13], ServerMessage::Routes { .. }));
+        assert!(matches!(msgs[14], ServerMessage::Io { .. }));
+        assert!(matches!(msgs[15], ServerMessage::Bom { .. }));
+        assert!(matches!(msgs[16], ServerMessage::State { .. }));
     }
 
     #[test]
@@ -3723,6 +3826,66 @@ mod tests {
         );
         assert_eq!(host.message_types(), ["obstacles", "state"]);
         assert_eq!(host.scene.borrow().obstacles().len(), 1);
+    }
+
+    #[test]
+    fn set_scenery_joint_moves_the_members_and_answers_with_the_joint() {
+        use botrail_scene::scenery::SceneryJointKind;
+        let host = TestHost::new();
+        let cube = Geometry::Box {
+            size: nalgebra::Vector3::new(0.05, 0.05, 0.05),
+        };
+        add_obstacle(&host, "post", cube.clone(), Isometry3::identity()).unwrap();
+        add_obstacle(&host, "leaf", cube, Isometry3::translation(1.0, 0.0, 0.5)).unwrap();
+        add_scenery_joint(
+            &host,
+            "door",
+            SceneryJointKind::Hinge,
+            vec!["leaf".into()],
+            nalgebra::Point3::origin(),
+            nalgebra::Vector3::z(),
+            (0.0, 1.0),
+            0.0,
+            Some("post".into()),
+        )
+        .unwrap();
+        host.out.borrow_mut().clear();
+        // Asked past its stop: it goes as far as it can.
+        handle_client_message(
+            &host,
+            r#"{"type":"set_scenery_joint","name":"door","position":9}"#,
+        );
+        assert_eq!(
+            host.message_types(),
+            ["obstacles", "state", "scenery_joints"]
+        );
+        let leaf = host.with_scene(|s| {
+            s.obstacles()
+                .iter()
+                .find(|o| o.name == "leaf")
+                .unwrap()
+                .pose
+        });
+        assert!(
+            (leaf.translation.vector - nalgebra::Vector3::new(1f64.cos(), 1f64.sin(), 0.5)).norm()
+                < 1e-12
+        );
+        assert_eq!(
+            host.with_scene(|s| s.scenery_joint("door").unwrap().position),
+            1.0
+        );
+        // The handshake carries the joints to a studio that connects later.
+        assert!(initial_messages(&host).iter().any(|m| matches!(
+            m,
+            ServerMessage::SceneryJoints { joints } if joints.len() == 1 && joints[0].position == 1.0
+        )));
+        // An unknown joint moves nothing.
+        host.out.borrow_mut().clear();
+        handle_client_message(
+            &host,
+            r#"{"type":"set_scenery_joint","name":"gate","position":0}"#,
+        );
+        assert!(host.message_types().is_empty());
     }
 
     #[test]

@@ -380,7 +380,7 @@ pub fn action_key(action: &Action) -> Option<String> {
             Some(g) => format!("untrack:{g}"),
             None => "untrack".to_string(),
         },
-        Action::Set { .. } | Action::Device { .. } => return None,
+        Action::Set { .. } | Action::SetWord { .. } | Action::Device { .. } => return None,
     })
 }
 
@@ -436,7 +436,7 @@ pub fn action_robot(
                 ))
             }
         },
-        Action::Set { .. } | Action::Device { .. } => return Ok(None),
+        Action::Set { .. } | Action::SetWord { .. } | Action::Device { .. } => return Ok(None),
     }))
 }
 
@@ -587,6 +587,31 @@ fn initial_value(scene: &Scene, p: &iomap::IoPoint, kind: ValueKind) -> Value {
         }
         // No step yet: the program has not entered its first one.
         (IoSource::Monitor, _) => Value::Int(-1),
+        // An analog input's counts as the plant first reads them.
+        (IoSource::Analog, _) => Value::Int(
+            scene
+                .analog(&p.id.name)
+                .map(|a| {
+                    let measured = scene
+                        .words()
+                        .iter()
+                        .find(|w| w.name == a.source)
+                        .map(|w| w.initial)
+                        .unwrap_or(0.0);
+                    a.counts(a.current(Some(measured)))
+                })
+                .unwrap_or(0),
+        ),
+        // A word's register starts at its declared initial.
+        _ if p.id.aspect.is_none() && kind != ValueKind::Bool => {
+            let initial = scene
+                .words()
+                .iter()
+                .find(|w| w.name == p.id.name)
+                .map(|w| w.initial)
+                .unwrap_or(0.0);
+            Value::Real(initial).coerced(kind)
+        }
         _ if p.id.aspect.is_none() => match kind {
             ValueKind::Bool => Value::Bool(
                 scene
@@ -719,11 +744,20 @@ pub fn derive(
         };
         if scale != 1.0 {
             point.initial = point.to_register(initial);
-            point.note = Some(format!(
-                "INT in {}: {} counts per metre — the controller's targets round to the unit",
-                point.unit.as_deref().unwrap_or(""),
-                fmt_real(scale)
-            ));
+            point.note = Some(if point.id.aspect.is_none() {
+                // A word register: its own unit, at the channel's resolution.
+                format!(
+                    "INT at a resolution of {}: {} counts per unit",
+                    point.unit.as_deref().unwrap_or(""),
+                    fmt_real(scale)
+                )
+            } else {
+                format!(
+                    "INT in {}: {} counts per metre — the controller's targets round to the unit",
+                    point.unit.as_deref().unwrap_or(""),
+                    fmt_real(scale)
+                )
+            });
         }
         points.push(point);
     }
@@ -908,17 +942,40 @@ impl Exchange {
                 out.writes
                     .push((self.input_id(signal, None)?, Value::Bool(*value)));
             }
+            Action::SetWord { word, value } => {
+                if self.point(word, None, PlantSide::Input).is_none()
+                    && self.internal.iter().any(|n| n == word)
+                {
+                    return Ok(Encoding::Direct);
+                }
+                let crate::seq::WordExpr {
+                    left: crate::seq::Operand::Const(x),
+                    op: None,
+                } = value
+                else {
+                    return Err(format!(
+                        "`{word}` := {value}: an expression is evaluated before it crosses"
+                    ));
+                };
+                let id = self.input_id(word, None)?;
+                let value = self.by_id(&id).expect("input").to_register(Value::Real(*x));
+                out.writes.push((id, value));
+            }
             Action::Device { device, command } => {
                 let class = self.devices.get(device);
-                if matches!(class, Some(DeviceClass::Magazine))
-                    || (class.is_none()
-                        && scene.devices().iter().any(|d| {
-                            &d.name == device
-                                && matches!(
-                                    d.kind,
-                                    DeviceKind::Source { .. } | DeviceKind::Sink { .. }
-                                )
-                        }))
+                // A magazine is presentation, not I/O — unless its run coil
+                // was declared a point (an indexing feeder on an output):
+                // then the coil crosses like any other.
+                if self.point(device, None, PlantSide::Input).is_none()
+                    && (matches!(class, Some(DeviceClass::Magazine))
+                        || (class.is_none()
+                            && scene.devices().iter().any(|d| {
+                                &d.name == device
+                                    && matches!(
+                                        d.kind,
+                                        DeviceKind::Source { .. } | DeviceKind::Sink { .. }
+                                    )
+                            })))
                 {
                     return Ok(Encoding::Direct);
                 }
@@ -1313,7 +1370,13 @@ impl Exchange {
             | (IoSource::Declared, None)
             | (IoSource::ReadOnly, None)
             | (IoSource::Internal, None) => {
-                if prev.as_bool() != new.as_bool() {
+                if point.value != ValueKind::Bool {
+                    // A word: the register's value, back in its own unit.
+                    vec![Action::SetWord {
+                        word: name.clone(),
+                        value: crate::seq::WordExpr::constant(point.from_register(new).as_f64()),
+                    }]
+                } else if prev.as_bool() != new.as_bool() {
                     vec![Action::Set {
                         signal: name.clone(),
                         value: new.as_bool(),

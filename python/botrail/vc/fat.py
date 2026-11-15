@@ -783,6 +783,42 @@ class FatReport:
             raise ValueError(f"FatReport.save: unknown format {fmt!r} — use .md, .csv or .json")
         path.write_text(text(), encoding="utf-8")
 
+    def record(
+        self,
+        scene,
+        camera: str,
+        out_dir: Union[str, Path],
+        *,
+        cases: Optional[Iterable[str]] = None,
+        labels: bool = True,
+        fps: int = 30,
+        suffix: str = ".mp4",
+    ) -> dict[str, Path]:
+        """Films each row's run through `camera` — the sheet's evidence as
+        clips, one per case (`cases` narrows them), named after the case in
+        `out_dir`: `{case: path}`. The 3D I/O tags ride in the picture by
+        default (`labels`), so a red row shows which point did what. Rows
+        that never ran (n/a, error) have no clip. Needs what
+        `bt.capture.record_camera` needs (playwright and chromium; ffmpeg
+        for `.mp4` / `.gif`)."""
+        from ..capture import record_camera
+
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        wanted = None if cases is None else set(cases)
+        clips: dict[str, Path] = {}
+        for c in self.cases:
+            if wanted is not None and c.name not in wanted:
+                continue
+            tl = self.timelines.get(c.name)
+            if tl is None:
+                continue
+            scene.show_timeline(tl)
+            clips[c.name] = record_camera(
+                scene, camera, out / f"{_slug(c.name)}{suffix}", fps=fps, labels=labels
+            )
+        return clips
+
     def section(self) -> dict:
         """The sheet as a cell-report section: `scene.cell_report(...,
         sections=[fat.section()])`."""
@@ -796,6 +832,12 @@ class FatReport:
 
 def _md(text: str) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _slug(name: str) -> str:
+    """A case name as a file name: word characters kept, the rest `_`."""
+    out = "".join(ch if ch.isalnum() or ch in "-." else "_" for ch in name.strip())
+    return out.strip("._") or "case"
 
 
 # -------------------------------------------------------------- the runner

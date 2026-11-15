@@ -100,8 +100,9 @@ class ModbusServerLink:
     """botrail as a Modbus TCP server — the virtual remote I/O station the
     controller polls. `exchange` is the host's (`bt.vc.exchange`), `bind`
     the address to listen on (`"127.0.0.1:5020"`; a non-loopback address
-    needs `allow_remote=True` — the plant is for a controller under test,
-    not a plant floor). `iec_base` is the IEC byte / word the controller's
+    needs `allow_remote=True` — the link writes the controller's inputs,
+    so it is for a controller under test; running equipment is read with
+    `bt.vc.modbus_reader`, never written). `iec_base` is the IEC byte / word the controller's
     image starts at (OpenPLC v3 maps a slave device from `%IX100.0`,
     `%QX100.0`, `%IW100`, `%QW100`); points bound outside that image, or
     unbound, are appended in exchange order.
@@ -126,7 +127,8 @@ class ModbusServerLink:
         if host not in ("127.0.0.1", "localhost", "::1") and not allow_remote:
             raise ValueError(
                 f"modbus_server: binding {bind!r} reaches beyond this machine — pass allow_remote=True "
-                "for a controller on the bench (never a plant in production)"
+                "for a controller on the bench. This link writes the controller's inputs: a controller that "
+                "runs a real machine must never dial it (to watch one, read it: bt.vc.modbus_reader)"
             )
         self.xc = exchange
         self.bind = (host, int(port or 502))
@@ -432,7 +434,8 @@ class OpcUaClientLink:
         if host not in ("127.0.0.1", "localhost", "::1", "[::1]") and not allow_remote:
             raise ValueError(
                 f"opcua_client: {url!r} reaches beyond this machine — pass allow_remote=True for a "
-                "controller on the bench (never a plant in production)"
+                "controller on the bench. This link writes the controller's inputs: never point it at a "
+                "controller that runs a real machine (to watch one, read it: bt.vc.opcua_reader)"
             )
         self.xc = exchange
         self.url = url
@@ -666,7 +669,8 @@ class UrRtdeLink:
         if host not in ("127.0.0.1", "localhost", "::1") and not allow_remote:
             raise ValueError(
                 f"ursim: {host!r} reaches beyond this machine — pass allow_remote=True for a controller on the "
-                "bench (never a robot in production: the link moves nothing, but the program it watches does)"
+                "bench. This link writes the controller's input registers: never point it at a robot that "
+                "works a real cell"
             )
         if not (0.0 < frequency <= 500.0):
             raise ValueError(f"ursim: frequency must be within (0, 500] Hz, got {frequency}")

@@ -24,6 +24,15 @@ use nalgebra::Vector3;
 
 mod plant;
 pub use plant::{FaultAnchor, InputRecord};
+#[cfg(test)]
+mod logic_tests;
+mod waits;
+#[cfg(test)]
+mod word_tests;
+pub use waits::{
+    analog_at, condition_label, wait_spans, waiting_at, AnalogReading, WaitExit, WaitLeaf,
+    WaitSpan, Waiting, EDGE_HOLD,
+};
 
 #[derive(Debug, Error)]
 pub enum SeqError {
@@ -953,6 +962,11 @@ pub struct SequenceTimeline {
     pub cloths: Vec<crate::cloth::ClothTrack>,
     /// Simulated after baking in an independent 0.36 world, with no source reaction.
     pub ropes: Vec<crate::rope::RopeTrack>,
+    /// What a controller's own I/O image read over this run — a machine's
+    /// log replayed, or a read-only monitor (`bt.vc.monitor`) — with where
+    /// it parted from the model's lanes. Attached after the run; the
+    /// rollout itself never fills it, and a clip drops it.
+    pub readings: Option<crate::wire::ReadingsMsg>,
 }
 
 /// One resolved selection divergence: which arm `sequence` took at the
@@ -1598,6 +1612,7 @@ impl SequenceTimeline {
                     cut
                 })
                 .collect(),
+            readings: None,
             ropes: self
                 .ropes
                 .iter()
@@ -2344,11 +2359,58 @@ struct Program {
     /// program is still caught on this one's next pass. Seeded from the
     /// first sensor evaluation (startup state is not a transition).
     prev_signals: Vec<bool>,
+    /// The program's rungs and gates, when it has any.
+    logic: Option<crate::seq::Logic>,
+    /// Per rung: its truth last scan, and each output's memory.
+    rungs: Vec<RungState>,
+}
+
+/// One analog input at run time: its definition and its three lanes.
+#[derive(Debug, Clone)]
+struct AnalogRuntime {
+    def: crate::seq::Analog,
+    /// The word lane the transmitter measures.
+    source: usize,
+    /// The scaled value's lane (`<name>`).
+    lane: usize,
+    /// The counts' lane (`<name>.raw`).
+    raw: usize,
+}
+
+/// What a rung remembers between scans.
+#[derive(Debug, Clone, Default)]
+struct RungState {
+    /// The rung's truth on the previous scan (a counter's edge).
+    prev: bool,
+    outputs: Vec<OutputState>,
+}
+
+/// What one output remembers: the level it last wrote (`None` before
+/// its first scan), since when its timer's rung conducts, its count.
+#[derive(Debug, Clone, Default)]
+struct OutputState {
+    last: Option<bool>,
+    since: Option<f64>,
+    count: u32,
+    /// The counter's word lane.
+    word: Option<usize>,
 }
 
 impl Program {
     fn finished(&self) -> bool {
         self.step >= self.flat.len()
+    }
+
+    /// Whether the program's step chain starts over when it ends.
+    fn cycles(&self) -> bool {
+        self.logic.as_ref().is_some_and(|l| l.cycle) && !self.flat.is_empty()
+    }
+
+    /// Whether the bake need not wait for this program: its step chain
+    /// has ended, or never ends by design (it cycles), or it has none —
+    /// rungs scan for as long as something else keeps the bake going.
+    fn over(&self) -> bool {
+        self.finished() || self.cycles()
     }
 }
 
@@ -3690,6 +3752,21 @@ struct Rollout {
     /// order. A pinned lane is seeded with its value and every later
     /// write to it — sensor geometry, a program's `set` — is dropped.
     forced: Vec<(usize, bool)>,
+    /// A forced run lane holds its device (a belt, a feeder) the way a
+    /// PLC force pins a coil: the device runs at the forced level, and a
+    /// `Start` / `Stop` that arrives meanwhile is not obeyed but kept
+    /// here — `(lane, commanded)` — so releasing the force hands the
+    /// device back to whatever the program or the controller last asked.
+    held_runs: Vec<(usize, bool)>,
+    /// The analog inputs, in scene order: the lane measured, the scaled
+    /// lane and the counts lane.
+    analogs: Vec<AnalogRuntime>,
+    /// Word lanes pinned to a value (a PLC force on a register):
+    /// `(lane, value)`. Writes are dropped; on an analog input's scaled
+    /// lane the value stands in for what the transmitter measures.
+    forced_words: Vec<(usize, f64)>,
+    /// Analog inputs whose loop is open (0 mA), by index in `analogs`.
+    open_analogs: Vec<usize>,
 
     /// The vehicles that moved this tick, each with what it carries (body
     /// and load) — what its riding robots are checked against the rest of
@@ -5497,11 +5574,95 @@ impl Rollout {
         for (lane, value) in &forced {
             signals[*lane].edges = vec![(0.0, *value)];
         }
+        // Rungs: each program's logic, with a word lane per counter.
+        let logics: Vec<(Option<crate::seq::Logic>, Vec<RungState>)> = sequences
+            .iter()
+            .map(|sequence| {
+                let logic = world.logic(&sequence.name).cloned();
+                let rungs = logic
+                    .as_ref()
+                    .map(|l| {
+                        l.rungs
+                            .iter()
+                            .map(|rung| RungState {
+                                prev: false,
+                                outputs: rung
+                                    .outputs
+                                    .iter()
+                                    .map(|o| OutputState {
+                                        word: match o {
+                                            crate::seq::RungOutput::Ctu { signal, .. } => {
+                                                words.push(WordTrack {
+                                                    name: format!("{signal}.count"),
+                                                    samples: vec![(0.0, 0.0)],
+                                                    kind: LaneKind::Signal,
+                                                    integer: true,
+                                                });
+                                                Some(words.len() - 1)
+                                            }
+                                            _ => None,
+                                        },
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (logic, rungs)
+            })
+            .collect();
+        // Defined words, then the analog inputs measuring them (or an
+        // encoder, a count): a scaled lane and a counts lane each.
+        for word in world.words() {
+            words.push(WordTrack {
+                name: word.name.clone(),
+                samples: vec![(0.0, word.initial)],
+                kind: LaneKind::Signal,
+                integer: word.integer,
+            });
+        }
+        let mut analogs: Vec<AnalogRuntime> = Vec::new();
+        for def in world.analogs() {
+            let Some(source) = words.iter().position(|w| w.name == def.source) else {
+                continue;
+            };
+            // (A scenario's open wire reads 0 mA from the start.)
+            let open = world.forced_inputs().iter().any(|(n, _)| n == &def.name);
+            let measured = words[source].samples[0].1;
+            let counts = def.counts(def.current((!open).then_some(measured)));
+            let lane = words.len();
+            words.push(WordTrack {
+                name: def.name.clone(),
+                samples: vec![(0.0, def.scaled(counts))],
+                kind: LaneKind::Sensor,
+                integer: false,
+            });
+            words.push(WordTrack {
+                name: format!("{}.raw", def.name),
+                samples: vec![(0.0, counts as f64)],
+                kind: LaneKind::Sensor,
+                integer: true,
+            });
+            analogs.push(AnalogRuntime {
+                def: def.clone(),
+                source,
+                lane,
+                raw: lane + 1,
+            });
+        }
+        // A scenario's open wire on an analog input: 0 mA from t = 0.
+        let open_analogs: Vec<usize> = world
+            .forced_inputs()
+            .iter()
+            .filter_map(|(name, _)| analogs.iter().position(|a| &a.def.name == name))
+            .collect();
         Rollout {
             world,
             programs: sequences
                 .into_iter()
-                .map(|sequence| Program {
+                .zip(logics)
+                .map(|(sequence, (logic, rungs))| Program {
                     flat: flatten(&sequence.steps),
                     sequence,
                     step: 0,
@@ -5512,6 +5673,8 @@ impl Rollout {
                     // be read as owning span 0.
                     open_span: usize::MAX,
                     prev_signals: Vec::new(),
+                    logic,
+                    rungs,
                 })
                 .collect(),
             current: 0,
@@ -5522,6 +5685,10 @@ impl Rollout {
             devices,
             words,
             forced,
+            held_runs: Vec::new(),
+            analogs,
+            forced_words: Vec::new(),
+            open_analogs,
             moving: Vec::new(),
             crouching: Vec::new(),
             physics: backend.map(|backend| PhysicsRuntime {
@@ -5591,7 +5758,7 @@ impl Rollout {
     }
 
     fn finished(&self) -> bool {
-        self.programs.iter().all(Program::finished)
+        self.programs.iter().all(Program::over)
             && self.hold_until.is_none_or(|until| self.t + 1e-9 >= until)
             && self.settled()
     }
@@ -5636,6 +5803,23 @@ impl Rollout {
     }
 
     fn run(mut self) -> Result<SequenceTimeline, SeqError> {
+        // A bake ends when its step chains end. Rungs and cycling chains
+        // never do: something that ends has to bake beside them.
+        if !self.programs.is_empty()
+            && self.hold_until.is_none()
+            && self
+                .programs
+                .iter()
+                .all(|p| p.flat.is_empty() || p.cycles())
+        {
+            return Err(SeqError::Validation {
+                step: None,
+                message: "nothing ends this bake: every program is rungs or a cycling step chain \
+                          — bake them beside a program that ends (an operator's script), or run \
+                          the cell live (bt.vc)"
+                    .to_string(),
+            });
+        }
         self.start()?;
         while !self.finished() {
             self.tick()?;
@@ -5681,12 +5865,14 @@ impl Rollout {
                 self.plant_apply_pending(p)?;
                 continue;
             }
-            self.enter_step()?;
+            if !self.programs[p].flat.is_empty() {
+                self.enter_step()?;
+            }
         }
         for p in 0..self.programs.len() {
             self.current = p;
             if !self.plant_skips_scan(p) {
-                self.advance_through_ready_steps()?;
+                self.scan_program()?;
             }
             self.close_scan(p);
         }
@@ -5733,6 +5919,7 @@ impl Rollout {
             });
         }
         self.update_sensors();
+        self.scan_analogs();
         self.plant_after_sensors()?;
         for p in 0..self.programs.len() {
             self.current = p;
@@ -5743,13 +5930,13 @@ impl Rollout {
                 self.close_scan(p);
                 continue;
             }
-            self.advance_through_ready_steps()?;
+            self.scan_program()?;
             self.close_scan(p);
         }
         self.plant_end_scan()?;
         if self.settle_from.is_none()
             && !self.programs.is_empty()
-            && self.programs.iter().all(Program::finished)
+            && self.programs.iter().all(Program::over)
         {
             self.settle_from = Some(self.t);
         }
@@ -10057,13 +10244,96 @@ impl Rollout {
     }
 
     /// Records a sample on a word lane when the value changes; a second
-    /// write in the same instant replaces the first.
+    /// write in the same instant replaces the first. A forced lane keeps
+    /// its value: the write is dropped.
     fn set_word(&mut self, lane: usize, t: f64, value: f64) {
+        if self.forced_words.iter().any(|(l, _)| *l == lane) {
+            return;
+        }
+        self.put_word(lane, t, value);
+    }
+
+    fn put_word(&mut self, lane: usize, t: f64, value: f64) {
         let track = &mut self.words[lane];
         match track.samples.last_mut() {
             Some((at, v)) if (*at - t).abs() < 1e-12 => *v = value,
             Some((_, v)) if *v == value => {}
             _ => track.samples.push((t, value)),
+        }
+    }
+
+    fn word_index(&self, name: &str) -> Option<usize> {
+        self.words.iter().position(|w| w.name == name)
+    }
+
+    fn word_now(&self, lane: usize) -> f64 {
+        self.words[lane].samples.last().map(|s| s.1).unwrap_or(0.0)
+    }
+
+    fn operand_value(&self, operand: &crate::seq::Operand) -> f64 {
+        match operand {
+            crate::seq::Operand::Const(x) => *x,
+            crate::seq::Operand::Word(name) => self
+                .word_index(name)
+                .map(|l| self.word_now(l))
+                .unwrap_or(0.0),
+        }
+    }
+
+    /// The value of a word expression as the world stands: integer
+    /// arithmetic (a truncating division) over two whole operands, `f64`
+    /// otherwise.
+    pub(crate) fn word_expr(&self, expr: &crate::seq::WordExpr) -> Result<f64, String> {
+        use crate::seq::ArithOp;
+        let left = self.operand_value(&expr.left);
+        let Some((op, right_operand)) = &expr.op else {
+            return Ok(left);
+        };
+        let right = self.operand_value(right_operand);
+        let whole = self.world.whole(&expr.left) && self.world.whole(right_operand);
+        Ok(match op {
+            ArithOp::Add => left + right,
+            ArithOp::Sub => left - right,
+            ArithOp::Mul => left * right,
+            ArithOp::Div => {
+                if right == 0.0 {
+                    return Err(format!("`{expr}` divides by zero ({right_operand} = 0)"));
+                }
+                if whole {
+                    (left / right).trunc()
+                } else {
+                    left / right
+                }
+            }
+        })
+    }
+
+    /// The analog inputs' chain, once per scan after the sensors: what
+    /// the transmitter measures → the loop current → the module's counts
+    /// → the value the controller scales them back to.
+    fn scan_analogs(&mut self) {
+        let t = self.t;
+        for k in 0..self.analogs.len() {
+            let (lane, raw, source) = {
+                let a = &self.analogs[k];
+                (a.lane, a.raw, a.source)
+            };
+            let measured = if self.open_analogs.contains(&k) {
+                None
+            } else {
+                Some(
+                    self.forced_words
+                        .iter()
+                        .find(|(l, _)| *l == lane)
+                        .map(|(_, v)| *v)
+                        .unwrap_or_else(|| self.word_now(source)),
+                )
+            };
+            let def = &self.analogs[k].def;
+            let counts = def.counts(def.current(measured));
+            let scaled = def.scaled(counts);
+            self.put_word(raw, t, counts as f64);
+            self.put_word(lane, t, scaled);
         }
     }
 
@@ -10206,6 +10476,147 @@ impl Rollout {
         self.programs[program].prev_signals = snapshot;
     }
 
+    /// One scan of the current program: its gates, its step transitions,
+    /// then its rungs, top to bottom.
+    fn scan_program(&mut self) -> Result<(), SeqError> {
+        let (reset, enable) = match &self.programs[self.current].logic {
+            Some(l) => (l.reset.clone(), l.enable.clone()),
+            None => (None, None),
+        };
+        if reset.is_some_and(|c| self.condition_holds(&c)) {
+            // Back to — and held in — the first step.
+            let p = &self.programs[self.current];
+            if !p.flat.is_empty() && p.step != 0 {
+                if !p.finished() {
+                    self.exit_step();
+                }
+                self.programs[self.current].step = 0;
+                self.enter_step()?;
+            }
+        } else if enable.is_none_or(|c| self.condition_holds(&c)) {
+            self.advance_through_ready_steps()?;
+        }
+        self.scan_rungs()
+    }
+
+    /// Evaluates the current program's rungs in order and writes their
+    /// outputs: a coil follows its rung, SET / RST latch while it
+    /// conducts, a timer's signal comes on after its delay, a counter's
+    /// at its preset. Every write is the action a step would fire
+    /// (`Set`, a device command), so a rung's coil crosses an exchange
+    /// exactly as a step's does.
+    fn scan_rungs(&mut self) -> Result<(), SeqError> {
+        use crate::seq::RungOutput;
+        let p = self.current;
+        let Some(logic) = self.programs[p].logic.take() else {
+            return Ok(());
+        };
+        let loopback = self.plant_loopback_program(p);
+        let mut result = Ok(());
+        'rungs: for (k, rung) in logic.rungs.iter().enumerate() {
+            let truth = self.condition_holds(&rung.condition);
+            let rose = truth && !self.programs[p].rungs[k].prev;
+            self.programs[p].rungs[k].prev = truth;
+            for (j, output) in rung.outputs.iter().enumerate() {
+                let mut state = self.programs[p].rungs[k].outputs[j].clone();
+                let lane = |me: &Self, name: &str| me.lane_index(name).map(|l| me.lane_value(l));
+                // The level to write, when this scan writes one.
+                let write: Option<bool> = match output {
+                    RungOutput::Coil { .. } => (state.last != Some(truth)).then_some(truth),
+                    RungOutput::Set { signal } => {
+                        (truth && lane(self, signal) != Some(true)).then_some(true)
+                    }
+                    RungOutput::Reset { signal } => {
+                        if truth {
+                            // A counter's RST clears its count.
+                            for (rk, r) in logic.rungs.iter().enumerate() {
+                                for (oj, o) in r.outputs.iter().enumerate() {
+                                    if matches!(o, RungOutput::Ctu { signal: c, .. } if c == signal)
+                                    {
+                                        let counter = &mut self.programs[p].rungs[rk].outputs[oj];
+                                        counter.count = 0;
+                                        counter.last = Some(false);
+                                        let word = counter.word;
+                                        if let Some(word) = word {
+                                            let t = self.t;
+                                            self.set_word(word, t, 0.0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        (truth && lane(self, signal) != Some(false)).then_some(false)
+                    }
+                    RungOutput::Ton { seconds, .. } => {
+                        let q = if truth {
+                            let since = *state.since.get_or_insert(self.t);
+                            self.t - since >= seconds - 1e-9
+                        } else {
+                            state.since = None;
+                            false
+                        };
+                        (state.last != Some(q)).then_some(q)
+                    }
+                    // A transfer runs every scan the rung conducts.
+                    RungOutput::Move { .. } => truth.then_some(true),
+                    RungOutput::Ctu { preset, .. } => {
+                        if rose {
+                            state.count += 1;
+                            if let Some(word) = state.word {
+                                let t = self.t;
+                                self.set_word(word, t, state.count as f64);
+                            }
+                        }
+                        let q = state.count >= *preset;
+                        (state.last != Some(q)).then_some(q)
+                    }
+                };
+                if let Some(on) = write {
+                    if !matches!(
+                        output,
+                        RungOutput::Set { .. } | RungOutput::Reset { .. } | RungOutput::Move { .. }
+                    ) {
+                        state.last = Some(on);
+                    }
+                }
+                // (a counter's RST above may have touched this very slot)
+                let slot = &mut self.programs[p].rungs[k].outputs[j];
+                slot.last = state.last;
+                slot.since = state.since;
+                if matches!(output, RungOutput::Ctu { .. }) {
+                    slot.count = state.count;
+                }
+                let Some(on) = write else { continue };
+                // A coil's first scan with nothing to drop writes nothing.
+                let Some(action) = self.world.output_action(output, on) else {
+                    continue;
+                };
+                let fired = if loopback {
+                    self.fire_through_exchange(&action)
+                } else {
+                    self.fire(&action)
+                };
+                if let Err(e) = fired {
+                    result = Err(match e {
+                        SeqError::Action { message, .. } => SeqError::Validation {
+                            step: None,
+                            message: format!(
+                                "program `{}`, rung {} `{}`: {message}",
+                                logic.name,
+                                k + 1,
+                                rung.label(k)
+                            ),
+                        },
+                        other => other,
+                    });
+                    break 'rungs;
+                }
+            }
+        }
+        self.programs[p].logic = Some(logic);
+        result
+    }
+
     /// Fires transitions that hold at the current time for the current
     /// program, chaining through instantaneous steps (bounded per tick).
     /// A step's exits are tried in authored order (SFC's left-to-right
@@ -10234,7 +10645,7 @@ impl Rollout {
                 });
             }
             self.exit_step();
-            let cycles = self.plant_cycles();
+            let cycles = self.plant_cycles() || self.programs[self.current].cycles();
             let p = &mut self.programs[self.current];
             p.step = target;
             if p.finished() {
@@ -10337,6 +10748,17 @@ impl Rollout {
             }),
             Condition::All(cs) => cs.iter().all(|c| self.condition_holds(c)),
             Condition::Any(cs) => cs.iter().any(|c| self.condition_holds(c)),
+            Condition::Not(c) => !self.condition_holds(c),
+            Condition::Compare { left, op, right } => {
+                op.holds(self.operand_value(left), self.operand_value(right))
+            }
+            // The step relay: the program stands in a step of that name
+            // (entered — a program not yet started stands nowhere).
+            Condition::StepActive { sequence, step } => self.programs.iter().any(|p| {
+                &p.sequence.name == sequence
+                    && p.open_span != usize::MAX
+                    && p.flat.get(p.step).is_some_and(|s| &s.name == step)
+            }),
         }
     }
 
@@ -11193,6 +11615,17 @@ impl Rollout {
                     self.grasp_follow(lane)?;
                 }
             }
+            Action::SetWord { word, value } => {
+                let t = self.t;
+                let lane = self
+                    .word_index(word)
+                    .ok_or_else(|| err(format!("unknown word `{word}`")))?;
+                let mut v = self.word_expr(value).map_err(&err)?;
+                if self.words[lane].integer {
+                    v = v.round();
+                }
+                self.set_word(lane, t, v);
+            }
             Action::Device { device, command } => {
                 // A walk starts from the stance: a crouched rider is stood
                 // up first, by the program, not quietly by the dispatch.
@@ -11210,6 +11643,10 @@ impl Rollout {
                 }
                 let t = self.t;
                 let mut lane_update = None;
+                // A run lane under a force: the command is kept for when the
+                // force is released, not obeyed (a forced coil stays put).
+                let forced_lanes: Vec<usize> = self.forced.iter().map(|(l, _)| *l).collect();
+                let mut held_run: Option<(usize, bool)> = None;
                 // A vehicle dispatched this scan: its drive, closed form,
                 // for the legs of whatever rides it.
                 let mut dispatched: Option<(nalgebra::Point3<f64>, f64)> = None;
@@ -11249,6 +11686,12 @@ impl Rollout {
                     return Err(err(format!("unknown device `{device}`")));
                 };
                 match (found, command) {
+                    (
+                        DeviceRuntime::Conveyor { lane, .. } | DeviceRuntime::Source { lane, .. },
+                        DeviceCommand::Start | DeviceCommand::Stop,
+                    ) if forced_lanes.contains(lane) => {
+                        held_run = Some((*lane, matches!(command, DeviceCommand::Start)));
+                    }
                     (DeviceRuntime::Conveyor { running, lane, .. }, DeviceCommand::Start) => {
                         *running = true;
                         lane_update = Some((*lane, true));
@@ -11478,6 +11921,10 @@ impl Rollout {
                 }
                 if let Some((lane, value)) = lane_update {
                     self.set_lane(lane, t, value);
+                }
+                if let Some((lane, commanded)) = held_run {
+                    self.held_runs.retain(|(l, _)| *l != lane);
+                    self.held_runs.push((lane, commanded));
                 }
                 if let Some((position, heading)) = dispatched {
                     // The riders' gear decides how the route is taken —
@@ -11822,6 +12269,7 @@ impl Rollout {
             grasps,
             cloths: Vec::new(),
             ropes: Vec::new(),
+            readings: None,
             contacts: self
                 .physics
                 .as_ref()

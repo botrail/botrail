@@ -5,4 +5,4 @@
  * force, a push button, a breakpoint, the recording. Queued for the
  * session's loop, which applies it before its next scan.
  */
-export type PlantCommandMsg = { "command": "pause" } | { "command": "resume" } | { "command": "step", n: number, } | { "command": "speed", speed: number, } | { "command": "force", lane: string, value: boolean, } | { "command": "unforce", lane: string, } | { "command": "press", lane: string, hold_s?: number | null, } | { "command": "break", lane: string, rising: boolean, on: boolean, } | { "command": "record", on: boolean, } | { "command": "follow" };
+export type PlantCommandMsg = { "command": "pause" } | { "command": "resume" } | { "command": "step", n: number, } | { "command": "speed", speed: number, } | { "command": "force", lane: string, value: boolean, } | { "command": "unforce", lane: string, } | { "command": "force_word", lane: string, value: number, } | { "command": "write", word: string, value: number, } | { "command": "press", lane: string, hold_s?: number | null, } | { "command": "break", lane: string, rising: boolean, on: boolean, } | { "command": "record", on: boolean, } | { "command": "follow" };

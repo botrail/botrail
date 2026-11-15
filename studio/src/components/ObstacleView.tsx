@@ -3,6 +3,7 @@ import { Edges, TransformControls } from "@react-three/drei";
 import { useThree, type ThreeEvent } from "@react-three/fiber";
 import * as THREE from "three";
 
+import { inGroup } from "../partIdentity";
 import { playbackRig } from "../playbackRig";
 import type { GeometryMsg, MaterialMsg, ObstacleMsg, PoseMsg } from "../protocol";
 import { collidingObstacleNames, useStudioStore } from "../store";
@@ -24,13 +25,6 @@ const SELECT_EDGE_COLOR = "#cdd4df";
  * scene file authored none. */
 function obstacleColor(obstacle: ObstacleMsg): THREE.Color | null {
   return obstacle.color ? authoredColor(obstacle.color) : null;
-}
-
-/** Names under an imported subtree — `/World/Pedestal` owns everything
- * below it, but not a sibling that merely shares the prefix
- * (`/World/PedestalFar`). */
-export function inGroup(name: string, path: string): boolean {
-  return name.startsWith(`${path}/`);
 }
 
 /** Draws every obstacle, handles click-to-select, and drives the move gizmo. */

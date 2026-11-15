@@ -69,6 +69,7 @@ pub fn scene_and_pass() -> (Scene, SequenceTimeline, RopePass) {
         contacts: vec![],
         cloths: vec![],
         ropes: vec![],
+        readings: None,
     };
     let pass = RopePass {
         ground_z: None,

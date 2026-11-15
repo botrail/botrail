@@ -519,6 +519,101 @@ def main() -> None:
             thread.join(timeout=120)
             server.stop()
 
+        if want("tags"):
+            # ---- the 3D I/O tags: the OpenPLC pick cell's reference run held
+            # while the program waits for its part — the tags on the cell, the
+            # beam in focus (table row, lane, tag), the dock's waiting line ----
+            import run_demo as openplc_demo
+
+            scene = openplc_demo.build()
+            tl = openplc_demo.reference(scene)
+            arrival = tl.step_span("arrival")
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(2.0)
+            scene.show_timeline(tl)
+            page.wait_for_selector(".timeline-bands", timeout=60000)
+            page.evaluate(
+                "(t) => { const s = window.__STUDIO__.getState(); s.setPlaying(false); s.seek(t);"
+                " s.setIoTags('on'); s.setHighlightLane('part_at_pick'); }",
+                arrival.start + 0.6 * (arrival.end - arrival.start),
+            )
+            page.evaluate("window.__CAM = {pos: [1.9, -2.2, 2.0], look: [-0.45, 0.2, 0.95]}")
+            page.mouse.move(VIEWPORT["width"] - 20, 300)  # off the canvas: no hover chip
+            time.sleep(3.0)
+            page.screenshot(path=OUT / "io_tags.png")
+            print("wrote io_tags.png")
+            server.stop()
+
+        if want("words"):
+            # ---- words and an analog loop: the filter unit a moment after
+            # its first warning — the ladder's comparisons with their values,
+            # the transmitter's tag reading its loop ---------------------------
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "filter_unit_demo", ROOT / "examples" / "commissioning" / "filter_unit" / "run_demo.py")
+            filter_demo = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(filter_demo)
+            scene = filter_demo.build()
+            tl = filter_demo.bake(scene)
+            warned = tl.signal("warn").rising_edges()[0]
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(2.0)
+            scene.show_timeline(tl)
+            page.wait_for_selector(".timeline-bands", timeout=60000)
+            page.evaluate(
+                "(t) => { const s = window.__STUDIO__.getState(); s.setPlaying(false); s.seek(t);"
+                " s.setIoTags('on'); s.setLdOpen(true); }",
+                warned + 0.8,
+            )
+            page.evaluate("window.__CAM = {pos: [2.9, -3.4, 1.7], look: [0.3, -0.45, 0.3]}")
+            page.mouse.move(VIEWPORT["width"] - 20, 300)  # off the canvas: no hover chip
+            time.sleep(3.0)
+            page.screenshot(path=OUT / "words.png")
+            print("wrote words.png")
+            page.evaluate("() => window.__STUDIO__.getState().setLdOpen(false)")
+            server.stop()
+
+        if want("monitor"):
+            # ---- a machine's I/O log replayed: the ladder line's log with
+            # one sensor's column half a second late — the readings as thin
+            # traces under the model's lanes, the red bands where they part,
+            # the tag that reads what the PLC read -----------------------------
+            import importlib.util
+
+            folder = ROOT / "examples" / "commissioning" / "monitor_line"
+            spec = importlib.util.spec_from_file_location("monitor_line_demo", folder / "run_demo.py")
+            monitor_demo = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(monitor_demo)
+            scene = monitor_demo.line.build()
+            log, _ = monitor_demo.record(scene)
+            xc = bt.vc.exchange(scene, "PLC1", monitor_demo.line.PLC_PROGRAMS)
+            late = bt.vc.IoLog.from_csv(log.to_csv(), xc, source="log line_io.csv").delayed("s2", 0.5)
+            tl, deviations, _ = monitor_demo.replay(scene, late)
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(2.0)
+            scene.show_timeline(tl)
+            page.wait_for_selector(".timeline-bands", timeout=60000)
+            page.evaluate(
+                "(t) => { const s = window.__STUDIO__.getState(); s.setPlaying(false); s.seek(t);"
+                " s.setIoTags('on'); s.setHighlightLane('s2'); }",
+                deviations[0].start + 0.25,
+            )
+            # The relays fold away: the sensors' lanes carry the readings.
+            page.locator("button[title=\"fold the signals lanes\"]").click()
+            page.evaluate("window.__CAM = {pos: [1.1, -1.5, 1.75], look: [0.15, 0.0, 0.8]}")
+            page.mouse.move(VIEWPORT["width"] - 20, 300)
+            time.sleep(3.0)
+            page.screenshot(path=OUT / "monitor_replay.png")
+            print("wrote monitor_replay.png")
+            server.stop()
+
         # ---- 7. the topology: the weld line in its three placements —
         # nothing declared, a PLC master with declared cabinets, and the
         # stations running their own programs (design-electrical.md demo 2)

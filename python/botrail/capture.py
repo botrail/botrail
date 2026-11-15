@@ -56,6 +56,7 @@ def record_camera(
     *,
     fps: int = 30,
     depth: bool | str | Path = False,
+    labels: bool = False,
     timeout: float = 600.0,
 ) -> Path:
     """Records ``camera``'s view of the scene's baked cycle into ``out``.
@@ -73,6 +74,11 @@ def record_camera(
     ``camera``. Pass a path for the ``.npz``, or ``True`` to put it next
     to the video as ``<stem>_depth.npz``. Lossy video codecs never touch
     these values — the stream leaves the browser as raw float32.
+
+    ``labels=True`` films the studio's 3D I/O tags into the picture — each
+    bound point's address and name on its sensor, device, lamp or robot,
+    lit while on: a clip for a review or a FAT sheet rather than what the
+    camera would see. They never reach the depth stream.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -137,9 +143,9 @@ def record_camera(
             # wrapper sets attributes on the handler it is given)
             page.on("download", lambda d: downloads.append(d))
             page.evaluate(
-                "([name, fps, depthData]) => window.__STUDIO__.getState()"
-                ".beginCamExport(name, fps, depthData ? { depthData: true } : undefined)",
-                [camera, fps, depth_out is not None],
+                "([name, fps, depthData, labels]) => window.__STUDIO__.getState()"
+                ".beginCamExport(name, fps, { depthData, labels })",
+                [camera, fps, depth_out is not None, bool(labels)],
             )
             deadline = time.monotonic() + timeout
             while len(downloads) < want and time.monotonic() < deadline:

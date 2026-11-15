@@ -3,10 +3,12 @@ import { Fragment, useMemo, useState } from "react";
 import { useDockReserve } from "../dockReserve";
 import type {
   BranchTakenMsg,
+  ConditionMsg,
   SequenceMsg,
   SignalTrackMsg,
   StepMsg,
   StepSpanMsg,
+  WordTrackMsg,
 } from "../protocol";
 import {
   activeAt,
@@ -18,6 +20,7 @@ import {
   type ProgramRun,
   type Truth,
 } from "../sfc";
+import { nameContact, type Named } from "../ioLinks";
 import { actionLabel, conditionLabel } from "../seqLabels";
 import { useStudioStore } from "../store";
 import { OverlayTabs } from "./OverlayTabs";
@@ -178,6 +181,7 @@ type BakedTimeline = {
   stepSpans: StepSpanMsg[];
   branches: BranchTakenMsg[];
   signals: SignalTrackMsg[];
+  words: WordTrackMsg[];
   robots: { name: string; moves: StepSpanMsg[] }[];
   duration: number;
   scenario: string | null;
@@ -219,17 +223,57 @@ function boxTitle(box: Box, span: StepSpanMsg | null): string {
   return [box.step.name, actions, exit, when].filter(Boolean).join("\n");
 }
 
+/** One atom: its text, the address of the point it reads (muted, after
+ * it), outlined when that point is in focus; a click focuses it. */
+function Leaf({ cls, text, name }: { cls: string; text: string; name: Named | null }) {
+  const hot = useStudioStore((s) => s.highlightLane);
+  const setHot = useStudioStore((s) => s.setHighlightLane);
+  const key = name?.key ?? null;
+  return (
+    <span
+      className={[cls, key ? "leaf" : "", key !== null && key === hot ? "hot" : ""]
+        .filter(Boolean)
+        .join(" ")}
+      title={name?.address ? `${name.address} — ${text}` : undefined}
+      onClick={key ? () => setHot(hot === key ? null : key) : undefined}
+    >
+      {text}
+      {name?.address && <span className="addr">{name.address}</span>}
+    </span>
+  );
+}
+
+/** A condition as an authored truth tree (nothing evaluated) — the static
+ * label drawn through the same atoms as the live one. */
+function still(cond: ConditionMsg): Truth {
+  return {
+    cond,
+    holds: false,
+    children: cond.type === "all" || cond.type === "any" ? cond.conditions.map(still) : [],
+  };
+}
+
 /** Renders a truth tree as per-atom spans: satisfied contacts green, open
  * ones gray, timers as a served/total countdown. Nested composites keep
  * their parens; the top level reads like the static label. */
-function Atoms({ tr }: { tr: Truth }) {
+function Atoms({
+  tr,
+  leaf,
+  still,
+}: {
+  tr: Truth;
+  /** Names a leaf's point (address and focus key) at this transition. */
+  leaf?: (cond: ConditionMsg) => Named | null;
+  /** The authored label: no truth, no timer count. */
+  still?: boolean;
+}) {
   if (tr.children.length === 0) {
     const text =
-      tr.cond.type === "elapsed"
+      tr.cond.type === "elapsed" && !still
         ? `${((tr.progress ?? 1) * tr.cond.seconds).toFixed(2)}/${tr.cond.seconds.toFixed(2)}s`
         : conditionLabel(tr.cond);
-    const cls = (tr.holds ? "hold" : "idle") + (tr.level ? " lv" : "");
-    return <span className={cls}>{text}</span>;
+    const cls = still ? "" : (tr.holds ? "hold" : "idle") + (tr.level ? " lv" : "");
+    return <Leaf cls={cls} text={text} name={leaf?.(tr.cond) ?? null} />;
   }
   const sep = tr.cond.type === "all" ? " & " : " | ";
   return (
@@ -240,11 +284,11 @@ function Atoms({ tr }: { tr: Truth }) {
           {child.children.length > 0 ? (
             <>
               <span className="sep">(</span>
-              <Atoms tr={child} />
+              <Atoms tr={child} leaf={leaf} still={still} />
               <span className="sep">)</span>
             </>
           ) : (
-            <Atoms tr={child} />
+            <Atoms tr={child} leaf={leaf} still={still} />
           )}
         </Fragment>
       ))}
@@ -279,10 +323,12 @@ function LiveLayer({
   layout,
   run,
   timeline,
+  leaf,
 }: {
   layout: Layout;
   run: ProgramRun;
   timeline: BakedTimeline;
+  leaf: (flat: number) => (cond: ConditionMsg) => Named | null;
 }) {
   const t = useStudioStore((s) => s.playbackTime);
   const state = activeAt(run, t);
@@ -290,7 +336,13 @@ function LiveLayer({
 
   const liveTicks = (flat: number, span: StepSpanMsg) => {
     const node = run.nodes[flat];
-    const ctx = { span, signals: timeline.signals, robots: timeline.robots };
+    const ctx = {
+      span,
+      signals: timeline.signals,
+      robots: timeline.robots,
+      stepSpans: timeline.stepSpans,
+      words: timeline.words,
+    };
     return layout.ticks
       .filter((tick) => tick.flat === flat)
       .map((tick) => {
@@ -304,7 +356,7 @@ function LiveLayer({
             className="sfc-live-cond"
             style={{ left: tick.x + 10, top: tick.y }}
           >
-            <Atoms tr={truth(cond, t, ctx)} />
+            <Atoms tr={truth(cond, t, ctx)} leaf={leaf(flat)} />
           </span>
         );
       });
@@ -341,6 +393,17 @@ function ProgramChart({
   timeline: BakedTimeline | null;
 }) {
   const layout = useMemo(() => layoutProgram(sequence.steps), [sequence]);
+  const points = useStudioStore((s) => s.io.points);
+  const leaf = useMemo(
+    () => (flat: number) => (cond: ConditionMsg) =>
+      nameContact(points, sequence.name, flat, cond, conditionLabel(cond), undefined, sequence.steps),
+    [points, sequence],
+  );
+  const tickCond = (t: Tick): ConditionMsg | null => {
+    const step = layout.boxes.find((b) => b.flat === t.flat)?.step;
+    if (!step) return null;
+    return t.arm !== null ? (step.select ?? [])[t.arm]?.condition ?? null : step.transition;
+  };
   const mode: Mode = useMemo(() => {
     // A timeline colors only the programs it actually rolled; the rest
     // stay in authored neutral instead of reading as "never reached".
@@ -382,7 +445,10 @@ function ProgramChart({
             className={`sfc-cond ${tickStatus(mode, t)}`}
             style={{ left: t.x + 10, top: t.y }}
           >
-            {t.label}
+            {(() => {
+              const cond = tickCond(t);
+              return cond ? <Atoms tr={still(cond)} leaf={leaf(t.flat)} still /> : t.label;
+            })()}
           </span>
         ))}
         {layout.boxes.map((b) => {
@@ -417,7 +483,7 @@ function ProgramChart({
           );
         })}
         {mode.kind === "baked" && timeline && (
-          <LiveLayer layout={layout} run={mode.run} timeline={timeline} />
+          <LiveLayer layout={layout} run={mode.run} timeline={timeline} leaf={leaf} />
         )}
       </div>
     </div>

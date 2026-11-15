@@ -147,6 +147,7 @@ nav:
       - Working with agents and automation: guides/agents.md
       - Offline commissioning (PLCopen XML, trace diff): guides/offline-commissioning.md
       - Virtual commissioning (the cell as a PLC's plant): guides/virtual-commissioning.md
+      - Monitoring (a machine's log, a running PLC read-only): guides/monitoring.md
       - Spray painting: guides/painting.md
       - Machine tending: guides/machine-tending.md
       - Assembly and fastening: guides/assembly.md

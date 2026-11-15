@@ -35,9 +35,9 @@ const status = {
 test("the caption names the plant, its pace and its recording", () => {
   assert.equal(
     plantCaption(status),
-    "pick (plant of PLC1) · 1× realtime · lag 1.3 ms · 10 ms scan · ● rec 2.5 s",
+    "pick (plant of PLC1) · 1× realtime · lag 1.3 ms · scan 1250 · 10 ms · ● rec 2.5 s",
   );
-  assert.equal(plantCaption({ ...status, pace: "sync", recording_from: null }), "pick (plant of PLC1) · sync · 10 ms scan");
+  assert.equal(plantCaption({ ...status, pace: "sync", recording_from: null }), "pick (plant of PLC1) · sync · scan 1250 · 10 ms");
   assert.equal(hostChip(status.hosts[0]), "PLC1 · modbus 127.0.0.1:5020 · 2037×");
   assert.equal(hostChip({ name: "UR", link: "loopback", exchanges: 0, error: null }), "UR · loopback");
 });

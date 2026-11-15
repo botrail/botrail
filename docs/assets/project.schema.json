@@ -20,6 +20,12 @@
         "$ref": "#/$defs/AllowedObjectContactMsg"
       }
     },
+    "analogs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AnalogMsg"
+      }
+    },
     "applicators": {
       "description": "Spray applicators by name (absent in older files).",
       "type": "array",
@@ -129,6 +135,13 @@
         "$ref": "#/$defs/ScenarioMsg"
       }
     },
+    "scenery_joints": {
+      "description": "Doors, drawers and racks: scenery on a hinge or a slide, each over\nthe obstacles that move on it (absent in older files).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SceneryJointMsg"
+      }
+    },
     "sensors": {
       "description": "Pseudo-sensors (absent in older v2 files).",
       "type": "array",
@@ -166,6 +179,13 @@
       "type": "integer",
       "format": "uint32",
       "minimum": 0
+    },
+    "words": {
+      "description": "Internal words and analog inputs (absent in older files).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WordDefMsg"
+      }
     }
   },
   "required": [
@@ -446,6 +466,27 @@
           ]
         },
         {
+          "description": "Write a word: a transfer or one arithmetic instruction.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "set_word"
+            },
+            "value": {
+              "$ref": "#/$defs/WordExprMsg"
+            },
+            "word": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "word",
+            "value"
+          ]
+        },
+        {
           "description": "Command an auxiliary device (output coil).",
           "type": "object",
           "properties": {
@@ -576,6 +617,56 @@
         "obstacle"
       ]
     },
+    "AnalogMsg": {
+      "description": "An analog input: a 4–20 mA transmitter measuring a word lane.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "place": {
+          "description": "The obstacle that is the transmitter's body (where its tag hangs).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "range": {
+          "description": "Engineering value at 4 mA and at 20 mA.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "raw": {
+          "description": "The input module's counts at 4 mA and at 20 mA.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "source": {
+          "description": "The word lane measured.",
+          "type": "string"
+        },
+        "unit": {
+          "type": "string",
+          "default": ""
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "range",
+        "raw"
+      ]
+    },
     "ApplicatorMsg": {
       "description": "One named [`crate::coat::Applicator`].",
       "type": "object",
@@ -614,6 +705,15 @@
         "flow",
         "transfer_efficiency",
         "max_range"
+      ]
+    },
+    "ArithOpMsg": {
+      "type": "string",
+      "enum": [
+        "+",
+        "-",
+        "*",
+        "/"
       ]
     },
     "Aspect": {
@@ -1330,6 +1430,17 @@
         "stop"
       ]
     },
+    "CompareOpMsg": {
+      "type": "string",
+      "enum": [
+        ">=",
+        ">",
+        "<=",
+        "<",
+        "==",
+        "!="
+      ]
+    },
     "Compatibility": {
       "type": "object",
       "properties": {
@@ -1551,6 +1662,69 @@
           "required": [
             "type",
             "conditions"
+          ]
+        },
+        {
+          "description": "The inverse of a condition.",
+          "type": "object",
+          "properties": {
+            "condition": {
+              "$ref": "#/$defs/ConditionMsg"
+            },
+            "type": {
+              "type": "string",
+              "const": "not"
+            }
+          },
+          "required": [
+            "type",
+            "condition"
+          ]
+        },
+        {
+          "description": "A program stands in the named step (its step relay as a contact).",
+          "type": "object",
+          "properties": {
+            "sequence": {
+              "type": "string"
+            },
+            "step": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "step_active"
+            }
+          },
+          "required": [
+            "type",
+            "sequence",
+            "step"
+          ]
+        },
+        {
+          "description": "A comparison contact over words.",
+          "type": "object",
+          "properties": {
+            "left": {
+              "$ref": "#/$defs/OperandMsg"
+            },
+            "op": {
+              "$ref": "#/$defs/CompareOpMsg"
+            },
+            "right": {
+              "$ref": "#/$defs/OperandMsg"
+            },
+            "type": {
+              "type": "string",
+              "const": "compare"
+            }
+          },
+          "required": [
+            "type",
+            "left",
+            "op",
+            "right"
           ]
         }
       ]
@@ -3915,6 +4089,50 @@
         "npn"
       ]
     },
+    "LogicMsg": {
+      "description": "The continuous half of a program (`crate::seq::Logic`): rungs scanned\nevery scan after the step transitions, and the step chain's gates.",
+      "type": "object",
+      "properties": {
+        "cycle": {
+          "description": "The step chain starts over when it ends.",
+          "type": "boolean",
+          "default": false
+        },
+        "enable": {
+          "description": "The step chain advances only while this holds.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plant": {
+          "description": "The program is the equipment's, not a controller's: it runs with\nthe plant and stays out of the I/O map.",
+          "type": "boolean"
+        },
+        "reset": {
+          "description": "While this holds the step chain is held in its first step.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConditionMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rungs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RungMsg"
+          }
+        }
+      }
+    },
     "MaterialMsg": {
       "description": "Metalness/roughness, the pair every viewer botrail hands a scene to\nalready speaks (glTF, USD Preview Surface, three.js).",
       "type": "object",
@@ -4703,6 +4921,18 @@
         "name",
         "geometry",
         "pose"
+      ]
+    },
+    "OperandMsg": {
+      "description": "One side of a comparison or a word expression: a word's name, or a\nconstant.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        }
       ]
     },
     "OrderInclude": {
@@ -5893,6 +6123,150 @@
       },
       "additionalProperties": false
     },
+    "RungMsg": {
+      "description": "One rung: a contact network and the outputs it drives.",
+      "type": "object",
+      "properties": {
+        "comment": {
+          "type": "string",
+          "default": ""
+        },
+        "condition": {
+          "$ref": "#/$defs/ConditionMsg"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RungOutputMsg"
+          }
+        }
+      },
+      "required": [
+        "condition",
+        "outputs"
+      ]
+    },
+    "RungOutputMsg": {
+      "oneOf": [
+        {
+          "description": "The target follows the rung: a signal, a run coil (a device's\nname) or a solenoid coil (`<axis>/<coil>`).",
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "coil"
+            }
+          },
+          "required": [
+            "type",
+            "target"
+          ]
+        },
+        {
+          "description": "Latches the signal on.",
+          "type": "object",
+          "properties": {
+            "signal": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "set"
+            }
+          },
+          "required": [
+            "type",
+            "signal"
+          ]
+        },
+        {
+          "description": "Latches the signal off (and clears a counter of that name).",
+          "type": "object",
+          "properties": {
+            "signal": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "reset"
+            }
+          },
+          "required": [
+            "type",
+            "signal"
+          ]
+        },
+        {
+          "description": "On-delay timer: the signal comes on after `seconds` of the rung.",
+          "type": "object",
+          "properties": {
+            "seconds": {
+              "type": "number",
+              "format": "double"
+            },
+            "signal": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "ton"
+            }
+          },
+          "required": [
+            "type",
+            "signal",
+            "seconds"
+          ]
+        },
+        {
+          "description": "Up-counter: the signal is on from `preset` rising edges.",
+          "type": "object",
+          "properties": {
+            "preset": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "signal": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "ctu"
+            }
+          },
+          "required": [
+            "type",
+            "signal",
+            "preset"
+          ]
+        },
+        {
+          "description": "A transfer or an arithmetic instruction into a word, every scan\nthe rung conducts.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "move"
+            },
+            "value": {
+              "$ref": "#/$defs/WordExprMsg"
+            },
+            "word": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "word",
+            "value"
+          ]
+        }
+      ]
+    },
     "ScenarioJointsMsg": {
       "description": "A robot start configuration a scenario overrides.",
       "type": "object",
@@ -5980,6 +6354,90 @@
       "required": [
         "name",
         "value"
+      ]
+    },
+    "SceneryJointKindMsg": {
+      "description": "How a piece of scenery moves (see [`crate::scenery`]).",
+      "oneOf": [
+        {
+          "description": "Turns about the axis; the position is an angle (rad).",
+          "type": "string",
+          "const": "hinge"
+        },
+        {
+          "description": "Travels along the axis; the position is a distance (m).",
+          "type": "string",
+          "const": "slide"
+        }
+      ]
+    },
+    "SceneryJointMsg": {
+      "description": "A door, a drawer, a rack: the obstacles that move together on a hinge\nor a slide, and where they stand on it.",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "base": {
+          "description": "The obstacle the joint is mounted on: `axis` and `origin` are in\nits frame, so they follow it. World coordinates without one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "$ref": "#/$defs/SceneryJointKindMsg"
+        },
+        "name": {
+          "type": "string"
+        },
+        "objects": {
+          "description": "The obstacles that move with it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "origin": {
+          "description": "A point on the axis.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "position": {
+          "type": "number",
+          "format": "double"
+        },
+        "range": {
+          "description": "`[lower, upper]` of the position.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "axis",
+        "origin",
+        "range",
+        "position",
+        "objects"
       ]
     },
     "SegmentKindMsg": {
@@ -6320,6 +6778,17 @@
     "SequenceMsg": {
       "type": "object",
       "properties": {
+        "logic": {
+          "description": "The program's rungs and gates, when it has any (absent from older\nfiles; a program with rungs alone has no steps).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogicMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -7203,6 +7672,59 @@
           }
         }
       }
+    },
+    "WordDefMsg": {
+      "description": "A user-defined internal word (a PLC data register).",
+      "type": "object",
+      "properties": {
+        "initial": {
+          "type": "number",
+          "format": "double"
+        },
+        "integer": {
+          "description": "An `INT` rather than a `REAL`.",
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "initial"
+      ]
+    },
+    "WordExprMsg": {
+      "description": "What a word is written with: one operand, or one arithmetic\ninstruction over two.",
+      "type": "object",
+      "properties": {
+        "left": {
+          "$ref": "#/$defs/OperandMsg"
+        },
+        "op": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArithOpMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "right": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperandMsg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "left"
+      ]
     }
   }
 }

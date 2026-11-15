@@ -10,7 +10,10 @@ import {
   type Arc,
   SNAP_TURN,
   applyPlacement,
+  floorHeading,
+  glideStep,
   snapTurnPlacement,
+  stickDemand,
   teleportArc,
   teleportPlacement,
   yawOf,
@@ -25,9 +28,12 @@ const INVALID = new THREE.Color("#e0574f");
  * The controllers' sticks and buttons, polled once per XR frame
  * (`.internal/design-vr.md` §3.4, §3.6):
  *
- * - either thumbstick pushed forward throws a teleport arc from that hand;
- *   letting go lands there (green ring) or does nothing (red);
- * - a thumbstick flicked sideways snap-turns 45° about the head;
+ * - the left thumbstick glides: it walks the player across the floor the
+ *   way the head faces — forward, back and sideways, as fast as the stick
+ *   is pushed, eased in and out;
+ * - the right thumbstick pushed forward throws a teleport arc from that
+ *   hand; letting go lands there (green ring) or does nothing (red);
+ * - the right thumbstick flicked sideways snap-turns 45° about the head;
  * - right A plays / pauses the bake, right B cycles the speed, left X
  *   recenters on the launch stance, left Y teaches the pose as a waypoint.
  *
@@ -38,24 +44,46 @@ const INVALID = new THREE.Color("#e0574f");
 export function XrLocomotion() {
   const left = useXRInputSourceState("controller", "left");
   const right = useXRInputSourceState("controller", "right");
-  const detectors = useRef({ left: makeDetectors(), right: makeDetectors() });
-  const preview = useRef<{ hand: Hand; arc: Arc } | null>(null);
+  const input = useRef({
+    buttons: { left: new ButtonEdges(), right: new ButtonEdges() },
+    aim: new AxisLatch(),
+    turn: new AxisLatch(),
+    /** The glide's velocity, world XY, m/s. */
+    velocity: { x: 0, y: 0 },
+    /** When the previous frame was shown (ms), where the frame says. */
+    shown: null as number | null,
+  });
+  const preview = useRef<Arc | null>(null);
   const arc = useMemo(() => makeArcObjects(), []);
   useEffect(() => () => arc.dispose(), [arc]);
 
-  useFrame(({ gl, camera }) => {
+  useFrame(({ gl, camera }, delta, frame) => {
+    const io = input.current;
     const origin = xrRig.origin;
     const head = headPose(camera);
     if (!gl.xr.isPresenting || !origin || !head) {
       if (arc.group.visible) hide();
+      io.velocity = { x: 0, y: 0 };
+      io.shown = null;
       return;
     }
-    let aiming: Hand | null = null;
+    // The frame's length on the display's own clock where the frame
+    // carries it: those intervals are the refresh period, while the render
+    // loop's delta has the scheduler's jitter in it — and a glide shows
+    // every millisecond of that as judder.
+    let dt = delta;
+    const shown = (frame as { predictedDisplayTime?: number } | undefined)?.predictedDisplayTime;
+    if (typeof shown === "number") {
+      if (io.shown !== null) dt = (shown - io.shown) / 1000;
+      io.shown = shown;
+    }
+
+    const pads = {
+      left: readPad(left?.inputSource.gamepad),
+      right: readPad(right?.inputSource.gamepad),
+    };
     for (const hand of HANDS) {
-      const state = hand === "left" ? left : right;
-      const pad = readPad(state?.inputSource.gamepad);
-      const d = detectors.current[hand];
-      for (const i of d.buttons.update(pad.pressed)) {
+      for (const i of io.buttons[hand].update(pads[hand].pressed)) {
         if (i === XR_STANDARD.primary) {
           if (hand === "right") xrActions.togglePlay();
           else xrActions.recenter();
@@ -64,42 +92,64 @@ export function XrLocomotion() {
           else xrActions.addWaypoint();
         }
       }
-      const x = pad.axes[THUMBSTICK_AXES.x] ?? 0;
-      const y = pad.axes[THUMBSTICK_AXES.y] ?? 0;
-      const side = d.side.feed(x);
-      if (side.engaged) {
-        // Stick to the right turns right: clockwise seen from above is a
-        // negative heading.
-        const pivot = headWorld();
-        if (pivot) {
-          applyPlacement(
-            origin,
-            snapTurnPlacement(pivot, yawOf(origin.quaternion), -side.engaged * SNAP_TURN, head),
-          );
-        }
-      }
-      const forward = d.forward.feed(-y);
-      if (forward.held > 0) aiming = hand;
-      if (forward.released > 0) {
-        const p = preview.current;
-        if (p && p.hand === hand) {
-          if (p.arc.hit && p.arc.valid) {
-            applyPlacement(origin, teleportPlacement(p.arc.hit, yawOf(origin.quaternion), head));
-          }
-          preview.current = null;
-        }
+    }
+
+    // Right stick: turn and teleport.
+    const turn = io.turn.feed(pads.right.axes[THUMBSTICK_AXES.x] ?? 0);
+    if (turn.engaged) {
+      // Stick to the right turns right: clockwise seen from above is a
+      // negative heading.
+      const pivot = headWorld();
+      if (pivot) {
+        applyPlacement(
+          origin,
+          snapTurnPlacement(pivot, yawOf(origin.quaternion), -turn.engaged * SNAP_TURN, head),
+        );
       }
     }
-    if (aiming) {
-      const ray = xrRig.rays[aiming];
+    const aim = io.aim.feed(-(pads.right.axes[THUMBSTICK_AXES.y] ?? 0));
+    if (aim.released > 0) {
+      const thrown = preview.current;
+      if (thrown?.hit && thrown.valid) {
+        applyPlacement(origin, teleportPlacement(thrown.hit, yawOf(origin.quaternion), head));
+      }
+      preview.current = null;
+    }
+
+    // Left stick: glide. The origin slides; the heading is read off the
+    // head every frame, so looking somewhere else steers.
+    const demand = stickDemand(
+      pads.left.axes[THUMBSTICK_AXES.x] ?? 0,
+      -(pads.left.axes[THUMBSTICK_AXES.y] ?? 0),
+    );
+    origin.updateWorldMatrix(true, false);
+    const heading = floorHeading(
+      origin.getWorldQuaternion(new THREE.Quaternion()).multiply(head.quaternion),
+    );
+    const moving = io.velocity.x !== 0 || io.velocity.y !== 0;
+    if (moving || demand.x !== 0 || demand.y !== 0) {
+      const at = origin.localToWorld(head.position.clone());
+      const { velocity, step } = glideStep(io.velocity, demand, heading, dt, at);
+      io.velocity = velocity;
+      origin.position.x += step.x;
+      origin.position.y += step.y;
+      origin.updateMatrixWorld(true);
+    }
+    xrRig.glide = {
+      velocity: [io.velocity.x, io.velocity.y],
+      heading: heading ? [heading.x, heading.y] : null,
+    };
+
+    if (aim.held > 0) {
+      const ray = xrRig.rays.right;
       if (ray) {
         ray.updateWorldMatrix(true, false);
         const from = new THREE.Vector3().setFromMatrixPosition(ray.matrixWorld);
         const direction = new THREE.Vector3(0, 0, -1).transformDirection(ray.matrixWorld);
         const thrown = teleportArc(from, direction);
-        preview.current = { hand: aiming, arc: thrown };
+        preview.current = thrown;
         show(thrown);
-        xrRig.teleport = { hand: aiming, hit: thrown.hit?.toArray() ?? null, valid: thrown.valid };
+        xrRig.teleport = { hand: "right", hit: thrown.hit?.toArray() ?? null, valid: thrown.valid };
       }
     } else if (arc.group.visible) {
       hide();
@@ -129,10 +179,6 @@ export function XrLocomotion() {
   }
 
   return <primitive object={arc.group} />;
-}
-
-function makeDetectors() {
-  return { buttons: new ButtonEdges(), forward: new AxisLatch(), side: new AxisLatch() };
 }
 
 function makeArcObjects() {

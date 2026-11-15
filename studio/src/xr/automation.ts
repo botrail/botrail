@@ -53,6 +53,11 @@ export function xrReport() {
       : null,
     stance: xrAutomation.placed ? xrRig.stance : null,
     teleport: xrRig.teleport,
+    glide: xrRig.glide,
+    held: { ...xrRig.held },
+    /** Each grip in world coordinates — what a hand's reach is measured
+     * from (the emulator poses the controller; the grip sits off it). */
+    grips: { left: gripWorld("left"), right: gripWorld("right") },
     hover: s.hover,
     selection: s.selection,
     label: pointerLabelText(s),
@@ -62,6 +67,13 @@ export function xrReport() {
     playback: { has: s.playback !== null, playing: s.playing, speed: s.playbackSpeed, time: s.playbackTime },
     tcp: tcpReport(),
   };
+}
+
+function gripWorld(hand: "left" | "right"): number[] | null {
+  const grip = xrRig.grips[hand];
+  if (!grip) return null;
+  grip.updateWorldMatrix(true, false);
+  return new THREE.Vector3().setFromMatrixPosition(grip.matrixWorld).toArray();
 }
 
 /** The TCP handle: whose, where (world), in hand or not, and the verdict it shows. */

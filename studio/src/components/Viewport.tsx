@@ -18,6 +18,7 @@ import { RouteViaGizmo } from "./RouteViaGizmo";
 import { SceneView } from "./SceneView";
 import { FlashView } from "./FlashView";
 import { LampView } from "./LampView";
+import { IoTagView } from "./IoTagView";
 import { ContactMarkerView } from "./ContactMarkerView";
 import { SensorView } from "./SensorView";
 import { CameraView } from "./CameraView";
@@ -214,6 +215,9 @@ export function Viewport() {
             </Aid>
             <FlashView />
             <LampView />
+            {/* The I/O tags: an annotation the camera pass hides, through
+                its own registry (a video export may film them). */}
+            <IoTagView />
             <Aid>
               <ContactMarkerView />
             </Aid>

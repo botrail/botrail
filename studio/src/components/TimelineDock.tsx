@@ -9,9 +9,10 @@ import {
   speedLabel,
   toggleBreak,
 } from "../plant";
-import type { PlantStatusMsg, StepSpanMsg, WordTrackMsg } from "../protocol";
+import type { DeviationMsg, PlantStatusMsg, ReadingsMsg, StepSpanMsg, WordTrackMsg } from "../protocol";
+import { deviationChip, deviationsOf, readSpans, readingsCaption, readingsOf } from "../readings";
 import { setPhysics } from "../bake";
-import { followsLive, useStudioStore } from "../store";
+import { followsLive, ioTagsShown, useStudioStore } from "../store";
 import {
   LANE_GROUPS,
   clampLanesHeight,
@@ -28,6 +29,7 @@ import {
 } from "../timelineLanes";
 import { sendExportUsd, sendPlant } from "../ws";
 import { chipsForLane } from "./IoOverlay";
+import { WaitLine } from "./WaitLine";
 
 const LANES_KEY = "botrail-studio.lanes";
 
@@ -111,9 +113,16 @@ function SignalLane({
   chips,
   hot,
   plant,
+  read,
+  deviations,
 }: {
   signal: { name: string; times: number[]; values: boolean[] };
   duration: number;
+  /** The lane as the controller read it (a replayed log, a monitor):
+   * drawn as a second, thin trace under the model's. */
+  read?: { times: number[]; values: boolean[] };
+  /** Where the reading and the model parted. */
+  deviations: DeviationMsg[];
   /** The channels the lane's points are bound to (`UR.DI2 · %IX0.2`):
    * with them the chart reads as the FAT I/O waveform sheet. */
   chips: string[];
@@ -126,23 +135,35 @@ function SignalLane({
 }) {
   const pct = (t: number) => `${(t / duration) * 100}%`;
   const mark = breakMark(plant, signal.name);
-  const describe = chips.length > 0 ? `${signal.name} — ${chips.join(", ")}` : signal.name;
+  const hands = plant !== null && !plant.read_only;
+  const named = chips.length > 0 ? `${signal.name} — ${chips.join(", ")}` : signal.name;
+  const describe =
+    deviations.length > 0
+      ? `${named}\n${deviations.map((d) => d.note).join("\n")}`
+      : read
+        ? `${named} · thin trace: as the controller read it`
+        : named;
   return (
-    <div className={`timeline-lane${hot ? " timeline-lane-hot" : ""}`}>
+    <div
+      className={`timeline-lane${hot ? " timeline-lane-hot" : ""}${
+        deviations.length > 0 ? " timeline-lane-deviates" : ""
+      }`}
+    >
       <span
-        className={`timeline-lane-name${plant ? " timeline-lane-name-breakable" : ""}`}
+        className={`timeline-lane-name${hands ? " timeline-lane-name-breakable" : ""}`}
         title={
-          plant
+          hands
             ? `${describe} · right-click: pause the plant at this lane's rising edge (shift: falling)`
             : describe
         }
         onContextMenu={(e) => {
-          if (!plant) return;
+          if (!hands) return;
           e.preventDefault();
           sendPlant(toggleBreak(plant, signal.name, !e.shiftKey));
         }}
       >
         {mark && <span className="timeline-lane-break">{mark} </span>}
+        {deviations.length > 0 && <span className="timeline-lane-differs">≠ </span>}
         {signal.name}
       </span>
       {chips.length > 0 && (
@@ -170,8 +191,39 @@ function SignalLane({
             />
           );
         })}
+        {read &&
+          readSpans(read, duration).map((s, i) => (
+            <div
+              key={`r${i}`}
+              className="timeline-lane-read"
+              style={{
+                left: pct(s.start),
+                width: `max(${((s.end - s.start) / duration) * 100}%, 2px)`,
+              }}
+            />
+          ))}
+        <DeviationBands deviations={deviations} duration={duration} />
       </div>
     </div>
+  );
+}
+
+/** The stretches a lane's reading and the model parted, over its track. */
+function DeviationBands({ deviations, duration }: { deviations: DeviationMsg[]; duration: number }) {
+  return (
+    <>
+      {deviations.map((d, i) => (
+        <div
+          key={`d${i}`}
+          className="timeline-lane-deviation"
+          title={d.note}
+          style={{
+            left: `${(Math.max(0, d.start) / duration) * 100}%`,
+            width: `max(${((Math.min(duration, d.end) - Math.max(0, d.start)) / duration) * 100}%, 3px)`,
+          }}
+        />
+      ))}
+    </>
   );
 }
 
@@ -188,9 +240,14 @@ function WordLane({
   at,
   chips,
   hot,
+  read,
+  deviations,
 }: {
   word: WordTrackMsg;
   duration: number;
+  /** The word as the controller read it, on the lane's own scale. */
+  read?: WordTrackMsg;
+  deviations: DeviationMsg[];
   /** The playhead time, whose value the lane labels. */
   at: number;
   /** The channels the word is bound to (`PLC1.IW0 · %IW100`). */
@@ -199,14 +256,23 @@ function WordLane({
 }) {
   const W = 1000;
   const H = 8;
-  const lo = word.values.length ? Math.min(...word.values) : 0;
-  const hi = word.values.length ? Math.max(...word.values) : 0;
-  const points = wordPolyline(word, duration, W, H);
+  const all = read ? [...word.values, ...read.values] : word.values;
+  const lo = all.length ? Math.min(...all) : 0;
+  const hi = all.length ? Math.max(...all) : 0;
+  const points = wordPolyline(word, duration, W, H, lo, hi);
+  const readPoints = read ? wordPolyline(read, duration, W, H, lo, hi) : null;
   const now = wordValueAt(word, at);
-  const title = `${word.name} — ${formatWord(lo, word.integer)} … ${formatWord(hi, word.integer)}`;
+  const range = `${word.name} — ${formatWord(lo, word.integer)} … ${formatWord(hi, word.integer)}`;
+  const title =
+    deviations.length > 0 ? `${range}\n${deviations.map((d) => d.note).join("\n")}` : range;
   return (
-    <div className={`timeline-lane${hot ? " timeline-lane-hot" : ""}`}>
+    <div
+      className={`timeline-lane${hot ? " timeline-lane-hot" : ""}${
+        deviations.length > 0 ? " timeline-lane-deviates" : ""
+      }`}
+    >
       <span className="timeline-lane-name" title={title}>
+        {deviations.length > 0 && <span className="timeline-lane-differs">≠ </span>}
         {word.name}
       </span>
       <span className="timeline-lane-value" title={title}>
@@ -230,7 +296,11 @@ function WordLane({
           aria-label={title}
         >
           <polyline points={points} vectorEffect="non-scaling-stroke" />
+          {readPoints && (
+            <polyline className="timeline-lane-word-read" points={readPoints} vectorEffect="non-scaling-stroke" />
+          )}
         </svg>
+        <DeviationBands deviations={deviations} duration={duration} />
       </div>
     </div>
   );
@@ -281,6 +351,9 @@ export function TimelineDock() {
   const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
   const highlightLane = useStudioStore((s) => s.highlightLane);
   const ioPoints = useStudioStore((s) => s.io.points);
+  const ioTags = useStudioStore((s) => s.ioTags);
+  const setIoTags = useStudioStore((s) => s.setIoTags);
+  const tagsShown = ioTagsShown(ioTags, ioPoints);
   const sequenceError = useStudioStore((s) => s.sequenceError);
   const sequenceErrorScenario = useStudioStore((s) => s.sequenceErrorScenario);
   const barRef = useRef<HTMLDivElement | null>(null);
@@ -343,6 +416,7 @@ export function TimelineDock() {
   };
 
   const pct = (t: number) => `${(t / duration) * 100}%`;
+  const readings = readingsOf(plant, timeline);
 
   // One robot plays alone on the step bar; several get a lane each.
   // Word lanes (encoders, readers) sit with the sensors: they are inputs
@@ -392,6 +466,8 @@ export function TimelineDock() {
         chips={chips.get(signal.name) ?? []}
         hot={highlightLane === signal.name}
         plant={plant}
+        read={readings?.signals.find((s) => s.name === signal.name)}
+        deviations={deviationsOf(readings, signal.name)}
       />
     ));
 
@@ -518,6 +594,19 @@ export function TimelineDock() {
               topo
             </button>
           )}
+          {ioPoints.length > 0 && (
+            <button
+              className={tagsShown ? "timeline-button timeline-button-on" : "timeline-button"}
+              onClick={() => setIoTags(tagsShown ? "off" : "on")}
+              title={
+                tagsShown
+                  ? "hide the 3D I/O tags (address and name on each sensor, device, lamp, robot)"
+                  : "show the 3D I/O tags: each point's address and name on the thing it belongs to, lit while on"
+              }
+            >
+              tags
+            </button>
+          )}
           {/* Sequence timelines only: the server bakes the retained
               rollout, so a motion preview, a loaded recording or the
               world streamed live (kept by no one) has nothing to
@@ -543,7 +632,7 @@ export function TimelineDock() {
                 beginCamExport(
                   camTarget,
                   30,
-                  camDepthViz ? { viz: "depth" } : undefined,
+                  camDepthViz ? { viz: "depth" } : { labels: tagsShown },
                 )
               }
               title={
@@ -569,6 +658,8 @@ export function TimelineDock() {
           {sequenceError}
         </div>
       )}
+      <WaitLine />
+      {readings && <ReadingsLine readings={readings} />}
       <div className="timeline-bands" ref={barRef} onClick={seek}>
         {(timeline?.stepSpans ?? []).map((span, i) => (
           <div
@@ -661,6 +752,8 @@ export function TimelineDock() {
                   at={playbackTime}
                   chips={chips.get(word.name) ?? []}
                   hot={highlightLane === word.name}
+                  read={readings?.words?.find((w) => w.name === word.name)}
+                  deviations={deviationsOf(readings, word.name)}
                 />
               ))}
             {shown("devices") && signalLanes("devices")}
@@ -680,10 +773,21 @@ export function TimelineDock() {
  */
 function PlantBar({ plant }: { plant: PlantStatusMsg }) {
   const recording = plant.recording_from != null;
+  // A monitor only reads: the hands on the plant are not drawn at all
+  // (the session refuses them whatever a client sends).
+  const monitor = plant.read_only === true;
   return (
-    <div className="plant-bar">
+    <div className={monitor ? "plant-bar plant-bar-monitor" : "plant-bar"}>
       <span className="plant-caption" title={plantCaption(plant)}>
         <span className={plant.paused ? "plant-dot plant-dot-paused" : "plant-dot"}>●</span>
+        {monitor && (
+          <span
+            className="plant-readonly"
+            title="a monitor reads the controller and never answers it: nothing is forced, pressed or written"
+          >
+            MONITOR · read only
+          </span>
+        )}
         <span>{plantCaption(plant)}</span>
         {plant.hosts.map((host) => (
           <span
@@ -701,6 +805,7 @@ function PlantBar({ plant }: { plant: PlantStatusMsg }) {
           </span>
         )}
         {plant.halted && <span className="plant-halted">paused at {plant.halted}</span>}
+        {plant.refused && <span className="plant-halted">refused — {plant.refused}</span>}
         {!plant.following && (
           <span className="plant-chip" title="a clip stands on the dock; the plant runs on">
             clip on the dock
@@ -708,6 +813,8 @@ function PlantBar({ plant }: { plant: PlantStatusMsg }) {
         )}
       </span>
       <span className="plant-controls">
+        {!monitor && (
+          <>
         <button
           className="timeline-button"
           onClick={() => sendPlant({ command: plant.paused ? "resume" : "pause" })}
@@ -735,6 +842,8 @@ function PlantBar({ plant }: { plant: PlantStatusMsg }) {
             {speedLabel(plant.speed)}
           </button>
         )}
+          </>
+        )}
         <button
           className={recording ? "timeline-button timeline-button-rec" : "timeline-button"}
           onClick={() => sendPlant({ command: "record", on: !recording })}
@@ -755,6 +864,48 @@ function PlantBar({ plant }: { plant: PlantStatusMsg }) {
             live
           </button>
         )}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * What a controller's own reading of the cell says against the model: the
+ * source and the verdict, then one chip per deviation. A chip seeks to
+ * where the two parted and puts the point in focus (lane, I/O table,
+ * ladder, 3D tag).
+ */
+function ReadingsLine({ readings }: { readings: ReadingsMsg }) {
+  const hot = useStudioStore((s) => s.highlightLane);
+  const setHot = useStudioStore((s) => s.setHighlightLane);
+  const live = useStudioStore((s) => s.plant !== null);
+  const shown = readings.deviations.slice(-12);
+  return (
+    <div className="readings-line">
+      <span
+        className={readings.deviations.length > 0 ? "readings-caption readings-differs" : "readings-caption"}
+        title="the controller's I/O image as read, compared with the model's lanes: thin traces are the readings, red bands where they part"
+      >
+        {readingsCaption(readings)}
+      </span>
+      <span className="readings-chips">
+        {readings.deviations.length > shown.length && (
+          <span className="wait-chip more">+{readings.deviations.length - shown.length}</span>
+        )}
+        {shown.map((d, i) => (
+          <span
+            key={`${d.lane} ${d.start} ${i}`}
+            className={`readings-chip${hot === d.lane ? " hot" : ""}`}
+            title={d.note}
+            onClick={() => {
+              setHot(d.lane);
+              // The live head is now; a finished run seeks to the place.
+              if (!live) useStudioStore.getState().seek(d.start);
+            }}
+          >
+            {deviationChip(d)}
+          </span>
+        ))}
       </span>
     </div>
   );

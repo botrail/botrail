@@ -1810,6 +1810,17 @@ button.danger:hover:not(:disabled) {
   fill: var(--ok);
 }
 
+/* A word's live value beside its instruction: plain until the rung
+   conducts (a comparison holds, a transfer runs). */
+.ld-live text.ld-value {
+  fill: #c8cfda;
+  font-size: 9px;
+}
+
+.ld-live text.ld-value.ld-on {
+  fill: var(--ok);
+}
+
 /* An edge contact's signal level, underlined like the SFC chart. */
 .ld-live line.ld-lv {
   stroke: #98a2b3;
@@ -1930,6 +1941,24 @@ button.danger:hover:not(:disabled) {
 
 .io-live {
   text-align: center;
+}
+
+/* A word's value in the live column (an analog input: its loop). */
+.io-word {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: #c8cfda;
+}
+
+.io-word-input {
+  width: 52px;
+  margin-right: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
 }
 
 .io-on {
@@ -2448,4 +2477,279 @@ button.danger:hover:not(:disabled) {
   color: #e0b04c;
   font-weight: 600;
   margin-left: 4px;
+}
+
+/* --- The point in focus and the waiting line (PF0) ---------------------
+ * One point at a time is in focus (`highlightLane`): picked in the I/O
+ * table, the ladder, the SFC chart, the waiting line or the topology, it
+ * is outlined in all of them, on its lane and on its 3D tag. */
+
+.io-row.io-hot td {
+  background: #1b2a42;
+}
+
+.io-row.io-hot td.io-point {
+  color: #7fb4ff;
+}
+
+/* Ladder: a clickable box over each contact / coil that reads or writes a
+ * point; the focused one is outlined. */
+.ld-canvas svg.ld-keys {
+  pointer-events: none;
+}
+
+.ld-keys rect.ld-key {
+  fill: transparent;
+  stroke: none;
+  pointer-events: all;
+  cursor: pointer;
+}
+
+.ld-keys rect.ld-key:hover {
+  stroke: #4a6fa5;
+  stroke-width: 1;
+}
+
+.ld-keys rect.ld-key.hot {
+  stroke: #7fb4ff;
+  stroke-width: 1.5;
+}
+
+/* SFC atoms: the address of the point after the atom, muted; an atom that
+ * reads a point focuses it on click. */
+.sfc-cond .addr,
+.sfc-live-cond .addr,
+.wait-item .wait-addr {
+  margin-left: 3px;
+  padding: 0 3px;
+  border-radius: 2px;
+  background: #23304a;
+  color: #9fc0ee;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+.wait-item .wait-addr {
+  margin: 0 3px 0 0;
+}
+
+.sfc-cond .leaf,
+.sfc-live-cond .leaf {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.sfc-cond .hot,
+.sfc-live-cond .hot {
+  outline: 1px solid #7fb4ff;
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* The dock's waiting line: per program, the step it stands in and the
+ * contacts of its exits that do not conduct yet; the bound points that
+ * are on; Σ folds out the run's waits. */
+.wait-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  min-height: 18px;
+  font-size: 11px;
+  color: #aeb8c8;
+}
+
+.wait-programs {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.wait-program {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.wait-step {
+  color: #d6dae2;
+}
+
+.wait-item {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #1d2330;
+  color: #c6cedd;
+  cursor: pointer;
+}
+
+.wait-item.lv {
+  border-bottom: 1px solid currentColor;
+}
+
+.wait-item.hot,
+.wait-chip.hot {
+  outline: 1px solid #7fb4ff;
+  color: #7fb4ff;
+}
+
+.wait-sep {
+  color: #5a6374;
+}
+
+.wait-since,
+.wait-idle {
+  color: #6d7787;
+}
+
+.wait-on {
+  display: inline-flex;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.wait-chip {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #1f3d2b;
+  color: #3fbf6f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.wait-chip.more {
+  background: #1d2330;
+  color: #858d9b;
+  cursor: default;
+}
+
+.wait-sum {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: #aeb8c8;
+}
+
+.wait-share {
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.wait-share-time {
+  color: #d6dae2;
+  font-variant-numeric: tabular-nums;
+}
+
+.wait-share-n {
+  color: #6d7787;
+}
+
+/* The gates of a program's step chain, one line over its ladder (PF1). */
+.ld-gates {
+  margin: -2px 0 4px;
+  font-size: 10px;
+  color: #9fc0ee;
+}
+
+/* A controller's readings beside the model's lanes (a replayed machine
+ * log, a monitor): the thin trace is the reading, the band where the two
+ * part. */
+.timeline-lane-read {
+  position: absolute;
+  bottom: 0;
+  height: 3px;
+  background: #e8c15a;
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.timeline-lane-word-read {
+  stroke: #e8c15a !important;
+  stroke-dasharray: 3 2;
+}
+
+.timeline-lane-deviation {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  background: rgba(255, 90, 72, 0.38);
+  outline: 1px solid rgba(255, 110, 92, 0.9);
+  border-radius: 2px;
+}
+
+.timeline-lane-differs,
+.io-differs {
+  color: #ff7a6b;
+  font-weight: 600;
+}
+
+.io-differs {
+  margin-left: 4px;
+}
+
+.timeline-lane-deviates .timeline-lane-name {
+  color: #ffb3a8;
+}
+
+.readings-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: #b9c2cf;
+  min-height: 20px;
+}
+
+.readings-caption {
+  white-space: nowrap;
+  color: #e8c15a;
+}
+
+.readings-caption.readings-differs {
+  color: #ff9c8f;
+}
+
+.readings-chips {
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.readings-chip {
+  white-space: nowrap;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: rgba(255, 90, 72, 0.18);
+  border: 1px solid rgba(255, 110, 92, 0.55);
+  color: #ffc6bd;
+  cursor: pointer;
+}
+
+.readings-chip.hot {
+  background: rgba(255, 90, 72, 0.45);
+  color: #fff;
+}
+
+.plant-bar-monitor {
+  border-top: 1px solid rgba(232, 193, 90, 0.5);
+}
+
+.plant-readonly {
+  padding: 0 7px;
+  border-radius: 8px;
+  background: #e8c15a;
+  color: #17191d;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
 }

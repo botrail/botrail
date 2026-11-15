@@ -848,6 +848,12 @@ impl<'a> Lowering<'a> {
                      tracking) has to take that over"
                 ));
             }
+            Action::SetWord { word, .. } => {
+                return Err(format!(
+                    "{label}: writing the word `{word}` has no script form — a robot script \
+                     carries digital I/O (the ST export writes words)"
+                ));
+            }
             Action::Set { signal, value } => {
                 let port = self.io.outputs.get(signal).ok_or_else(|| {
                     format!(
@@ -1119,6 +1125,12 @@ fn digital_test(
             "{label}: an edge cannot guard a branch or compound wait in a script \
              — latch the edge into a signal first, or wait for it in its own step"
         )),
+        Condition::Not(_) | Condition::StepActive { .. } | Condition::Compare { .. } => {
+            Err(format!(
+                "{label}: a negated network, a step contact or a word comparison has no script \
+                 form — it belongs to a PLC's program (the ST export writes it)"
+            ))
+        }
     }
 }
 
@@ -1195,6 +1207,12 @@ fn lower_condition(
     };
     match condition {
         Condition::Immediately | Condition::Done => {}
+        Condition::Not(_) | Condition::StepActive { .. } | Condition::Compare { .. } => {
+            return Err(format!(
+                "{label}: a negated network, a step contact or a word comparison has no script \
+                 form — it belongs to a PLC's program (the ST export writes it)"
+            ));
+        }
         Condition::Elapsed { seconds } => {
             concurrency_warning(warnings, "the timer");
             commands.push(Command::Sleep { seconds: *seconds });
@@ -2182,6 +2200,7 @@ mod tests {
             contacts: vec![],
             cloths: vec![],
             ropes: Vec::new(),
+            readings: None,
             robots: vec![track(ramp_to)],
             objects: vec![],
             vehicles: vec![],

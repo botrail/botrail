@@ -92,6 +92,8 @@ impl std::error::Error for StError {}
 /// written program walks the same path the bake does.
 struct FlatStep<'a> {
     ident: String,
+    /// The authored name (a `step_active` contact names it).
+    name: &'a str,
     actions: &'a [Action],
     /// `(condition, flat target)`; `target == len` is the end of the program.
     exits: Vec<(&'a Condition, usize)>,
@@ -125,6 +127,7 @@ fn flatten<'a>(steps: &'a [Step], names: &mut BTreeSet<String>) -> Vec<FlatStep<
             if step.select.is_empty() {
                 out.push(FlatStep {
                     ident: unique(&step.name, names),
+                    name: &step.name,
                     actions: &step.actions,
                     exits: vec![(&step.transition, usize::MAX)],
                     branching: false,
@@ -133,6 +136,7 @@ fn flatten<'a>(steps: &'a [Step], names: &mut BTreeSet<String>) -> Vec<FlatStep<
             } else {
                 out.push(FlatStep {
                     ident: unique(&step.name, names),
+                    name: &step.name,
                     actions: &step.actions,
                     exits: step
                         .select
@@ -189,6 +193,13 @@ struct Program<'a> {
     device_busy: BTreeSet<String>,
     /// The latch statements, one per waiting step and device, run every scan.
     latches: Vec<String>,
+    /// Function-block instances of the rungs: `(instance, type)`.
+    rung_fbs: Vec<(String, &'static str)>,
+    /// Words this program keeps (locals): `variable → (type, initial)`.
+    words: BTreeMap<String, (&'static str, String)>,
+    /// Analog inputs it reads: `scaled variable → the scaling statement`,
+    /// run every scan before anything reads the value.
+    analogs: BTreeMap<String, String>,
     body: String,
     notes: Vec<String>,
 }
@@ -197,6 +208,17 @@ struct Writer<'a> {
     scene: &'a Scene,
     xc: &'a Exchange,
     options: &'a StOptions,
+    /// Relays are the host's, not a program's, once it runs several
+    /// programs (a common circuit's relay read by a step chain): declared
+    /// global, with their initial value.
+    shared: std::cell::RefCell<BTreeMap<String, bool>>,
+    /// Step flags another program reads (`step_active`): `(owning
+    /// program, step, global mirror)` — the owner copies its flag into
+    /// the mirror at the end of its scan.
+    mirrors: std::cell::RefCell<Vec<(String, String, String)>>,
+    /// Words the host keeps once it runs several programs: `variable →
+    /// (type, initial)`, declared global like the shared relays.
+    shared_words: std::cell::RefCell<BTreeMap<String, (&'static str, String)>>,
 }
 
 impl<'a> Writer<'a> {
@@ -223,7 +245,12 @@ impl<'a> Writer<'a> {
                 .find(|s| s.name == name)
                 .map(|s| s.initial)
                 .unwrap_or(false);
-            p.relays.entry(v.clone()).or_insert(initial);
+            if self.xc.programs.len() > 1 {
+                self.shared.borrow_mut().entry(v.clone()).or_insert(initial);
+                p.externals.insert(v.clone());
+            } else {
+                p.relays.entry(v.clone()).or_insert(initial);
+            }
             return v;
         }
         let fallback = match aspect {
@@ -240,6 +267,186 @@ impl<'a> Writer<'a> {
         ));
         p.externals.insert(fallback.clone());
         fallback
+    }
+
+    /// A word as an ST expression, with whether it is an `INT`: a point
+    /// of the host (a scaled register converted back to its unit), an
+    /// analog input scaled from its counts, a register the controller
+    /// keeps itself, a counter's `CV`.
+    fn word(&self, p: &mut Program<'_>, name: &str) -> (String, bool) {
+        use crate::seq::WordKind;
+        let from_point = |p: &mut Program<'_>, point: &ExchangePoint| -> (String, bool) {
+            p.externals.insert(point.var.clone());
+            if point.scale != 1.0 {
+                (
+                    format!("(INT_TO_REAL({}) / {})", point.var, st_real(point.scale)),
+                    false,
+                )
+            } else {
+                (point.var.clone(), point.value == ValueKind::Int)
+            }
+        };
+        match self.scene.word_kind(name) {
+            Some(WordKind::Defined { integer }) => {
+                if let Some(point) = self.point(name, None) {
+                    return from_point(p, point);
+                }
+                let v = ident(name);
+                let initial = self
+                    .scene
+                    .words()
+                    .iter()
+                    .find(|w| w.name == name)
+                    .map(|w| w.initial)
+                    .unwrap_or(0.0);
+                let decl = if integer {
+                    ("INT", format!("{}", initial as i64))
+                } else {
+                    ("REAL", st_real(initial))
+                };
+                if self.xc.programs.len() > 1 {
+                    self.shared_words
+                        .borrow_mut()
+                        .entry(v.clone())
+                        .or_insert(decl);
+                    p.externals.insert(v.clone());
+                } else {
+                    p.words.entry(v.clone()).or_insert(decl);
+                }
+                (v, integer)
+            }
+            Some(WordKind::Analog) => {
+                let Some(point) = self.point(name, None) else {
+                    return (self.var(p, name, None), false);
+                };
+                p.externals.insert(point.var.clone());
+                let scaled = format!("{}_eu", point.var);
+                if let Some(a) = self.scene.analog(name) {
+                    // The plant's own expression, in the same order.
+                    p.analogs.insert(
+                        scaled.clone(),
+                        format!(
+                            "{scaled} := {} + (INT_TO_REAL({}) - {}) * {} / {}; (* {} … {} {} over {} … {} counts *)",
+                            st_real(a.range.0),
+                            point.var,
+                            st_real(a.raw.0 as f64),
+                            st_real(a.range.1 - a.range.0),
+                            st_real((a.raw.1 - a.raw.0) as f64),
+                            crate::seq::word_text(a.range.0),
+                            crate::seq::word_text(a.range.1),
+                            a.unit,
+                            a.raw.0,
+                            a.raw.1,
+                        ),
+                    );
+                }
+                (scaled, false)
+            }
+            Some(WordKind::AnalogRaw { analog }) => (self.var(p, &analog, None), true),
+            Some(WordKind::Encoder { device }) => {
+                match self.point(&device, Some(Aspect::Encoder)) {
+                    Some(point) => from_point(p, point),
+                    None => (self.var(p, &device, Some(Aspect::Encoder)), false),
+                }
+            }
+            Some(WordKind::Id { sensor }) => (self.var(p, &sensor, Some(Aspect::Id)), true),
+            Some(WordKind::Count { signal }) => {
+                let inst = format!("c_{}", ident(&signal));
+                if !p.rung_fbs.iter().any(|(i, _)| i == &inst)
+                    && !self
+                        .scene
+                        .logic(&self.program_name(p))
+                        .is_some_and(|l| {
+                            l.rungs.iter().flat_map(|r| &r.outputs).any(|o| {
+                                matches!(o, crate::seq::RungOutput::Ctu { signal: s, .. } if s == &signal)
+                            })
+                        })
+                {
+                    p.notes.push(format!(
+                        "`{name}` is another program's counter: its count is not shared — count in this program, or move the count into a word"
+                    ));
+                }
+                (format!("{inst}.CV"), true)
+            }
+            None => (self.var(p, name, None), false),
+        }
+    }
+
+    /// The authored name of the program being written.
+    fn program_name(&self, p: &Program<'_>) -> String {
+        self.xc
+            .programs
+            .iter()
+            .find(|n| ident(n) == p.ident)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// An operand as `(expression, is INT)`.
+    fn operand(&self, p: &mut Program<'_>, operand: &crate::seq::Operand) -> (String, bool) {
+        match operand {
+            crate::seq::Operand::Word(name) => self.word(p, name),
+            crate::seq::Operand::Const(x) if x.fract() == 0.0 => (format!("{}", *x as i64), true),
+            crate::seq::Operand::Const(x) => (st_real(*x), false),
+        }
+    }
+
+    /// An operand as a `REAL` expression.
+    fn real(&self, p: &mut Program<'_>, operand: &crate::seq::Operand) -> String {
+        match operand {
+            crate::seq::Operand::Const(x) => st_real(*x),
+            word => match self.operand(p, word) {
+                (text, true) => format!("INT_TO_REAL({text})"),
+                (text, false) => text,
+            },
+        }
+    }
+
+    /// A word expression as `(expression, is INT)`: integer arithmetic
+    /// over two whole operands, `REAL` otherwise — the bake's rule.
+    fn expr(&self, p: &mut Program<'_>, value: &crate::seq::WordExpr) -> (String, bool) {
+        let Some((op, right)) = &value.op else {
+            return self.operand(p, &value.left);
+        };
+        let (l, l_int) = self.operand(p, &value.left);
+        let (r, r_int) = self.operand(p, right);
+        if l_int && r_int {
+            (format!("{l} {} {r}", op.as_str()), true)
+        } else {
+            let l = self.real(p, &value.left);
+            let r = self.real(p, right);
+            (format!("{l} {} {r}", op.as_str()), false)
+        }
+    }
+
+    /// `word := value;` — converted to the word's type, and to a scaled
+    /// register's counts.
+    fn assign(&self, p: &mut Program<'_>, word: &str, value: &crate::seq::WordExpr) -> String {
+        let (text, is_int) = self.expr(p, value);
+        if let Some(point) = self.point(word, None) {
+            p.externals.insert(point.var.clone());
+            let var = &point.var;
+            return if point.scale != 1.0 {
+                let real = if is_int {
+                    format!("INT_TO_REAL({text})")
+                } else {
+                    text
+                };
+                format!("{var} := REAL_TO_INT(({real}) * {});", st_real(point.scale))
+            } else {
+                match (point.value == ValueKind::Int, is_int) {
+                    (true, false) => format!("{var} := REAL_TO_INT({text});"),
+                    (false, true) => format!("{var} := INT_TO_REAL({text});"),
+                    _ => format!("{var} := {text};"),
+                }
+            };
+        }
+        let (var, target_int) = self.word(p, word);
+        match (target_int, is_int) {
+            (true, false) => format!("{var} := REAL_TO_INT({text});"),
+            (false, true) => format!("{var} := INT_TO_REAL({text});"),
+            _ => format!("{var} := {text};"),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -354,7 +561,128 @@ impl<'a> Writer<'a> {
                     format!("({})", parts.join(" OR "))
                 }
             }
+            Condition::Not(c) => format!(
+                "NOT ({})",
+                self.condition(p, c, step, started, stops, commanded)
+            ),
+            Condition::Compare { left, op, right } => {
+                let (l, l_int) = self.operand(p, left);
+                let (r, r_int) = self.operand(p, right);
+                if l_int == r_int {
+                    format!("({l} {} {r})", op.st())
+                } else {
+                    let l = self.real(p, left);
+                    let r = self.real(p, right);
+                    format!("({l} {} {r})", op.st())
+                }
+            }
+            // The step's flag: this program's own, or the owner's global
+            // mirror of it.
+            Condition::StepActive {
+                sequence,
+                step: named,
+            } => {
+                if ident(sequence) == p.ident {
+                    match p.flat.iter().find(|s| s.name == named) {
+                        Some(s) => format!("s_{}", s.ident),
+                        None => "FALSE".to_string(),
+                    }
+                } else {
+                    let mirror = format!("{}_at_{}", ident(sequence), ident(named));
+                    let mut mirrors = self.mirrors.borrow_mut();
+                    if !mirrors.iter().any(|(_, _, m)| m == &mirror) {
+                        mirrors.push((sequence.clone(), named.clone(), mirror.clone()));
+                    }
+                    self.shared
+                        .borrow_mut()
+                        .entry(mirror.clone())
+                        .or_insert(false);
+                    p.externals.insert(mirror.clone());
+                    mirror
+                }
+            }
         }
+    }
+
+    /// The rungs of a program as statements, in order: a coil is an
+    /// assignment, SET / RST conditional ones, a timer a `TON` whose `Q`
+    /// is its signal, a counter a `CTU` reset by the RSTs of its signal.
+    fn rungs(&self, p: &mut Program<'_>, logic: &crate::seq::Logic) -> String {
+        use crate::seq::{CoilTarget, RungOutput};
+        let none = BTreeMap::new();
+        let nothing = BTreeSet::new();
+        let cond = |me: &Self, p: &mut Program<'_>, c: &Condition| {
+            me.condition(p, c, "rung", &[], &none, &nothing)
+        };
+        let mut out = String::new();
+        for (k, rung) in logic.rungs.iter().enumerate() {
+            let c = cond(self, p, &rung.condition);
+            let _ = writeln!(out, "(* {} *)", rung.label(k).replace("*)", "* )"));
+            for output in &rung.outputs {
+                match output {
+                    RungOutput::Coil { target } => {
+                        let var = match self.scene.coil_target(target) {
+                            Ok(CoilTarget::Signal)
+                            | Ok(CoilTarget::Run)
+                            | Ok(CoilTarget::AxisCoil { .. })
+                            | Err(_) => self.var(p, target, None),
+                        };
+                        let _ = writeln!(out, "{var} := {c};");
+                    }
+                    RungOutput::Set { signal } => {
+                        let var = self.var(p, signal, None);
+                        let _ = writeln!(out, "IF {c} THEN {var} := TRUE; END_IF;");
+                    }
+                    RungOutput::Reset { signal } => {
+                        let counter =
+                            logic.rungs.iter().flat_map(|r| &r.outputs).any(
+                                |o| matches!(o, RungOutput::Ctu { signal: s, .. } if s == signal),
+                            );
+                        if counter {
+                            // The counter's own R input (written at its rung).
+                            let _ = writeln!(out, "(* resets counter c_{} *)", ident(signal));
+                        } else {
+                            let var = self.var(p, signal, None);
+                            let _ = writeln!(out, "IF {c} THEN {var} := FALSE; END_IF;");
+                        }
+                    }
+                    RungOutput::Move { word, value } => {
+                        let assign = self.assign(p, word, value);
+                        let _ = writeln!(out, "IF {c} THEN {assign} END_IF;");
+                    }
+                    RungOutput::Ton { signal, seconds } => {
+                        let var = self.var(p, signal, None);
+                        let inst = format!("t_{}", ident(signal));
+                        p.rung_fbs.push((inst.clone(), "TON"));
+                        let _ = writeln!(out, "{inst}(IN := {c}, PT := {});", st_time(*seconds));
+                        let _ = writeln!(out, "{var} := {inst}.Q;");
+                    }
+                    RungOutput::Ctu { signal, preset } => {
+                        let var = self.var(p, signal, None);
+                        let inst = format!("c_{}", ident(signal));
+                        p.rung_fbs.push((inst.clone(), "CTU"));
+                        let resets: Vec<String> = logic
+                            .rungs
+                            .iter()
+                            .filter(|r| {
+                                r.outputs.iter().any(
+                                    |o| matches!(o, RungOutput::Reset { signal: s } if s == signal),
+                                )
+                            })
+                            .map(|r| cond(self, p, &r.condition))
+                            .collect();
+                        let reset = if resets.is_empty() {
+                            "FALSE".to_string()
+                        } else {
+                            resets.join(" OR ")
+                        };
+                        let _ = writeln!(out, "{inst}(CU := {c}, R := {reset}, PV := {preset});");
+                        let _ = writeln!(out, "{var} := {inst}.Q;");
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// A measurement as the controller's register holds it: the scaled
@@ -447,6 +775,7 @@ impl<'a> Writer<'a> {
                     let v = self.var(p, signal, None);
                     st.push(format!("{v} := {};", if *value { "TRUE" } else { "FALSE" }));
                 }
+                Action::SetWord { word, value } => st.push(self.assign(p, word, value)),
                 Action::Device { device, command } => {
                     let magazine = self.scene.devices().iter().any(|d| {
                         &d.name == device
@@ -623,9 +952,24 @@ impl<'a> Writer<'a> {
             pulses: BTreeMap::new(),
             device_busy: BTreeSet::new(),
             latches: Vec::new(),
+            rung_fbs: Vec::new(),
+            words: BTreeMap::new(),
+            analogs: BTreeMap::new(),
             body: String::new(),
             notes: Vec::new(),
         };
+        let logic = self.scene.logic(name);
+        let cycle = self.options.cycle || logic.is_some_and(|l| l.cycle);
+        let none = BTreeMap::new();
+        let nothing = BTreeSet::new();
+        // The gates: `enable` joins every transition, `reset` puts the
+        // chain back in its first step and holds it there.
+        let enable = logic
+            .and_then(|l| l.enable.as_ref())
+            .map(|c| self.condition(&mut p, c, "gate", &[], &none, &nothing));
+        let reset = logic
+            .and_then(|l| l.reset.as_ref())
+            .map(|c| self.condition(&mut p, c, "gate", &[], &none, &nothing));
         let n = p.flat.len();
         // The devices this program positions: their done waits are latched.
         let mut commanded: BTreeSet<String> = BTreeSet::new();
@@ -649,6 +993,7 @@ impl<'a> Writer<'a> {
         // controller's own step bands (`IoNode::monitor`).
         let monitor = self
             .point(name, Some(Aspect::Step))
+            .filter(|_| n > 0) // rungs alone have no step to report
             .map(|_| self.var(&mut p, name, Some(Aspect::Step)));
         let report =
             |k: i64| -> Option<String> { monitor.as_ref().map(|word| format!("{word} := {k};")) };
@@ -694,10 +1039,13 @@ impl<'a> Writer<'a> {
                 }
                 others.push(cond.clone());
                 let keyword = if a == 0 { "IF" } else { "ELSIF" };
+                if let Some(enable) = &enable {
+                    cond = format!("{cond} AND {enable}");
+                }
                 let _ = writeln!(block, "{keyword} {flag} AND {cond} THEN");
                 let _ = writeln!(block, "    {flag} := FALSE;");
                 if *target >= n {
-                    if self.options.cycle {
+                    if cycle {
                         let first = format!("s_{}", p.flat[0].ident);
                         let _ = writeln!(block, "    {first} := TRUE; (* cycle *)");
                         if let Some(s) = report(0) {
@@ -728,9 +1076,23 @@ impl<'a> Writer<'a> {
             }
             blocks.push(block);
         }
+        // The rungs, rendered before the body is assembled: their edge
+        // contacts join the triggers sampled at the top of the scan.
+        let rungs = logic
+            .filter(|l| !l.rungs.is_empty())
+            .map(|l| self.rungs(&mut p, l));
         // The body: triggers and timers every scan, the handshake
         // monitors, the first scan's entry, then the transitions.
         let mut body = String::new();
+        if !p.analogs.is_empty() {
+            let _ = writeln!(
+                body,
+                "(* analog inputs: the module's counts scaled to their unit *)"
+            );
+            for statement in p.analogs.values() {
+                let _ = writeln!(body, "{statement}");
+            }
+        }
         if !p.triggers.is_empty() {
             let _ = writeln!(body, "(* edges, sampled every scan *)");
             for (inst, (_, var)) in &p.triggers {
@@ -806,9 +1168,44 @@ impl<'a> Writer<'a> {
             }
         }
         let _ = writeln!(body, "END_IF;");
-        let _ = writeln!(body, "(* transitions, in authored order *)");
-        for block in blocks {
-            body.push_str(&block);
+        match (&reset, n) {
+            (Some(reset), 1..) => {
+                let _ = writeln!(
+                    body,
+                    "(* reset: back to — and held in — the first step; else the transitions, in authored order *)"
+                );
+                let first = format!("s_{}", p.flat[0].ident);
+                let _ = writeln!(body, "IF {reset} THEN");
+                let _ = writeln!(body, "    IF NOT {first} THEN");
+                for step in &p.flat[1..] {
+                    let _ = writeln!(body, "        s_{} := FALSE;", step.ident);
+                }
+                let _ = writeln!(body, "        {first} := TRUE;");
+                if let Some(s) = report(0) {
+                    let _ = writeln!(body, "        {s}");
+                }
+                for s in &entries[0].0 {
+                    let _ = writeln!(body, "        {s}");
+                }
+                let _ = writeln!(body, "    END_IF;");
+                let _ = writeln!(body, "ELSE");
+                for block in blocks {
+                    for line in block.lines() {
+                        let _ = writeln!(body, "    {line}");
+                    }
+                }
+                let _ = writeln!(body, "END_IF;");
+            }
+            _ => {
+                let _ = writeln!(body, "(* transitions, in authored order *)");
+                for block in blocks {
+                    body.push_str(&block);
+                }
+            }
+        }
+        if let Some(rungs) = rungs {
+            let _ = writeln!(body, "(* rungs, every scan, top to bottom *)");
+            body.push_str(&rungs);
         }
         p.body = body;
         Ok(p)
@@ -839,11 +1236,29 @@ pub fn render_st(scene: &Scene, options: &StOptions) -> Result<String, StError> 
         scene,
         xc: &xc,
         options,
+        shared: Default::default(),
+        mirrors: Default::default(),
+        shared_words: Default::default(),
     };
     let mut programs = Vec::new();
     for name in &xc.programs {
         programs.push(writer.program(name)?);
     }
+    // A step another program reads: its owner copies the flag into the
+    // global mirror at the end of its scan.
+    for (owner, step, mirror) in writer.mirrors.borrow().iter() {
+        let Some(p) = programs.iter_mut().find(|p| p.ident == ident(owner)) else {
+            continue;
+        };
+        let flag = match p.flat.iter().find(|s| s.name == step) {
+            Some(s) => format!("s_{}", s.ident),
+            None => "FALSE".to_string(),
+        };
+        let _ = writeln!(p.body, "{mirror} := {flag}; (* read by another program *)");
+        p.externals.insert(mirror.clone());
+    }
+    let shared = writer.shared.borrow().clone();
+    let shared_words = writer.shared_words.borrow().clone();
 
     let mut out = String::new();
     let _ = writeln!(
@@ -876,9 +1291,10 @@ pub fn render_st(scene: &Scene, options: &StOptions) -> Result<String, StError> 
                     .points
                     .iter()
                     .find(|q| &q.var == var)
-                    .map(|q| q.value)
-                    .unwrap_or(ValueKind::Bool);
-                let _ = writeln!(out, "    {var} : {};", ty.as_str());
+                    .map(|q| q.value.as_str())
+                    .or_else(|| shared_words.get(var).map(|(ty, _)| *ty))
+                    .unwrap_or("BOOL");
+                let _ = writeln!(out, "    {var} : {ty};");
             }
             let _ = writeln!(out, "  END_VAR");
         }
@@ -902,8 +1318,17 @@ pub fn render_st(scene: &Scene, options: &StOptions) -> Result<String, StError> 
                 if *initial { " := TRUE" } else { "" }
             );
         }
+        for (word, (ty, initial)) in &p.words {
+            let _ = writeln!(out, "    {word} : {ty} := {initial}; (* word *)");
+        }
+        for scaled in p.analogs.keys() {
+            let _ = writeln!(out, "    {scaled} : REAL; (* scaled *)");
+        }
         for step in p.timers.keys() {
             let _ = writeln!(out, "    t_{step} : TON;");
+        }
+        for (inst, ty) in &p.rung_fbs {
+            let _ = writeln!(out, "    {inst} : {ty};");
         }
         for (inst, (ty, _)) in &p.triggers {
             let _ = writeln!(out, "    {inst} : {ty};");
@@ -961,6 +1386,17 @@ pub fn render_st(scene: &Scene, options: &StOptions) -> Result<String, StError> 
                 });
             let initial = match (point.value, point.side) {
                 (ValueKind::Bool, _) if point.initial.as_bool() => " := TRUE".to_string(),
+                // A word the controller writes starts at its declared value.
+                (ValueKind::Int, PlantSide::Input)
+                    if point.id.aspect.is_none() && point.initial.as_i64() != 0 =>
+                {
+                    format!(" := {}", point.initial.as_i64())
+                }
+                (ValueKind::Real, PlantSide::Input)
+                    if point.id.aspect.is_none() && point.initial.as_f64() != 0.0 =>
+                {
+                    format!(" := {}", st_real(point.initial.as_f64()))
+                }
                 _ => String::new(),
             };
             let _ = writeln!(
@@ -987,7 +1423,22 @@ pub fn render_st(scene: &Scene, options: &StOptions) -> Result<String, StError> 
             if seen.contains(var) {
                 continue;
             }
-            let _ = writeln!(out, "      {var} : BOOL; (* not in the I/O map *)");
+            if let Some((ty, initial)) = shared_words.get(var) {
+                let _ = writeln!(out, "      {var} : {ty} := {initial}; (* word *)");
+                continue;
+            }
+            match shared.get(var) {
+                Some(initial) => {
+                    let _ = writeln!(
+                        out,
+                        "      {var} : BOOL{}; (* relay *)",
+                        if *initial { " := TRUE" } else { "" }
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "      {var} : BOOL; (* not in the I/O map *)");
+                }
+            }
         }
         let _ = writeln!(out, "    END_VAR");
     }
@@ -1004,5 +1455,31 @@ pub fn render_st(scene: &Scene, options: &StOptions) -> Result<String, StError> 
     for note in &xc.notes {
         let _ = writeln!(out, "(* note: {note} *)");
     }
-    Ok(out)
+    Ok(distinct_if_headers(&out))
+}
+
+/// Makes every multi-line `IF … THEN` header of the file textually
+/// unique, by a trailing ordinal comment on the repeats. OpenPLC's ST
+/// optimizer merges blocks whose header lines are identical — across
+/// intervening statements and across programs (two programs' `IF first
+/// THEN` become one, in the first program) — and a comment is enough to
+/// keep them apart. A file with no repeated header is returned as is.
+fn distinct_if_headers(text: &str) -> String {
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.lines() {
+        let header = line.trim();
+        if (header.starts_with("IF ") || header.starts_with("ELSIF ")) && header.ends_with(" THEN")
+        {
+            let n = seen.entry(header.to_string()).or_insert(0);
+            *n += 1;
+            if *n > 1 {
+                let _ = writeln!(out, "{line} (* {n} *)");
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }

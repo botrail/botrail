@@ -6,6 +6,7 @@ import type {
   FlashMsg,
   PlantStatusMsg,
   FrameMsg,
+  SceneryJointMsg,
   GroupMsg,
   ToolpathOverlayMsg,
   IkStatusMsg,
@@ -26,6 +27,8 @@ import type {
   SequenceMsg,
   ServerMessage,
   SignalDefMsg,
+  WordDefMsg,
+  AnalogMsg,
   SignalTrackMsg,
   WordTrackMsg,
   StepSpanMsg,
@@ -44,7 +47,7 @@ import type { HoverTarget } from "./hoverChip";
 import { cacheKey, hubUrl, parseManifest, type CatalogInfo } from "./catalogHub";
 import { reconcileOverlays, setOverlay, type Overlays } from "./overlays";
 import { selectionForTarget } from "./bomTable";
-import type { BomTarget, RouteFindingMsg, RouteMsg } from "./protocol";
+import type { BomTarget, ReadingsMsg, RouteFindingMsg, RouteMsg } from "./protocol";
 
 /** What the studio knows of a catalog product beyond the wire: read from
  * the hub once per reference (the id at the revision the cell resolved),
@@ -222,6 +225,35 @@ function persistRouteDesignLine(on: boolean): boolean {
     // Persistence only.
   }
   return on;
+}
+
+/** The 3D I/O tags: `auto` shows them once the cell has a wiring plan
+ * (any bound point), `on` / `off` override. */
+export type IoTagsMode = "auto" | "on" | "off";
+
+const IO_TAGS_KEY = "botrail-studio.ioTags";
+
+function initialIoTags(): IoTagsMode {
+  try {
+    const v = localStorage.getItem(IO_TAGS_KEY);
+    return v === "on" || v === "off" ? v : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function persistIoTags(mode: IoTagsMode): IoTagsMode {
+  try {
+    localStorage.setItem(IO_TAGS_KEY, mode);
+  } catch {
+    // Persistence only.
+  }
+  return mode;
+}
+
+/** Whether the tags show under `mode` for these points. */
+export function ioTagsShown(mode: IoTagsMode, points: { status: string }[]): boolean {
+  return mode === "on" || (mode === "auto" && points.some((p) => p.status === "bound"));
 }
 
 const BOM_KEY = "botrail-studio.bom";
@@ -515,6 +547,9 @@ export interface StudioState {
   obstacles: ObstacleMsg[];
   /** Named world frames (mount points); re-sent in full on every change. */
   frames: FrameMsg[];
+  /** Doors, drawers and racks — scenery on a hinge or a slide; re-sent in
+   * full whenever one is declared, removed or moved. */
+  sceneryJoints: SceneryJointMsg[];
   /** Cable / tube routes resolved at the current poses; re-sent in full
    * whenever the plan or a resident they hang on changes. */
   routes: RouteMsg[];
@@ -580,6 +615,9 @@ export interface StudioState {
   sequences: SequenceMsg[];
   /** Declared internal signals. */
   signalDefs: SignalDefMsg[];
+  /** Internal words (data registers) and analog inputs. */
+  wordDefs: WordDefMsg[];
+  analogs: AnalogMsg[];
   /** Pseudo-sensors; re-sent in full by the server on every change. */
   sensors: SensorMsg[];
   /** Weld-flash bindings (signal -> flash at a robot's TCP). */
@@ -615,6 +653,9 @@ export interface StudioState {
     fps: number;
     viz: "rgb" | "depth";
     depthData: boolean;
+    /** Film the 3D I/O tags too (a presentation clip, not what the
+     * camera sees). */
+    labels: boolean;
   } | null;
   /** Export progress in [0, 1] — separate from `camExport` so per-frame
    * updates don't remount the exporter. */
@@ -660,8 +701,13 @@ export interface StudioState {
   bomOpen: boolean;
   /** The cable list and route findings overlay over the viewport (persisted). */
   routingOpen: boolean;
-  /** A signal lane picked in the topology diagram, lit on the dock. */
+  /** The point in focus across the studio — its label, which is its
+   * lane's name when it has one: picked in the I/O table, the ladder,
+   * the SFC chart or the topology diagram, lit in all of them, on the
+   * dock and on its 3D tag. */
   highlightLane: string | null;
+  /** The 3D I/O tags (persisted). */
+  ioTags: IoTagsMode;
   /** True while a sequence rollout is in flight. */
   sequenceSimulating: boolean;
   /** The physics toggle: whether the next bake (and the one the toggle
@@ -717,6 +763,9 @@ export interface StudioState {
     /** What the routes' moving spans did over this cycle (bt.routing),
      * each finding with the time to seek to; empty without a replay. */
     routeFindings: RouteFindingMsg[];
+    /** A controller's own I/O image read over this run (a replayed
+     * machine log, a monitor) and where it parted from the model. */
+    readings?: ReadingsMsg | null;
     /** Per-robot move intervals (motion/ramp bands), in scene order. */
     robots: { name: string; moves: StepSpanMsg[] }[];
     signals: SignalTrackMsg[];
@@ -807,7 +856,7 @@ export interface StudioState {
   beginCamExport: (
     camera: string,
     fps: number,
-    opts?: { viz?: "rgb" | "depth"; depthData?: boolean },
+    opts?: { viz?: "rgb" | "depth"; depthData?: boolean; labels?: boolean },
   ) => void;
   setCamExportProgress: (p: number) => void;
   endCamExport: () => void;
@@ -847,6 +896,7 @@ export interface StudioState {
    * and raise Layout, so the PART card follows. */
   selectTarget: (target: BomTarget) => void;
   setHighlightLane: (lane: string | null) => void;
+  setIoTags: (mode: IoTagsMode) => void;
   /**
    * Viewport pick: raise the tab holding the picked thing's tools
    * (robot → Motion, obstacle → Layout). The Sequence tab is sticky —
@@ -891,6 +941,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   gizmoMode: "translate",
   obstacles: [],
   frames: [],
+  sceneryJoints: [],
   routes: [],
   routeSupports: [],
   routeCandidates: {},
@@ -921,6 +972,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   motions: [],
   sequences: [],
   signalDefs: [],
+  wordDefs: [],
+  analogs: [],
   sensors: [],
   flashes: [],
   plant: null,
@@ -943,6 +996,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   catalog: {},
   io: emptyIo(),
   highlightLane: null,
+  ioTags: initialIoTags(),
   sequenceSimulating: false,
   physicsOn: false,
   lastBake: null,
@@ -1002,6 +1056,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           selectedRobot: selected,
           obstacles: [],
           frames: [],
+          sceneryJoints: [],
           routes: [],
           routeSupports: [],
           routeCandidates: {},
@@ -1025,6 +1080,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           motions: [],
           sequences: [],
           signalDefs: [],
+          wordDefs: [],
+          analogs: [],
           sensors: [],
           devices: [],
           cameras: [],
@@ -1080,6 +1137,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       }
     } else if (msg.type === "frames") {
       set({ frames: msg.frames });
+    } else if (msg.type === "scenery_joints") {
+      set({ sceneryJoints: msg.joints });
     } else if (msg.type === "routes") {
       set((s) => ({
         routes: msg.routes,
@@ -1111,7 +1170,12 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           : { motions: msg.motions };
       });
     } else if (msg.type === "sequences") {
-      set({ sequences: msg.sequences, signalDefs: msg.signals });
+      set({
+        sequences: msg.sequences,
+        signalDefs: msg.signals,
+        wordDefs: msg.words ?? [],
+        analogs: msg.analogs ?? [],
+      });
     } else if (msg.type === "sensors") {
       set((s) => {
         const sel = s.selection;
@@ -1247,6 +1311,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             duration: tl.duration,
             stepSpans: tl.step_spans,
             routeFindings: tl.route_findings ?? [],
+            readings: tl.readings ?? null,
             robots: tl.robots.map((r) => ({
               name: r.name,
               moves: r.moves,
@@ -1391,6 +1456,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
             duration: msg.timeline.duration,
             stepSpans: msg.timeline.step_spans,
             routeFindings: msg.timeline.route_findings ?? [],
+            readings: msg.timeline.readings ?? null,
             robots: msg.timeline.robots.map((r) => ({
               name: r.name,
               moves: r.moves,
@@ -1641,6 +1707,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
         fps,
         viz: opts?.viz ?? "rgb",
         depthData: opts?.depthData ?? false,
+        labels: opts?.labels ?? false,
       },
       camExportProgress: 0,
       playing: false,
@@ -1760,6 +1827,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
     s.focusTab("obstacle");
   },
   setHighlightLane: (lane) => set({ highlightLane: lane }),
+  setIoTags: (mode) => set({ ioTags: persistIoTags(mode) }),
   focusTab: (target) =>
     set((s) =>
       s.activeTab === "sequence"

@@ -18,6 +18,10 @@ import { colorPipeline, disposeColorPipeline } from "./colorPipeline";
 export const cameraRig = {
   /** Authoring-aid roots hidden from the sensor-camera pass. */
   helpers: new Set<THREE.Object3D>(),
+  /** The 3D I/O tags' roots: hidden from every camera pass like the
+   * aids, but a video export may ask for them (a presentation clip
+   * rather than what the camera sees) — `showLabels`. */
+  labels: new Set<THREE.Object3D>(),
   /** Camera name -> the Object3D sitting at its optical frame (-Z looks).
    * Registered by CameraView; the pass reads its world transform, so every
    * mount (world / vehicle / link) and the playback driver's writes are
@@ -86,9 +90,20 @@ export function aimSensorCamera(
  * sensor render. */
 export function hideAids(): [THREE.Object3D, boolean][] {
   const saved: [THREE.Object3D, boolean][] = [];
-  for (const o of cameraRig.helpers) {
+  for (const o of [...cameraRig.helpers, ...cameraRig.labels]) {
     saved.push([o, o.visible]);
     o.visible = false;
+  }
+  return saved;
+}
+
+/** Shows the I/O tags for one render inside a `hideAids` bracket (a video
+ * export filming them); restore with `restoreAids`. */
+export function showLabels(): [THREE.Object3D, boolean][] {
+  const saved: [THREE.Object3D, boolean][] = [];
+  for (const o of cameraRig.labels) {
+    saved.push([o, o.visible]);
+    o.visible = true;
   }
   return saved;
 }

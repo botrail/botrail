@@ -137,7 +137,17 @@ and the [standard parts](standard-parts.md) for what is ordered and measured.
 A package whose doors and drawers are joints — a cabinet, a dishwasher, a
 range hood — is a prop all the same: `bt.parts.simready` imports every body
 of it at its authored pose (`load_usd(..., articulated="scenery")`), where a
-plain `load_usd` leaves an articulated subtree to the robot importer.
+plain `load_usd` leaves an articulated subtree to the robot importer. Its
+revolute and prismatic joints come along as
+[scenery joints](scene-and-obstacles.md#doors-and-drawers), shut as
+authored, each over the obstacles of the body it moves (and of whatever is
+jointed on below it), with the range the file gives:
+
+```python
+bt.parts.simready(scene, "kitchen/dishwasher", (3.1, 0.9), DISHWASHER)
+scene.scenery_joints      # […/Joints/Door_joint, …/Joints/LowerRack_joint, …]
+scene.set_scenery_joint("kitchen/dishwasher/World/Joints/Door_joint", math.radians(90))
+```
 
 ![A catalog Unitree G1-D carrying two mugs from the coffee table to the kitchen, in a flat furnished from SimReady Central](../assets/studio/home_tidy.png)
 

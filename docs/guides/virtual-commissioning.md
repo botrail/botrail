@@ -113,8 +113,10 @@ Two links come with the package (`pip install "botrail[vc]"` brings
   and subscribes to the nodes the controller writes; `nodes=` maps a
   point's label to its NodeId when the default `ns=<n>;s=<tag>` is not it.
 
-Both bind to this machine unless told otherwise (`allow_remote=True`): the
-plant is for a controller **under test**, never a plant floor. `cycle=True`
+Both bind to this machine unless told otherwise (`allow_remote=True`):
+these links *write* the controller's inputs, so they are for a controller
+**under test** and no other. A controller that runs a real machine is only
+ever read — [monitoring](monitoring.md) has its own, read-only readers. `cycle=True`
 starts the programs the plant scans itself (a machine's own program) over
 when they end, as a cycling controller outside expects; `pace="realtime"`
 paces the scans to the wall clock (`speed` scales it), `sync` and `free`
@@ -134,6 +136,17 @@ s.force("part_at_pick", True)                 # a PLC force: the lane is pinned 
 s.inject(bt.io.open("spec_ok"), at=bt.vc.rising("part_at_pick"))   # a wire that opens at that edge
 s.run(until=bt.vc.level("vacuum", True), timeout=30.0)
 ```
+
+`force` also takes a number, for a word — a register, or on an analog
+input what its transmitter measures, in its engineering unit (the current,
+the counts and the scaled value follow through the loop):
+`s.force("dp", 90.0)`. `s.write("valve_time", 200)` keys a value into a
+defined word once — a setpoint changed while the line runs; nothing is
+pinned. A register an external controller keeps is out of the plant's
+reach and `write` says so: declare the word an input
+(`scene.declare_io("valve_time", role="input")`) and the controller reads
+it from the wire, where a hand can change it. `s.analog()` reads every
+loop now.
 
 `force` / `unforce` pin a sensor, an internal signal or a device's running
 state; `inject` takes the same faults a scenario does (`bt.io.stuck`,
@@ -174,7 +187,10 @@ commands, applied before its next scan:
   **⤓ usd**, while the plant runs on; **live** follows it again;
 * the **I/O table** gains the controllers' chips and a **force** column:
   `1` / `0` pin a lane like a PLC force, `×` releases it, and a forced row
-  reads as the PLC paints it (an `F` beside its live level);
+  reads as the PLC paints it (an `F` beside its live level); a force on a
+  belt's or a feeder's run coil holds the device itself — the belt stops
+  whatever the controller writes meanwhile, and the release hands it back
+  to the controller's last word;
 * a **right-click on a lane's name** sets a breakpoint on its rising edge
   (shift: falling); the lane wears `↑` / `↓`, and when the edge lands the
   plant holds and the bar says *paused at ↑part_at_pick at 12.34 s*;
@@ -183,6 +199,15 @@ commands, applied before its next scan:
   hold time — and the panel's **lamps** (`lamps={"fault": "red"}`,
   `scene.add_lamp` for one on anything else) light in their colour while
   their signal is on, in a live run and in a played-back bake alike.
+
+The dock's **waiting line** follows the live head: what every program
+waits for now, with the address of each open contact
+(`pick › arrival  %IX100.1 ↑part_at_pick | 2.36/8.00s`), and the
+[3D tags](studio.md#the-io-tags-tags) light on the cell as the controller
+sees its I/O. The same question from Python is `s.waiting()` — the step
+each program stands in and the contacts it waits on, at the plant's clock
+(an external controller's program shows once its node reports its steps,
+`monitor=True`).
 
 The live past is not kept in the browser beyond a moment (the bands and
 lanes are whole, the 3D replay is the last two seconds and the head); the
@@ -346,6 +371,13 @@ sheet from the shell (exit 1 on a red row); `botrail export … --fat` and
 sections=[fat.section()])` into the cell report. The sheet is the
 deliverable; pytest keeps the `assert`s.
 
+The sheet's evidence can travel as video: `sheet.record(scene, "overview",
+"fat_clips/")` films each row's run through a scene camera, one clip per
+case named after it, with the [3D tags](studio.md#the-io-tags-tags) in the
+picture — a red row shows which point did what (`labels=False` films the
+camera's plain view; needs what
+[`record_camera`](export.md#camera-video) needs).
+
 ## A PLC under test: the OpenPLC demo
 
 `examples/commissioning/openplc_pick_cell/` runs the pick cell against
@@ -382,6 +414,60 @@ botrail commission cell.py --link PLC1=modbus://0.0.0.0:5020 --cycle --for 60 --
 botrail commission cell.py --link PLC1=replay:out/cell_inputs.csv --diff
 botrail fat cell.py --cases fat.yaml --link PLC1=modbus://0.0.0.0:5020 --horizon 30 --out fat.md
 ```
+
+### Rungs on the controller
+
+A program's [rungs and gates](sequences.md#rungs-and-gates) are written
+into the same ST: after the transitions, each rung as an assignment
+(`run := ((pb_start OR run) AND NOT (pb_stop));`), a conditional one for
+`-(S)-` / `-(R)-`, a `TON` or a `CTU` whose `Q` is the rung's signal; the
+`enable` gate joins every transition and the `reset` gate wraps them. With
+several programs on one host the relays they share become globals, and a
+step another program reads (`step_active`) is mirrored into one by its
+owner at the end of its scan.
+`examples/commissioning/ladder_line/run_demo.py --openplc` runs a line
+written this way — three programs of rungs and a gated, cycling step chain
+— on OpenPLC v3 against the plant while an operator's script (a program
+the plant keeps) presses the buttons, and compares the run with the bake:
+the same cycles, works and belt starts, the run relay and the lot lamp
+switching within 0.25 s of the bake at 20 ms polling. Two things that run
+taught the export: OpenPLC's ST optimizer merges multi-line `IF` blocks
+whose header lines are identical — across programs — so repeated headers
+get a trailing ordinal comment (`IF first THEN (* 2 *)`); and an output a
+step fires once (`start("feeder")`) is a level the PLC never drops, so what
+must act every cycle is a rung's coil on the step relay, held until the
+plant answers.
+
+### Words on the controller
+
+[Words and analog inputs](sequences.md#words-and-analog-inputs) cross the
+same way. A word a controller keeps is a typed local (`dp_limit : REAL :=
+80.0;`, `t_valve : INT := 0;`); one that crosses is a located global on a
+word channel — a REAL on a channel with a unit as a scaled INT, converted
+where it is read (`INT_TO_REAL(dp_warn) / 10.0`). An analog input is the
+module's counts at its address (`dp AT %IW100 : INT;`) and one scaling
+statement at the top of every program that reads it — the plant's own
+expression, in the same order:
+
+```
+dp_eu := 0.0 + (INT_TO_REAL(dp) - 0.0) * 100.0 / 4000.0; (* 0 … 100 kPa over 0 … 4000 counts *)
+warn := (run AND (dp_eu >= (INT_TO_REAL(dp_warn) / 10.0)));
+IF (run AND NOT (valve_extended)) THEN t_valve := t_valve + 10; END_IF;
+```
+
+Comparisons and arithmetic convert between INT and REAL where the two
+meet, by the bake's rule (two whole operands compute as INT). The PLCopen
+export carries contacts and coils only and refuses a program with words by
+name. `examples/commissioning/filter_unit/run_demo.py --openplc` runs the
+filter unit's rungs on OpenPLC v3 against the plant: the run lamp, the warning
+and the alarm switch within 0.35 s of the bake at 20 ms polling, the retuned
+setpoint brings the warning forward by the same 2.5 s, and
+`s.write("valve_time", 200)` — a watchdog shorter than the valve's stroke
+— trips the alarm on the real controller. One thing that run taught the
+program: before a polled controller has read its inputs once, every input
+is zero — a setpoint of `0` warns at power-up, and a watchdog compared
+against it trips. The demo gates both rungs (`run AND …`); the bake, where
+inputs are right from the first scan, would never have shown it.
 
 ## The robot controller in the loop
 
@@ -588,7 +674,9 @@ happens to wait.
 ## What it is not
 
 botrail never drives real actuators: it writes a controller's inputs, in a
-test setup. It does not emulate a fieldbus device (PROFINET, EtherCAT,
+test setup, and it does not write to a controller that runs a real machine
+at all — that one it [reads](monitoring.md), from a log or through a
+read-only reader, and mirrors. It does not emulate a fieldbus device (PROFINET, EtherCAT,
 EtherNet/IP implicit I/O) — the controller reaches the plant over Modbus or
 OPC UA, or through a gateway. A robot whose own controller is the external
 host is moved by that controller's joint stream (`bt.vc.ursim`, RTDE) or

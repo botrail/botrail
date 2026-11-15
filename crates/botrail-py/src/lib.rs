@@ -2040,6 +2040,7 @@ impl Scene {
             .iter()
             .map(|n| (n.mass, n.friction, n.restitution))
             .collect();
+        let node_names: Vec<String> = imported.nodes.iter().map(|n| n.name.clone()).collect();
         let batch = imported
             .nodes
             .into_iter()
@@ -2055,6 +2056,46 @@ impl Scene {
             })
             .collect();
         let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
+        // The doors and drawers of a prop taken as scenery keep their
+        // joints (`articulated="scenery"`), shut as authored, over the
+        // names the obstacles actually got.
+        let named: std::collections::HashMap<&str, &str> = node_names
+            .iter()
+            .map(String::as_str)
+            .zip(names.iter().map(String::as_str))
+            .collect();
+        for joint in &imported.joints {
+            let objects: Vec<String> = joint
+                .objects
+                .iter()
+                .filter_map(|node| named.get(node.as_str()).map(|name| name.to_string()))
+                .collect();
+            let base = joint
+                .base
+                .as_deref()
+                .and_then(|node| named.get(node))
+                .map(|name| name.to_string());
+            let (kind, free) = if joint.hinge {
+                (
+                    botrail_scene::scenery::SceneryJointKind::Hinge,
+                    (-std::f64::consts::PI, std::f64::consts::PI),
+                )
+            } else {
+                (botrail_scene::scenery::SceneryJointKind::Slide, (-1.0, 1.0))
+            };
+            if let Err(e) = self.hub.add_scenery_joint(
+                &format!("{prefix}{}", joint.name),
+                kind,
+                objects,
+                joint.origin.coords.into(),
+                joint.axis.into(),
+                joint.range.unwrap_or(free),
+                0.0,
+                base,
+            ) {
+                eprintln!("botrail: usd import: {e}; left as fixed scenery");
+            }
+        }
         // A stage that weighs its bodies (`PhysicsMassAPI`) or binds them a
         // physics material hands those on; inert until the obstacle is made
         // dynamic, like `set_physics`.
@@ -2182,6 +2223,131 @@ impl Scene {
         let names = self.hub.add_obstacles(batch).map_err(scene_err)?;
         self.hub.add_frames(named);
         Ok(names)
+    }
+
+    /// Hangs obstacles on a hinge — a fence door, a cabinet door, a lid:
+    /// `objects` (the leaf, its handle, whatever rides on it) turn together
+    /// about the line through `origin` along `axis`, by an angle in
+    /// radians within `range`. `origin` and `axis` are world coordinates
+    /// as the scene stands; with `base` — the obstacle the leaf hangs on,
+    /// a post or the carcass — they are kept in its frame, so moving the
+    /// unit moves the hinge with it. `position` is what the objects'
+    /// current poses count as (shut is 0). The joint is passive scenery:
+    /// `set_scenery_joint` (or a hand, in the studio) poses it; no
+    /// sequence drives it. Naming an existing joint replaces it.
+    #[pyo3(signature = (name, objects, origin, axis = [0.0, 0.0, 1.0], range = (0.0, std::f64::consts::FRAC_PI_2), position = 0.0, base = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_hinge(
+        &self,
+        name: &str,
+        objects: Vec<String>,
+        origin: [f64; 3],
+        axis: [f64; 3],
+        range: (f64, f64),
+        position: f64,
+        base: Option<String>,
+    ) -> PyResult<()> {
+        self.hub
+            .add_scenery_joint(
+                name,
+                botrail_scene::scenery::SceneryJointKind::Hinge,
+                objects,
+                origin,
+                axis,
+                range,
+                position,
+                base,
+            )
+            .map_err(scene_err)
+    }
+
+    /// Puts obstacles on a slide — a drawer, a dishwasher rack, a sliding
+    /// door: `objects` travel together along `axis` by a distance in
+    /// metres within `range`. The rest is as `add_hinge`; `origin` only
+    /// says where the studio draws the rail (the first object's position
+    /// when left out).
+    #[pyo3(signature = (name, objects, axis, range, position = 0.0, base = None, origin = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_slide(
+        &self,
+        name: &str,
+        objects: Vec<String>,
+        axis: [f64; 3],
+        range: (f64, f64),
+        position: f64,
+        base: Option<String>,
+        origin: Option<[f64; 3]>,
+    ) -> PyResult<()> {
+        let origin = origin
+            .or_else(|| {
+                objects
+                    .first()
+                    .and_then(|o| self.hub.obstacle_pose(o))
+                    .map(|p| p.0)
+            })
+            .unwrap_or([0.0; 3]);
+        self.hub
+            .add_scenery_joint(
+                name,
+                botrail_scene::scenery::SceneryJointKind::Slide,
+                objects,
+                origin,
+                axis,
+                range,
+                position,
+                base,
+            )
+            .map_err(scene_err)
+    }
+
+    /// Moves a hinge or a slide to `position` (radians / metres), held
+    /// within its range, and its objects with it. Returns where it stands.
+    fn set_scenery_joint(&self, name: &str, position: f64) -> PyResult<f64> {
+        self.hub
+            .set_scenery_joint(name, position)
+            .map_err(scene_err)
+    }
+
+    /// A hinge or a slide as a dict: `kind` (`"hinge"` / `"slide"`),
+    /// `position`, `range`, `origin` and `axis` (world, as the scene
+    /// stands), `objects` and `base`.
+    fn scenery_joint<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyDict>> {
+        let (joint, origin, axis) = self
+            .hub
+            .scenery_joint(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown scenery joint `{name}`")))?;
+        let d = PyDict::new(py);
+        d.set_item(
+            "kind",
+            match joint.kind {
+                botrail_scene::scenery::SceneryJointKind::Hinge => "hinge",
+                botrail_scene::scenery::SceneryJointKind::Slide => "slide",
+            },
+        )?;
+        d.set_item("position", joint.position)?;
+        d.set_item("range", joint.range)?;
+        d.set_item("origin", origin)?;
+        d.set_item("axis", axis)?;
+        d.set_item("objects", joint.objects)?;
+        d.set_item("base", joint.base)?;
+        Ok(d)
+    }
+
+    /// The names of the scene's hinges and slides.
+    #[getter]
+    fn scenery_joints(&self) -> Vec<String> {
+        self.hub.scenery_joint_names()
+    }
+
+    /// Forgets a hinge or a slide; its objects stay where they stand.
+    fn remove_scenery_joint(&self, name: &str) -> PyResult<()> {
+        if self.hub.remove_scenery_joint(name) {
+            Ok(())
+        } else {
+            Err(PyValueError::new_err(format!(
+                "unknown scenery joint `{name}`"
+            )))
+        }
     }
 
     /// Registers (or updates) a named world frame.
@@ -3057,6 +3223,88 @@ impl Scene {
 
     fn remove_signal(&self, name: &str) -> PyResult<()> {
         self.hub.remove_signal(name).map_err(scene_err)
+    }
+
+    /// Declares (or re-initializes) an internal word — a PLC data
+    /// register: a setpoint, a computed value, a process quantity.
+    /// Compared with `bt.seq.word(name) >= ...`, written by
+    /// `bt.seq.set_word` and a rung's `.move(...)`. `integer=True` makes
+    /// it an `INT` (every write rounds), else a `REAL`.
+    #[pyo3(signature = (name, initial = 0.0, integer = false))]
+    fn define_word(&self, name: &str, initial: f64, integer: bool) -> PyResult<()> {
+        self.hub
+            .define_word(name, initial, integer)
+            .map_err(scene_err)
+    }
+
+    fn remove_word(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_word(name).map_err(scene_err)
+    }
+
+    /// Declared internal words as `(name, initial, integer)`.
+    #[getter]
+    fn words(&self) -> Vec<(String, f64, bool)> {
+        self.hub.with_scene(|scene| {
+            scene
+                .words()
+                .iter()
+                .map(|w| (w.name.clone(), w.initial, w.integer))
+                .collect()
+        })
+    }
+
+    /// Adds an analog input: a transmitter on a 4–20 mA loop measuring the
+    /// word lane `source` (a defined word, `<device>.encoder`) over
+    /// `range` — the engineering value at 4 mA and at 20 mA — into an
+    /// input module whose counts run over `raw`. Programs read the scaled
+    /// value as `bt.seq.word(name)` and the counts as
+    /// `bt.seq.word(name + ".raw")`; an open loop (`bt.io.open(name)`)
+    /// reads 0 mA, below `raw[0]`.
+    /// `place` names the obstacle that is the transmitter's body: the
+    /// studio hangs the input's tag there.
+    #[pyo3(signature = (name, source, range, unit = "", raw = (0, 4000), place = None))]
+    fn add_analog(
+        &self,
+        name: &str,
+        source: &str,
+        range: (f64, f64),
+        unit: &str,
+        raw: (i64, i64),
+        place: Option<String>,
+    ) -> PyResult<()> {
+        self.hub
+            .upsert_analog(botrail_scene::seq::Analog {
+                name: name.to_string(),
+                source: source.to_string(),
+                range,
+                unit: unit.to_string(),
+                raw,
+                place,
+            })
+            .map_err(scene_err)
+    }
+
+    fn remove_analog(&self, name: &str) -> PyResult<()> {
+        self.hub.remove_analog(name).map_err(scene_err)
+    }
+
+    /// The analog inputs as dicts: `name`, `source`, `range`, `unit`, `raw`.
+    #[getter]
+    fn analogs<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let analogs = self.hub.with_scene(|scene| scene.analogs().to_vec());
+        analogs
+            .into_iter()
+            .map(|a| {
+                let d = PyDict::new(py);
+                d.set_item("name", a.name)?;
+                d.set_item("source", a.source)?;
+                d.set_item("range", a.range)?;
+                d.set_item("unit", a.unit)?;
+                d.set_item("raw", a.raw)?;
+                d.set_item("place", a.place)?;
+                Ok(d)
+            })
+            .collect()
     }
 
     /// Binds a weld flash to a signal at a robot's TCP: while the signal
@@ -4600,11 +4848,19 @@ impl Scene {
         Ok(IoReport { inner: d.report })
     }
 
-    /// The I/O list as text: `format` is `"csv"`, `"md"` (Markdown table)
-    /// or `"json"` (raw fields, step indices included).
+    /// The I/O list as text: `format` is `"csv"`, `"md"` (Markdown table),
+    /// `"json"` (raw fields, step indices included) or `"comments"` (the
+    /// device-comment table: one row per bound point, its address and a
+    /// comment — the binding's note, else its tag, else the point's name).
     #[pyo3(signature = (format = "csv", sequences = None))]
     fn io_list(&self, format: &str, sequences: Option<Vec<String>>) -> PyResult<String> {
         let d = self.derive_io(sequences)?;
+        if format == "analog" {
+            // The analog loops: instrument range → 4–20 mA → counts → scaling.
+            return Ok(self
+                .hub
+                .with_scene(|scene| botrail_scene::iomap::render_analog(scene, &d)));
+        }
         render_io(&d, format)
     }
 
@@ -9036,6 +9292,22 @@ impl LiveRollout {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// Pins a word lane to `value` until `unforce`: a register, or — on
+    /// an analog input — what its transmitter measures (the current, the
+    /// counts and the scaled value follow).
+    fn force_word(&mut self, name: &str, value: f64) -> PyResult<()> {
+        self.live_mut()?
+            .force_word(name, value)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Writes a defined word once — a setpoint keyed in.
+    fn write_word(&mut self, name: &str, value: f64) -> PyResult<()> {
+        self.live_mut()?
+            .write_word(name, value)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Injects a fault — `bt.io.stuck(name, value)`, `bt.io.open(name)`,
     /// `bt.io.node_down(node)` — resolved through the bindings like a
     /// scenario's: now (`at=None`), on a lane's rising edge
@@ -10255,6 +10527,135 @@ impl SequenceTimeline {
     /// engine put the body to sleep for the last time.
     fn settled_at(&self, name: &str) -> Option<f64> {
         self.inner.settled_at(name)
+    }
+
+    /// Every analog input's chain at `t`: one dict per input — `name`,
+    /// `unit`, `source` and `measured` (the word lane the transmitter
+    /// measures and its value), `current` (mA, as the counts imply it),
+    /// `raw` (the module's counts), `scaled` (what the programs read),
+    /// `open` (the loop is broken) and `address` (the bound input).
+    fn analog<'py>(&self, py: Python<'py>, t: f64) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        botrail_scene::rollout::analog_at(&self.scene, &self.inner, t)
+            .into_iter()
+            .map(|a| {
+                let d = PyDict::new(py);
+                d.set_item("name", a.name)?;
+                d.set_item("unit", a.unit)?;
+                d.set_item("source", a.source)?;
+                d.set_item("measured", a.measured)?;
+                d.set_item("current", a.current)?;
+                d.set_item("raw", a.raw)?;
+                d.set_item("scaled", a.scaled)?;
+                d.set_item("open", a.open)?;
+                d.set_item("address", a.address)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// This timeline with a controller's readings attached (the JSON of a
+    /// `ReadingsMsg`: the I/O image as read from a log or by a monitor,
+    /// and where it parted from the model), or with them removed
+    /// (`None`). `bt.vc.monitor` attaches them; a studio shows them on
+    /// the lanes and the tags.
+    #[pyo3(signature = (readings = None))]
+    fn with_readings(&self, readings: Option<&str>) -> PyResult<SequenceTimeline> {
+        let readings = match readings {
+            None => None,
+            Some(text) => Some(
+                serde_json::from_str::<botrail_scene::wire::ReadingsMsg>(text).map_err(|e| {
+                    PyValueError::new_err(format!("readings are not a ReadingsMsg: {e}"))
+                })?,
+            ),
+        };
+        let mut inner = self.inner.clone();
+        inner.readings = readings;
+        Ok(SequenceTimeline {
+            inner,
+            scene: self.scene.clone(),
+        })
+    }
+
+    /// The readings attached to this timeline as the JSON of a
+    /// `ReadingsMsg`, or `None` — see `with_readings`.
+    fn readings_json(&self) -> Option<String> {
+        self.inner
+            .readings
+            .as_ref()
+            .map(|r| serde_json::to_string(r).expect("wire types serialize infallibly"))
+    }
+
+    /// What every program waits on at `t`: one dict per program standing
+    /// in a step — `program`, `step`, `flat` (the step's index on the SFC
+    /// chart and the ladder), `since`, and `exits` in authored order, each
+    /// `{condition, holds, unmet}` with the contacts that do not conduct:
+    /// `{condition, kind, name, level, remaining, point, address}` (the
+    /// I/O point the program reads there and its bound address). Programs
+    /// not started or already ended are left out. Levels and timers are
+    /// read from the recorded lanes; an edge conducts at the instant it
+    /// fires.
+    fn waiting<'py>(&self, py: Python<'py>, t: f64) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        botrail_scene::rollout::waiting_at(&self.scene, &self.inner, t)
+            .into_iter()
+            .map(|w| {
+                let d = PyDict::new(py);
+                d.set_item("program", w.program)?;
+                d.set_item("step", w.step)?;
+                d.set_item("flat", w.flat)?;
+                d.set_item("since", w.since)?;
+                let exits = w
+                    .exits
+                    .into_iter()
+                    .map(|e| {
+                        let x = PyDict::new(py);
+                        x.set_item("condition", e.condition)?;
+                        x.set_item("holds", e.holds)?;
+                        let unmet = e
+                            .unmet
+                            .into_iter()
+                            .map(|l| {
+                                let c = PyDict::new(py);
+                                c.set_item("condition", l.condition)?;
+                                c.set_item("kind", l.kind)?;
+                                c.set_item("name", l.name)?;
+                                c.set_item("level", l.level)?;
+                                c.set_item("remaining", l.remaining)?;
+                                c.set_item("point", l.point)?;
+                                c.set_item("address", l.address)?;
+                                Ok(c)
+                            })
+                            .collect::<PyResult<Vec<_>>>()?;
+                        x.set_item("unmet", unmet)?;
+                        Ok(x)
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                d.set_item("exits", exits)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Every step's stay on the timeline, in order, with the exit that let
+    /// the program on: dicts with `program`, `step`, `flat`, `start`,
+    /// `end`, `waited` and `released_by` (the condition in PLC vocabulary
+    /// — `↑part_at_pick`, `0.50s`, `done ▶to_pick` — or `None` when the
+    /// run ended in the step). Summed per `released_by`, it is where the
+    /// cycle's time went.
+    fn waits<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        botrail_scene::rollout::wait_spans(&self.scene, &self.inner)
+            .into_iter()
+            .map(|w| {
+                let d = PyDict::new(py);
+                d.set_item("program", w.program)?;
+                d.set_item("step", w.step)?;
+                d.set_item("flat", w.flat)?;
+                d.set_item("start", w.start)?;
+                d.set_item("end", w.end)?;
+                d.set_item("waited", w.end - w.start)?;
+                d.set_item("released_by", w.released_by)?;
+                Ok(d)
+            })
+            .collect()
     }
 
     /// Stretches where a running conveyor drove under a tracked object
@@ -11533,13 +11934,14 @@ fn render_topology(
 }
 
 fn render_io(d: &botrail_scene::iomap::IoDerivation, format: &str) -> PyResult<String> {
-    use botrail_scene::iomap::{render_csv, render_json, render_markdown};
+    use botrail_scene::iomap::{render_comments, render_csv, render_json, render_markdown};
     match format {
         "csv" => Ok(render_csv(d)),
         "md" | "markdown" => Ok(render_markdown(d)),
         "json" => Ok(render_json(d)),
+        "comments" => Ok(render_comments(d)),
         other => Err(PyValueError::new_err(format!(
-            "unknown I/O list format {other:?} (csv, md, json)"
+            "unknown I/O list format {other:?} (csv, md, json, comments, analog)"
         ))),
     }
 }

@@ -219,6 +219,9 @@ fn condition_text(c: &Condition, after: Option<&Step>) -> String {
         Condition::DeviceDone { device } => format!("INPOS({device})"),
         Condition::All(cs) => join(cs, " AND ", after),
         Condition::Any(cs) => join(cs, " OR ", after),
+        Condition::Not(c) => format!("NOT {}", condition_text(c, after)),
+        Condition::StepActive { sequence, step } => format!("STEP({sequence}/{step})"),
+        Condition::Compare { left, op, right } => format!("{left} {} {right}", op.st()),
     }
 }
 
@@ -273,7 +276,21 @@ fn condition_inputs(c: &Condition, out: &mut Vec<(String, bool, bool, Option<boo
                 condition_inputs(c, out);
             }
         }
-        Condition::Immediately | Condition::Done | Condition::Elapsed { .. } => {}
+        // Under a NOT the contact reads the other way: the pin that denies
+        // it is unknown here, so it is listed without one.
+        Condition::Not(c) => {
+            let mut inner = Vec::new();
+            condition_inputs(c, &mut inner);
+            for (name, device, robot, _) in inner {
+                push(out, (name, device, robot, None));
+            }
+        }
+        Condition::Immediately
+        | Condition::Done
+        | Condition::Elapsed { .. }
+        | Condition::StepActive { .. }
+        // A word is not a contact of the table: its comparison reads as text.
+        | Condition::Compare { .. } => {}
     }
 }
 
@@ -293,6 +310,22 @@ fn deny(
             Err(format!("the idle test of `{robot}` (no lane to pin)"))
         }
         Condition::Elapsed { seconds } => Err(format!("a timer ({} s)", trim_num(*seconds))),
+        Condition::StepActive { sequence, step } => {
+            Err(format!("the step `{sequence}/{step}` (no lane to pin)"))
+        }
+        Condition::Compare { left, op, right } => Err(format!(
+            "the comparison `{left} {} {right}` (a word, no contact to pin)",
+            op.st()
+        )),
+        // Denying a NOT is asserting what it negates: a lone contact's
+        // other level; anything larger is left to the author.
+        Condition::Not(c) => match &**c {
+            Condition::Signal { name, value } => {
+                pinnable(name)?;
+                Ok(vec![(name.clone(), *value)])
+            }
+            _ => Err("a negated network (pin its contacts by hand)".to_string()),
+        },
         Condition::DeviceDone { device } => {
             Err(format!("the in-position of `{device}` (no lane to pin)"))
         }
@@ -447,6 +480,11 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 OutputKind::Signal,
                 signal.clone(),
                 format!("{signal} := {}", if *value { "TRUE" } else { "FALSE" }),
+            )),
+            Action::SetWord { word, value } => out.push((
+                OutputKind::Signal,
+                word.clone(),
+                format!("{word} := {value}"),
             )),
             Action::Device { device, command } => {
                 let text = match command {

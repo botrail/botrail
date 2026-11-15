@@ -11,6 +11,7 @@ import {
   aimSensorCamera,
   cameraRig,
   hideAids,
+  showLabels,
   readDepth,
   renderDepthPip,
   restoreAids,
@@ -46,7 +47,7 @@ export function CameraExporter() {
   if (!job) return null;
   return (
     <ExportRunner
-      key={`${job.camera}@${job.fps}:${job.viz}:${job.depthData}`}
+      key={`${job.camera}@${job.fps}:${job.viz}:${job.depthData}:${job.labels}`}
       job={job}
     />
   );
@@ -80,6 +81,7 @@ interface Job {
   fps: number;
   viz: "rgb" | "depth";
   depthData: boolean;
+  labels: boolean;
 }
 
 function ExportRunner({ job }: { job: Job }) {
@@ -230,7 +232,13 @@ function ExportRunner({ job }: { job: Job }) {
         );
         gl.setScissorTest(false);
       } else {
-        colorPipeline(gl).render(gl, scene, sensorCam, rig.width, rig.height, "view");
+        // Tags film only into the picture, never into the depth stream.
+        const shown = job.labels ? showLabels() : null;
+        try {
+          colorPipeline(gl).render(gl, scene, sensorCam, rig.width, rig.height, "view");
+        } finally {
+          if (shown) restoreAids(shown);
+        }
       }
       if (rig.depthParts) {
         depthFrame = readDepth(gl, scene, sensorCam, rig.width, rig.height);

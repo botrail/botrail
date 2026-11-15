@@ -63,6 +63,12 @@ pub enum PlcopenError {
     UnknownSequence(String),
     Derivation(String),
     NoSequences,
+    /// A program carries rungs or gates, which this SFC export does not
+    /// write.
+    Logic(String),
+    /// A program compares or writes words, which this export does not
+    /// declare.
+    Words(String),
 }
 
 impl std::fmt::Display for PlcopenError {
@@ -71,6 +77,17 @@ impl std::fmt::Display for PlcopenError {
             PlcopenError::UnknownSequence(name) => write!(f, "unknown sequence `{name}`"),
             PlcopenError::Derivation(message) => write!(f, "I/O derivation failed: {message}"),
             PlcopenError::NoSequences => write!(f, "the scene has no sequences to export"),
+            PlcopenError::Logic(name) => write!(
+                f,
+                "program `{name}` has rungs or gates: the PLCopen export writes step chains (SFC) \
+                 only — export it as Structured Text (`scene.st(host)`), which writes both"
+            ),
+            PlcopenError::Words(name) => write!(
+                f,
+                "program `{name}` compares or writes words: the PLCopen export carries contacts \
+                 and coils only — export it as Structured Text (`scene.st(host)`), which declares \
+                 the words as INT / REAL"
+            ),
         }
     }
 }
@@ -486,6 +503,14 @@ impl<'a> Pou<'a> {
                     format!("({})", parts.join(" OR "))
                 }
             }
+            Condition::Not(c) => format!(
+                "NOT ({})",
+                self.condition_st(c, step_ident, started, edge_calls, sent)
+            ),
+            // A step's flag, as SFC names it.
+            Condition::StepActive { step, .. } => format!("{}.X", ident(step)),
+            // (refused before rendering: `PlcopenError::Words`)
+            Condition::Compare { left, op, right } => format!("({left} {} {right})", op.st()),
         }
     }
 
@@ -723,6 +748,8 @@ impl<'a> Pou<'a> {
                     let v = self.var(signal, None, false, &ident(signal));
                     st.push(format!("{v} := {};", if *value { "TRUE" } else { "FALSE" }));
                 }
+                // (refused before rendering: `PlcopenError::Words`)
+                Action::SetWord { word, value } => st.push(format!("{} := {value};", ident(word))),
                 Action::Device { device, command } => match command {
                     _ if self.scene.devices().iter().any(|d| {
                         &d.name == device
@@ -1147,6 +1174,38 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
     };
     if names.is_empty() {
         return Err(PlcopenError::NoSequences);
+    }
+    if let Some(name) = names.iter().find(|n| scene.logic(n).is_some()) {
+        return Err(PlcopenError::Logic(name.clone()));
+    }
+    for name in &names {
+        let Some(sequence) = scene.sequence(name) else {
+            continue;
+        };
+        let mut words = false;
+        let _ = crate::seq::walk_actions(&sequence.steps, &mut |a: &Action| {
+            words |= matches!(a, Action::SetWord { .. });
+            Ok::<(), String>(())
+        });
+        fn compares(c: &Condition) -> bool {
+            match c {
+                Condition::Compare { .. } => true,
+                Condition::All(cs) | Condition::Any(cs) => cs.iter().any(compares),
+                Condition::Not(c) => compares(c),
+                _ => false,
+            }
+        }
+        fn steps_compare(steps: &[crate::seq::Step]) -> bool {
+            steps.iter().any(|s| {
+                compares(&s.transition)
+                    || s.select
+                        .iter()
+                        .any(|arm| compares(&arm.condition) || steps_compare(&arm.steps))
+            })
+        }
+        if words || steps_compare(&sequence.steps) {
+            return Err(PlcopenError::Words(name.clone()));
+        }
     }
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let derivation =

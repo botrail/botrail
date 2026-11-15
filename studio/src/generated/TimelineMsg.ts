@@ -3,6 +3,7 @@ import type { BranchTakenMsg } from "./BranchTakenMsg";
 import type { ClothTrackMsg } from "./ClothTrackMsg";
 import type { ContactMsg } from "./ContactMsg";
 import type { ObjectTrackMsg } from "./ObjectTrackMsg";
+import type { ReadingsMsg } from "./ReadingsMsg";
 import type { RobotTimelineMsg } from "./RobotTimelineMsg";
 import type { RopeTrack } from "./RopeTrack";
 import type { RouteFindingMsg } from "./RouteFindingMsg";
@@ -42,6 +43,11 @@ cloths?: Array<ClothTrackMsg>, ropes?: Array<RopeTrack>,
  * filled when the cycle carries a `bt.routing.animate` replay.
  */
 route_findings?: Array<RouteFindingMsg>, 
+/**
+ * What the controller's own I/O image read over this run, and where
+ * it parted from the model — a replayed machine log, or a monitor.
+ */
+readings?: ReadingsMsg | null, 
 /**
  * Reference-frame track per vehicle that drove, on the same grid.
  */

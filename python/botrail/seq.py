@@ -203,6 +203,13 @@ def set_signal(name: str, value: bool = True) -> Action:
     return {"type": "set", "signal": name, "value": bool(value)}
 
 
+def set_word(name: str, value: "WordValue") -> Action:
+    """Write a word (declare it with ``scene.define_word``) on the step's
+    entry: a number, another word, or one arithmetic instruction over
+    two — ``set_word("target", 60)``, ``set_word("n", word("n") + 1)``."""
+    return {"type": "set_word", "word": name, "value": _expr(value)}
+
+
 def start(device: str) -> Action:
     """Start a conveyor."""
     return {"type": "device", "device": device, "command": {"type": "start"}}
@@ -332,6 +339,152 @@ def any_of(*conditions: Condition) -> Condition:
     return {"type": "any", "conditions": list(conditions)}
 
 
+def not_(condition: Condition) -> Condition:
+    """The inverse of a condition — a normally-closed contact over a whole
+    network (``not_(signal("stop"))``, ``not_(any_of(a, b))``)."""
+    return {"type": "not", "condition": condition}
+
+
+def step_active(sequence: str, step: str) -> Condition:
+    """The program ``sequence`` stands in ``step`` — the step relay of a
+    step ladder, read as a contact. Output circuits are written from it:
+    ``sq.rung(step_active("auto", "feed")).coil("conv")``."""
+    return {"type": "step_active", "sequence": sequence, "step": step}
+
+
+# -------------------------------------------------------------------- words
+
+
+def _operand(value) -> Union[str, float]:
+    if isinstance(value, Word):
+        return value.name
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            f"a word operand is bt.seq.word(name) or a number, got {value!r}"
+        )
+    return float(value)
+
+
+def _expr(value) -> dict:
+    if isinstance(value, WordExpr):
+        return {"left": value.left, "op": value.op, "right": value.right}
+    return {"left": _operand(value)}
+
+
+class WordExpr:
+    """One arithmetic instruction over two operands — what ``word("a") +
+    1`` builds. Hand it to ``set_word`` or a rung's ``.move``; a longer
+    formula is one rung per instruction, as on a PLC."""
+
+    def __init__(self, left, op: str, right):
+        self.left = _operand(left)
+        self.op = op
+        self.right = _operand(right)
+
+    def _nested(self, *_):
+        raise TypeError(
+            "a word expression is one instruction (a + b): move it into a word, "
+            "then use that word in the next rung"
+        )
+
+    __add__ = __radd__ = __sub__ = __rsub__ = _nested
+    __mul__ = __rmul__ = __truediv__ = __rtruediv__ = _nested
+    __ge__ = __gt__ = __le__ = __lt__ = _nested
+
+    def __repr__(self) -> str:
+        return f"WordExpr({self.left!r} {self.op} {self.right!r})"
+
+
+class Word:
+    """A word by name, for comparisons and arithmetic (see ``word``)."""
+
+    __hash__ = None  # == builds a condition
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __ge__(self, other) -> Condition:
+        return compare(self, ">=", other)
+
+    def __gt__(self, other) -> Condition:
+        return compare(self, ">", other)
+
+    def __le__(self, other) -> Condition:
+        return compare(self, "<=", other)
+
+    def __lt__(self, other) -> Condition:
+        return compare(self, "<", other)
+
+    def __eq__(self, other) -> Condition:  # type: ignore[override]
+        return compare(self, "==", other)
+
+    def __ne__(self, other) -> Condition:  # type: ignore[override]
+        return compare(self, "!=", other)
+
+    def __add__(self, other) -> WordExpr:
+        return WordExpr(self, "+", other)
+
+    def __radd__(self, other) -> WordExpr:
+        return WordExpr(other, "+", self)
+
+    def __sub__(self, other) -> WordExpr:
+        return WordExpr(self, "-", other)
+
+    def __rsub__(self, other) -> WordExpr:
+        return WordExpr(other, "-", self)
+
+    def __mul__(self, other) -> WordExpr:
+        return WordExpr(self, "*", other)
+
+    def __rmul__(self, other) -> WordExpr:
+        return WordExpr(other, "*", self)
+
+    def __truediv__(self, other) -> WordExpr:
+        return WordExpr(self, "/", other)
+
+    def __rtruediv__(self, other) -> WordExpr:
+        return WordExpr(other, "/", self)
+
+    def __repr__(self) -> str:
+        return f"word({self.name!r})"
+
+
+WordValue = Union[Word, WordExpr, int, float]
+
+
+def word(name: str) -> Word:
+    """A word — a number a program compares and computes with: one the
+    scene defines (``scene.define_word``), an analog input (``"dp"``, or
+    its counts ``"dp.raw"``), a device's ``"<device>.encoder"``, a
+    reader's ``"<sensor>.id"``, a counter's ``"<signal>.count"``.
+
+    Comparing it gives a contact, arithmetic a value to move::
+
+        word("dp") >= word("dp_limit")       # a condition
+        word("dp.raw") < 0                   # the wire is broken
+        rung.move("margin", word("dp_limit") - word("dp"))
+
+    Two whole operands (integer words, whole constants) make integer
+    arithmetic — ``/`` truncates, as a PLC's ``INT / INT`` does."""
+    return Word(name)
+
+
+def compare(left: Union[Word, int, float], op: str, right: Union[Word, int, float]) -> Condition:
+    """A comparison contact — what ``word("a") >= 5`` builds. ``op`` is
+    one of ``>= > <= < == !=``."""
+    if op not in (">=", ">", "<=", "<", "==", "!="):
+        raise ValueError(f"compare: unknown operator {op!r} (>= > <= < == !=)")
+    return {"type": "compare", "left": _operand(left), "op": op, "right": _operand(right)}
+
+
+def calc(left: Union[Word, int, float], op: str, right: Union[Word, int, float]) -> WordExpr:
+    """One arithmetic instruction — what ``word("a") + 1`` builds. ``op``
+    is one of ``+ - * /``."""
+    if op not in ("+", "-", "*", "/"):
+        raise ValueError(f"calc: unknown operator {op!r} (+ - * /)")
+    return WordExpr(left, op, right)
+
+
 _DRIVERS = ("start_motion", "start_ramp", "policy", "crouch")
 
 
@@ -409,17 +562,123 @@ class ArmBuilder(_Steps):
         self._steps = steps
 
 
+class RungBuilder:
+    """One rung's outputs (see ``SequenceBuilder.rung``); each call adds
+    an output and returns the rung, so they chain."""
+
+    def __init__(self, root: "SequenceBuilder", outputs: list):
+        self._root = root
+        self._outputs = outputs
+
+    def _add(self, output: dict) -> "RungBuilder":
+        self._outputs.append(output)
+        self._root._sync()
+        return self
+
+    def coil(self, target: str) -> "RungBuilder":
+        """``-( )-``: the target follows the rung every scan — an internal
+        signal, a conveyor's or a source's run coil (the device's name),
+        or a cylinder's solenoid coil (``"press/extend"``)."""
+        return self._add({"type": "coil", "target": target})
+
+    def set(self, signal: str) -> "RungBuilder":
+        """``-(S)-``: latches the signal on while the rung conducts."""
+        return self._add({"type": "set", "signal": signal})
+
+    def reset(self, signal: str) -> "RungBuilder":
+        """``-(R)-``: latches the signal off while the rung conducts; on a
+        counter's signal it also clears the count."""
+        return self._add({"type": "reset", "signal": signal})
+
+    def ton(self, signal: str, seconds: float) -> "RungBuilder":
+        """On-delay timer: ``signal`` comes on once the rung has conducted
+        for ``seconds`` and drops with it. The signal is declared by this
+        (a PLC's ``T`` device); read it with ``bt.seq.signal(signal)``."""
+        return self._add({"type": "ton", "signal": signal, "seconds": float(seconds)})
+
+    def ctu(self, signal: str, preset: int) -> "RungBuilder":
+        """Up-counter: counts the rung's rising edges; ``signal`` is on
+        from ``preset`` counts until a ``reset(signal)``. The count is the
+        word lane ``<signal>.count`` (``tl.word("made.count")``)."""
+        return self._add({"type": "ctu", "signal": signal, "preset": int(preset)})
+
+    def move(self, word: str, value: WordValue) -> "RungBuilder":
+        """A transfer or an arithmetic instruction: while the rung
+        conducts, ``word`` is written with ``value`` every scan — a number
+        or a word (``MOV``), or one instruction over two
+        (``word("a") + 1``). Gate the rung with ``rising(...)`` to run it
+        once per edge (a count, an accumulation step)."""
+        return self._add({"type": "move", "word": word, "value": _expr(value)})
+
+
 class SequenceBuilder(_Steps):
-    """Accumulates steps for one sequence, mirroring every edit into the
-    scene (and any connected studio). Creating a builder for an existing
-    sequence name starts it over from zero steps."""
+    """Accumulates one program, mirroring every edit into the scene (and
+    any connected studio): its step chain (``step`` / ``select``), its
+    rungs (``rung``) and its gates (``gates``). Creating a builder for an
+    existing sequence name starts it over from nothing."""
 
     def __init__(self, scene, name: str):
         self._scene = scene
         self._name = name
         self._root = self
         self._steps = []
+        self._logic: dict = {"rungs": []}
         self._sync()
+
+    def rung(self, condition: Condition, comment: str = "") -> RungBuilder:
+        """Appends a rung: a contact network (any condition but ``done`` /
+        ``elapsed``, which belong to a step) and the outputs chained onto
+        the returned builder::
+
+            lad = scene.sequence("common")
+            lad.rung(all_of(any_of(signal("pb_start"), signal("run")), not_(signal("pb_stop")))).coil("run")
+            lad.rung(signal("run"), comment="belt").coil("conv")
+            lad.rung(signal("jam")).ton("t_jam", 1.5)
+            lad.rung(signal("t_jam")).set("alarm")
+
+        Rungs are scanned every scan, top to bottom, after the program's
+        step transitions; a program may be rungs alone. Programs scan in
+        the order they are simulated, so a common circuit goes first and
+        an output circuit last. Every signal a rung drives is this
+        program's alone (a double coil is refused)."""
+        rung = {"comment": comment, "condition": condition, "outputs": []}
+        self._logic["rungs"].append(rung)
+        self._sync()
+        return RungBuilder(self, rung["outputs"])
+
+    def gates(
+        self,
+        *,
+        enable: Optional[Condition] = None,
+        reset: Optional[Condition] = None,
+        cycle: bool = False,
+    ) -> "SequenceBuilder":
+        """The gates of the step chain: it advances only while ``enable``
+        holds (a step-mode switch, a pause), ``reset`` puts it back in —
+        and holds it in — its first step, and with ``cycle`` it starts
+        over when it ends (a bake then needs another program that ends,
+        an operator's script, to say when to stop)."""
+        for key, value in (("enable", enable), ("reset", reset)):
+            if value is None:
+                self._logic.pop(key, None)
+            else:
+                self._logic[key] = value
+        self._logic["cycle"] = bool(cycle)
+        self._sync()
+        return self
+
+    def plant(self, on: bool = True) -> "SequenceBuilder":
+        """Marks the program as the equipment's own — what a pump, a tank
+        or a machine does, not what a controller tells it: a pressure
+        that climbs while liquid flows, written as a rung that adds to a
+        word. It runs with the plant in every mode (a bake, a live
+        session with the PLC outside) and stays out of the I/O map: the
+        signals it reads are outputs of whoever writes them (the pump's
+        contactor), the ones it writes inputs of whoever reads them (a
+        flow switch). No solver — integrators and comparisons in words."""
+        self._logic["plant"] = bool(on)
+        self._sync()
+        return self
 
     @property
     def name(self) -> str:
@@ -435,4 +694,8 @@ class SequenceBuilder(_Steps):
 
     def _sync(self) -> None:
         payload = {"name": self._name, "steps": self._steps}
+        logic = self._logic
+        if (logic["rungs"] or logic.get("enable") or logic.get("reset") or logic.get("cycle")
+                or logic.get("plant")):
+            payload["logic"] = logic
         self._scene._upsert_sequence_json(json.dumps(payload))

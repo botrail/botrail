@@ -35,6 +35,10 @@ use crate::Scene;
 /// The implicit host of programs that drive no robot or several.
 pub const CELL_HOST: &str = "<cell>";
 
+/// Where a program of the equipment itself runs (`seq::Logic::plant`):
+/// not a controller, so nothing it reads or writes is a point.
+pub const PLANT_HOST: &str = "<plant>";
+
 /// The implicit host of a robot's own controller.
 pub fn robot_host(robot: &str) -> String {
     format!("<{robot}>")
@@ -276,6 +280,9 @@ pub enum IoSource {
     /// monitors its programs (`IoNode::monitor`) for the plant to record
     /// the controller's step bands.
     Monitor,
+    /// Rule ⑨: an analog input — a transmitter's 4–20 mA loop, read as
+    /// the input module's counts.
+    Analog,
 }
 
 impl IoSource {
@@ -297,6 +304,7 @@ impl IoSource {
             IoSource::RobotProgram => "robot:program",
             IoSource::Declared => "declared",
             IoSource::Monitor => "monitor",
+            IoSource::Analog => "analog",
         }
     }
 }
@@ -358,6 +366,9 @@ pub struct IoPoint {
     pub writers: Vec<StepRef>,
     pub readers: Vec<StepRef>,
     pub status: PointStatus,
+    /// The IEC type when the kind and the aspect do not say it: a
+    /// defined word's `INT` / `REAL`, an analog input's counts (`INT`).
+    pub ty: Option<&'static str>,
 }
 
 impl IoPoint {
@@ -714,7 +725,11 @@ pub fn unit_scale(unit: &str) -> Option<f64> {
         "deg" | "°" => 180.0 / std::f64::consts::PI,
         "0.1deg" | "0.1°" => 1800.0 / std::f64::consts::PI,
         "0.01deg" | "0.01°" => 18_000.0 / std::f64::consts::PI,
-        _ => return None,
+        // A bare resolution: `"0.1"` — a count is a tenth of the word's unit.
+        other => match other.parse::<f64>() {
+            Ok(step) if step.is_finite() && step > 0.0 => 1.0 / step,
+            _ => return None,
+        },
     })
 }
 
@@ -1144,6 +1159,11 @@ struct ProgramUsage {
     writes: BTreeMap<String, Vec<StepRef>>,
     /// `Signal` / `Rising` / `Falling` reads (sensor or signal names).
     reads: BTreeMap<String, Vec<StepRef>>,
+    /// Word writes (`SetWord`, a rung's `Move`): word → steps.
+    word_writes: BTreeMap<String, Vec<StepRef>>,
+    /// Word reads (a comparison's or an expression's operands), by the
+    /// word's name as written (`dp`, `lvl.raw`, `feed.encoder`).
+    word_reads: BTreeMap<String, Vec<StepRef>>,
     /// Device commands by kind.
     device_cmds: BTreeMap<(String, DeviceCmd), Vec<StepRef>>,
     /// `DeviceDone` reads.
@@ -1196,7 +1216,19 @@ fn walk_condition(
                 walk_condition(c, at, scene, u)?;
             }
         }
-        Condition::Immediately | Condition::Done | Condition::Elapsed { .. } => {}
+        Condition::Not(c) => walk_condition(c, at, scene, u)?,
+        Condition::Compare { left, right, .. } => {
+            for operand in [left, right] {
+                if let crate::seq::Operand::Word(name) = operand {
+                    push(&mut u.word_reads, name.clone(), at);
+                }
+            }
+        }
+        // A step relay is the controller's own memory: no point.
+        Condition::Immediately
+        | Condition::Done
+        | Condition::Elapsed { .. }
+        | Condition::StepActive { .. } => {}
     }
     Ok(())
 }
@@ -1216,6 +1248,12 @@ fn walk_action(
     };
     match action {
         Action::Set { signal, .. } => push(&mut u.writes, signal.clone(), at),
+        Action::SetWord { word, value } => {
+            push(&mut u.word_writes, word.clone(), at);
+            for name in value.words() {
+                push(&mut u.word_reads, name.to_string(), at);
+            }
+        }
         Action::Device { device, command } => {
             push(&mut u.device_cmds, (device.clone(), cmd(command)), at)
         }
@@ -1285,16 +1323,21 @@ fn usage(scene: &Scene, io: &IoMap, sequence: &Sequence) -> Result<ProgramUsage,
         ..Default::default()
     };
     let mut counter = 0;
-    walk_steps(&sequence.steps, &sequence.name, &mut counter, scene, &mut u).map_err(
-        |message| IoError::Invalid {
+    // The step chain, then the rungs as steps (flat index `steps + k`):
+    // what a rung reads and drives is I/O like any step's.
+    let steps = scene.program_steps(sequence);
+    walk_steps(&steps, &sequence.name, &mut counter, scene, &mut u).map_err(|message| {
+        IoError::Invalid {
             sequence: sequence.name.clone(),
             message,
-        },
-    )?;
+        }
+    })?;
     // A declared node wins; otherwise implicit placement mirrors
     // `script::driven_robot`: one robot owned → that robot's controller
     // (its declared node when there is one), none or several → the cell.
     u.host = match io.program_nodes(&sequence.name).first() {
+        // The equipment's own program: on no controller.
+        _ if scene.logic(&sequence.name).is_some_and(|l| l.plant) => PLANT_HOST.to_string(),
         Some(node) => node.name.clone(),
         None if u.owns.len() == 1 => {
             let r = *u.owns.iter().next().unwrap();
@@ -1347,6 +1390,7 @@ impl Builder {
             writers: Vec::new(),
             readers: Vec::new(),
             status,
+            ty: None,
         })
     }
 
@@ -1371,6 +1415,9 @@ fn dedup(steps: &mut Vec<StepRef>) {
 /// a position, speed or encoder word and for analog channels, `INT` for
 /// the other words (station, program, step, id), `BOOL` otherwise.
 pub fn natural_type(p: &IoPoint) -> &'static str {
+    if let Some(ty) = p.ty {
+        return ty;
+    }
     match (p.kind, p.id.aspect) {
         (_, Some(Aspect::Position)) | (_, Some(Aspect::Speed)) | (_, Some(Aspect::Encoder)) => {
             "REAL"
@@ -1383,6 +1430,22 @@ pub fn natural_type(p: &IoPoint) -> &'static str {
         (ChannelKind::Word, _) => "INT",
         _ => "BOOL",
     }
+}
+
+/// The I/O point that carries word `word` to a controller: `(name,
+/// aspect)` — a defined word under its own name, an analog input (its
+/// scaled value and its counts are one point), an encoder or a reader's
+/// id under their aspect. `None` for a word that is no point (a counter's
+/// count is the controller's own) or no word at all.
+pub fn word_point(scene: &Scene, word: &str) -> Option<(String, Option<Aspect>)> {
+    use crate::seq::WordKind;
+    Some(match scene.word_kind(word)? {
+        WordKind::Defined { .. } | WordKind::Analog => (word.to_string(), None),
+        WordKind::AnalogRaw { analog } => (analog, None),
+        WordKind::Encoder { device } => (device, Some(Aspect::Encoder)),
+        WordKind::Id { sensor } => (sensor, Some(Aspect::Id)),
+        WordKind::Count { .. } => return None,
+    })
 }
 
 /// The largest magnitude a device's measurement word can take, in SI:
@@ -1433,6 +1496,28 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
         .iter()
         .map(|s| usage(scene, io, s))
         .collect::<Result<_, _>>()?;
+    let program_hosts: Vec<(String, String)> = usages
+        .iter()
+        .map(|u| (u.name.clone(), u.host.clone()))
+        .collect();
+    // The equipment's programs are physics: the points are derived from
+    // the controllers' programs alone. What they touch is still in use.
+    let plant_uses: BTreeSet<String> = usages
+        .iter()
+        .filter(|u| u.host == PLANT_HOST)
+        .flat_map(|u| {
+            u.reads
+                .keys()
+                .chain(u.writes.keys())
+                .chain(u.word_reads.keys())
+                .chain(u.word_writes.keys())
+                .cloned()
+        })
+        .collect();
+    let usages: Vec<ProgramUsage> = usages
+        .into_iter()
+        .filter(|u| u.host != PLANT_HOST)
+        .collect();
 
     let mut b = Builder {
         points: BTreeMap::new(),
@@ -1629,21 +1714,35 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
     }
 
     // ---- ②③④ internal signals ---------------------------------------------
-    for signal in scene.signals() {
-        let name = &signal.name;
+    // Words follow the same rules on word channels: a register written and
+    // read on one host is the controller's memory, one that crosses hosts
+    // a word on the wire, one only read a setpoint from outside.
+    let relays = scene
+        .signals()
+        .iter()
+        .map(|s| (&s.name, false))
+        .chain(scene.words().iter().map(|w| (&w.name, true)));
+    for (name, is_word) in relays {
+        let (kin, kout, noun) = if is_word {
+            (ChannelKind::Word, ChannelKind::Word, "word")
+        } else {
+            (ChannelKind::Di, ChannelKind::Do, "signal")
+        };
         let role = role_of(name);
         if role == Some(DeclRole::Exclude) {
             continue;
         }
         let writes: Vec<(&str, &[StepRef])> = usages
             .iter()
-            .filter_map(|u| u.writes.get(name).map(|s| (u.host.as_str(), s.as_slice())))
+            .filter_map(|u| {
+                let map = if is_word { &u.word_writes } else { &u.writes };
+                map.get(name).map(|s| (u.host.as_str(), s.as_slice()))
+            })
             .collect();
-        let reads = by_host(
-            usages
-                .iter()
-                .filter_map(|u| u.reads.get(name).map(|s| (u.host.as_str(), s.as_slice()))),
-        );
+        let reads = by_host(usages.iter().filter_map(|u| {
+            let map = if is_word { &u.word_reads } else { &u.reads };
+            map.get(name).map(|s| (u.host.as_str(), s.as_slice()))
+        }));
         let all_writers =
             || -> Vec<StepRef> { writes.iter().flat_map(|(_, s)| s.iter().cloned()).collect() };
         match role {
@@ -1656,7 +1755,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                         None,
                         IoDirection::Input,
                         None,
-                        ChannelKind::Di,
+                        kin,
                         IoSource::ReadOnly,
                         PointStatus::Unbound,
                     );
@@ -1668,7 +1767,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                         None,
                         IoDirection::Input,
                         Some(host),
-                        ChannelKind::Di,
+                        kin,
                         IoSource::ReadOnly,
                         PointStatus::Unbound,
                     );
@@ -1684,7 +1783,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     None,
                     IoDirection::Output,
                     host.as_deref(),
-                    ChannelKind::Do,
+                    kout,
                     IoSource::WriteOnly,
                     PointStatus::Unbound,
                 );
@@ -1699,7 +1798,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     b.finding(
                         Severity::Info,
                         IoCode::Unreferenced,
-                        format!("signal `{name}` is defined but no program writes or reads it"),
+                        format!("{noun} `{name}` is defined but no program writes or reads it"),
                         Vec::new(),
                     );
                     continue;
@@ -1713,7 +1812,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     None,
                     IoDirection::Output,
                     host.as_deref(),
-                    ChannelKind::Do,
+                    kout,
                     IoSource::Internal,
                     PointStatus::Internal,
                 );
@@ -1727,10 +1826,12 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             None => {}
         }
         match (writes.is_empty(), reads.is_empty()) {
+            // (only the plant's own programs use it: physics, no point)
+            (true, true) if plant_uses.contains(name) => {}
             (true, true) => b.finding(
                 Severity::Info,
                 IoCode::Unreferenced,
-                format!("signal `{name}` is defined but no program writes or reads it"),
+                format!("{noun} `{name}` is defined but no program writes or reads it"),
                 Vec::new(),
             ),
             (false, true) => {
@@ -1741,11 +1842,27 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     None,
                     IoDirection::Output,
                     Some(&host),
-                    ChannelKind::Do,
+                    kout,
                     IoSource::WriteOnly,
                     PointStatus::Unbound,
                 );
                 p.writers.extend(all_writers());
+            }
+            // A word one controller reads and nothing writes is that
+            // controller's own register — a setpoint. (Declare it an
+            // input to put it on the wire: a value keyed in at a panel.)
+            (true, false) if is_word && reads.len() == 1 => {
+                let (host, steps) = reads.into_iter().next().expect("one reader host");
+                let p = b.point(
+                    name,
+                    None,
+                    IoDirection::Output,
+                    Some(&host),
+                    kout,
+                    IoSource::Internal,
+                    PointStatus::Internal,
+                );
+                p.readers.extend(steps);
             }
             (true, false) => {
                 // ④ read-only: an external-input candidate per reader host.
@@ -1755,7 +1872,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                         None,
                         IoDirection::Input,
                         Some(&host),
-                        ChannelKind::Di,
+                        kin,
                         IoSource::ReadOnly,
                         PointStatus::Unbound,
                     );
@@ -1779,7 +1896,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     None,
                     IoDirection::Output,
                     Some(&host),
-                    ChannelKind::Do,
+                    kout,
                     source,
                     status,
                 );
@@ -1793,13 +1910,79 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                         None,
                         IoDirection::Input,
                         Some(other),
-                        ChannelKind::Di,
+                        kin,
                         IoSource::Handshake,
                         PointStatus::Unbound,
                     );
                     p.readers.extend(steps.iter().cloned());
                 }
             }
+        }
+    }
+
+    // A word point carries its register's type.
+    for word in scene.words() {
+        for (key, p) in b.points.iter_mut() {
+            if key.0 == word.name && key.1.is_none() {
+                p.ty = Some(if word.integer { "INT" } else { "REAL" });
+            }
+        }
+    }
+
+    // ---- ⑨ analog inputs: a transmitter's loop, read like a sensor --------
+    for analog in scene.analogs() {
+        if role_of(&analog.name) == Some(DeclRole::Exclude) {
+            continue;
+        }
+        let raw = format!("{}.raw", analog.name);
+        let readers = by_host(usages.iter().flat_map(|u| {
+            [&analog.name, &raw]
+                .into_iter()
+                .filter_map(|n| u.word_reads.get(n).map(|s| (u.host.as_str(), s.as_slice())))
+        }));
+        let hosts: Vec<(Option<String>, Vec<StepRef>)> = if readers.is_empty() {
+            vec![(None, Vec::new())]
+        } else {
+            readers.into_iter().map(|(h, s)| (Some(h), s)).collect()
+        };
+        for (host, steps) in hosts {
+            let p = b.point(
+                &analog.name,
+                None,
+                IoDirection::Input,
+                host.as_deref(),
+                ChannelKind::Ai,
+                IoSource::Analog,
+                PointStatus::Unbound,
+            );
+            p.ty = Some("INT");
+            p.readers.extend(steps);
+        }
+    }
+
+    // ---- recorded words a program compares: an encoder, a reader's id -----
+    for u in &usages {
+        for (word, steps) in &u.word_reads {
+            let (name, aspect, source) = match scene.word_kind(word) {
+                Some(crate::seq::WordKind::Encoder { device }) => {
+                    (device, Aspect::Encoder, IoSource::DeviceFeedback)
+                }
+                Some(crate::seq::WordKind::Id { sensor }) => (sensor, Aspect::Id, IoSource::Sensor),
+                _ => continue,
+            };
+            if role_of(&format!("{name}.{}", aspect.as_str())) == Some(DeclRole::Exclude) {
+                continue;
+            }
+            let p = b.point(
+                &name,
+                Some(aspect),
+                IoDirection::Input,
+                Some(&u.host),
+                ChannelKind::Word,
+                source,
+                PointStatus::Unbound,
+            );
+            p.readers.extend(steps.iter().cloned());
         }
     }
 
@@ -2191,7 +2374,11 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             continue;
         }
         for program in &node.programs {
-            if !programs.iter().any(|s| &s.name == program) {
+            // A program of rungs alone stands in no step: nothing to report.
+            if !programs
+                .iter()
+                .any(|s| &s.name == program && !s.steps.is_empty())
+            {
                 continue;
             }
             b.point(
@@ -2584,6 +2771,10 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
                     (Severity::Warning, "a sensor nobody reads")
                 }
                 IoSource::Sensor => (Severity::Error, "a sensor the sequences read"),
+                IoSource::Analog if p.readers.is_empty() => {
+                    (Severity::Warning, "an analog input nobody reads")
+                }
+                IoSource::Analog => (Severity::Error, "an analog input the programs read"),
                 IoSource::Handshake => (Severity::Error, "a handshake wire"),
                 IoSource::WriteOnly => (
                     Severity::Warning,
@@ -2944,10 +3135,7 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             findings: b.findings,
         },
         sequences: programs.iter().map(|s| s.name.clone()).collect(),
-        program_hosts: usages
-            .iter()
-            .map(|u| (u.name.clone(), u.host.clone()))
-            .collect(),
+        program_hosts,
         io: io.clone(),
     })
 }
@@ -3967,6 +4155,97 @@ pub fn render_csv(d: &IoDerivation) -> String {
     for (host, kinds) in io_summary(points) {
         let parts: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
         out.push_str(&format!("# {host}: {}\n", parts.join(", ")));
+    }
+    out
+}
+
+/// Device comments: one row per bound point, for a PLC tool's comment
+/// table — the channel's address as the controller spells it (`X20`,
+/// `%IX0.2`; `node.channel` when the channel has none) and a comment (the
+/// binding's note, else its tag, else the point's label), then the point,
+/// node, channel and field device. Points without a channel are left
+/// out. The columns are botrail's own; a vendor tool's import format
+/// (its header lines, its encoding) is the caller's to apply.
+pub fn render_comments(d: &IoDerivation) -> String {
+    let mut out = String::from("device,comment,point,node,channel,field\n");
+    for p in &d.points {
+        let Some((b, _, c)) = d.binding_of(p) else {
+            continue;
+        };
+        let device = c
+            .address
+            .clone()
+            .unwrap_or_else(|| format!("{}.{}", b.node, b.channel));
+        let comment = b
+            .note
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| b.tag.clone())
+            .unwrap_or_else(|| p.label());
+        let row = [
+            device,
+            comment,
+            p.label(),
+            b.node.clone(),
+            b.channel.clone(),
+            b.field.clone().unwrap_or_default(),
+        ];
+        let row: Vec<String> = row.iter().map(|c| csv_cell(c)).collect();
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// The analog chain table: one row per analog input and host — what the
+/// transmitter measures and over which range, the loop signal, the
+/// module's counts, the scaling the controller applies, and where the
+/// input is bound. The "instrument value → current → counts → scaled
+/// value" sheet of an analog loop, derived.
+pub fn render_analog(scene: &Scene, d: &IoDerivation) -> String {
+    let mut out = String::from(
+        "point,host,address,node,channel,measures,range_lo,range_hi,unit,signal,raw_lo,raw_hi,counts_per_unit,scaling,open_loop_counts\n",
+    );
+    for analog in scene.analogs() {
+        let points: Vec<&IoPoint> = d
+            .points
+            .iter()
+            .filter(|p| p.id.name == analog.name && p.source == IoSource::Analog)
+            .collect();
+        let num = crate::seq::word_text;
+        let span = analog.range.1 - analog.range.0;
+        let counts = (analog.raw.1 - analog.raw.0) as f64;
+        for p in points {
+            let bound = d.binding_of(p);
+            let row = [
+                analog.name.clone(),
+                p.host.clone().unwrap_or_default(),
+                bound
+                    .and_then(|(_, _, c)| c.address.clone())
+                    .unwrap_or_default(),
+                bound.map(|(_, n, _)| n.name.clone()).unwrap_or_default(),
+                bound.map(|(_, _, c)| c.id.clone()).unwrap_or_default(),
+                analog.source.clone(),
+                num(analog.range.0),
+                num(analog.range.1),
+                analog.unit.clone(),
+                "4-20mA".to_string(),
+                analog.raw.0.to_string(),
+                analog.raw.1.to_string(),
+                num(counts / span),
+                format!(
+                    "{} + (raw - {}) * {} / {}",
+                    num(analog.range.0),
+                    analog.raw.0,
+                    num(span),
+                    num(counts)
+                ),
+                analog.counts(0.0).to_string(),
+            ];
+            let row: Vec<String> = row.iter().map(|c| csv_cell(c)).collect();
+            out.push_str(&row.join(","));
+            out.push('\n');
+        }
     }
     out
 }

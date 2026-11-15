@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { GeometryMsg, ObstacleMsg, PoseMsg } from "../protocol";
+import { jointLabel, jointValueText, jointsOfSelection } from "../sceneryJoints";
 import { robotByName, useStudioStore } from "../store";
 import {
   sendAddObstacle,
   sendAttachObstacle,
   sendDetachObstacle,
   sendRemoveObstacle,
+  sendSetSceneryJoint,
   sendUpdateObstacleGeometry,
 } from "../ws";
 import { Section } from "./Section";
@@ -113,8 +115,53 @@ export function ObstaclePanel() {
               : "select an object in the scene tree or viewport to edit it"}
           </div>
         )}
+        <JointSliders />
       </div>
     </Section>
+  );
+}
+
+/**
+ * The doors, drawers and racks of what is selected — the hinge or slide a
+ * selected obstacle moves on, every one of a selected group — each as a
+ * slider over its range. The host moves the members and sends the joint
+ * back; while a thumb is held the slider shows the hand, not the echo.
+ */
+function JointSliders() {
+  const selection = useStudioStore((s) => s.selection);
+  const all = useStudioStore((s) => s.sceneryJoints);
+  const joints = useMemo(() => jointsOfSelection(all, selection), [all, selection]);
+  const [held, setHeld] = useState<{ name: string; value: number } | null>(null);
+  if (joints.length === 0) return null;
+  return (
+    <div className="joints scenery-joints">
+      {joints.map((joint) => (
+        <div className="joint" key={joint.name} title={joint.name}>
+          <div className="joint-row">
+            <span className="joint-name">
+              {joint.kind} · {jointLabel(joint.name)}
+            </span>
+            <span className="joint-value">
+              {jointValueText(joint.kind, held?.name === joint.name ? held.value : joint.position)}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={joint.range[0]}
+            max={joint.range[1]}
+            step={joint.kind === "hinge" ? 0.005 : 0.001}
+            value={held?.name === joint.name ? held.value : joint.position}
+            onChange={(e) => {
+              const value = parseFloat(e.target.value);
+              setHeld({ name: joint.name, value });
+              sendSetSceneryJoint(joint.name, value);
+            }}
+            onPointerUp={() => setHeld(null)}
+            onBlur={() => setHeld(null)}
+          />
+        </div>
+      ))}
+    </div>
   );
 }
 

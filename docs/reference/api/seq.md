@@ -27,6 +27,7 @@ waits for it (`done()`), a step that starts nothing falls through
 | `start(device)` / `stop(device)` | Run or halt a device — a conveyor or a source |
 | `set_speed(device, speed)` | Rescale a conveyor's velocity, direction kept |
 | `move_to(device, position)` | Command a linear axis; await with `device_done` |
+| `set_word(name, value)` | Write a word (declared with `scene.define_word`): a number, a word, or one instruction (`word("n") + 1`) |
 | `goto(device, station)` | Dispatch a vehicle; await with `device_done` |
 | `crouch(robot, depth, lean=)` | Lower a parked walker's body, feet planted; `crouch(robot, 0)` stands it up |
 
@@ -41,6 +42,9 @@ waits for it (`done()`), a step that starts nothing falls through
 | `signal(name, value)` | A signal, sensor, or device state matches |
 | `device_done(device)` | A device reached its commanded target |
 | `all_of(...)` / `any_of(...)` | Composed conditions hold |
+| `not_(condition)` | The condition does not hold |
+| `step_active(sequence, step)` | A program stands in a step (its step relay) |
+| `word(name) >= x` (`> <= < == !=`) | A word — a setpoint, an analog input, an encoder, a count — compares so |
 
 ## Reference
 

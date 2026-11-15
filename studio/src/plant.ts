@@ -38,7 +38,8 @@ export function plantCaption(status: PlantStatusMsg): string {
   } else {
     parts.push(status.pace);
   }
-  parts.push(`${(status.dt * 1000).toFixed(0)} ms scan`);
+  // The scan count: what a PLC IDE shows beside the period.
+  parts.push(`scan ${Math.round(status.t / status.dt)} · ${(status.dt * 1000).toFixed(0)} ms`);
   if (status.recording_from != null) {
     parts.push(`● rec ${(status.t - status.recording_from).toFixed(1)} s`);
   }

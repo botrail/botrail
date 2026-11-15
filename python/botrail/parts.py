@@ -451,7 +451,9 @@ def fence(
     """A safety fence along `path` (floor corners, metres), with a post at
     every corner and between panels. `closed` joins the last corner back to
     the first. `door=(edge, slot)` makes that slot the door — its own
-    obstacle `<name>/door` and its own BOM line.
+    obstacle `<name>/door` and its own BOM line, hung on a hinge of the
+    same name at the end away from its handle (`scene.set_scenery_joint`,
+    or a hand in the studio, swings it either way; shut is 0).
 
     Without a catalog each edge is split into panels of about `panel_pitch`
     (the pitch is stretched so an edge takes a whole number), and two parts
@@ -532,6 +534,7 @@ def fence(
     panels = 0
     posts = 0
     door_width_mm: Optional[int] = None
+    corner_posts: list[str] = []
     # Posts at every distinct corner (a closed loop shares its ends).
     for i, (x, y) in enumerate(pts):
         pname = scene.add_box(
@@ -539,6 +542,7 @@ def fence(
             position=(x, y, post_height / 2), color=post_color
         )
         built.obstacles.append(pname)
+        corner_posts.append(pname)
         posts += 1
         if mode == "full":
             drawn = _load_trim(
@@ -567,6 +571,7 @@ def fence(
             else:
                 # A group per width so the BOM carries one line per part number.
                 oname = f"{name}/panels/w{round(width * 1000)}/e{e}_{i}"
+            first_of_bay = len(built.obstacles)
             oname = scene.add_box(
                 oname,
                 size=(width, panel_thickness, height),
@@ -605,6 +610,14 @@ def fence(
                 door_width_mm = round(width * 1000)
                 if spec is None:  # pinned here so the BOM keeps its order
                     scene.set_part(oname, category="structure.door", model=door_model, qty=1)
+                # The leaf — its slab and everything drawn of it — hangs on
+                # the end away from the handle, off a post that stays.
+                hinge_at = along - width / 2
+                scene.add_hinge(
+                    f"{name}/door", built.obstacles[first_of_bay:],
+                    origin=(x0 + ux * hinge_at, y0 + uy * hinge_at, 0.0),
+                    range=(-_DOOR_SWING, _DOOR_SWING), base=corner_posts[e],
+                )
             else:
                 panels += 1
                 per_width[round(width * 1000)] = per_width.get(round(width * 1000), 0) + 1
@@ -675,6 +688,10 @@ def fence(
             **_kg(spec.mass_kg("door", **params, width_mm=door_width_mm)),
         )
     return built
+
+
+# How far a fence door swings either way off shut (rad).
+_DOOR_SWING = math.radians(110.0)
 
 
 def _mm(value: Optional[float]) -> Optional[float]:

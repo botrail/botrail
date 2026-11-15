@@ -20,8 +20,8 @@ use thiserror::Error;
 
 use crate::wire::{
     device_from_msg, device_msg, geometry_from_msg, geometry_msg, motion_from_msg, motion_msg,
-    sensor_from_msg, sensor_msg, sequence_from_msg, sequence_msg, signal_def_msg, ActionMsg,
-    ConditionMsg, ConstraintMsg, DeviceMsg, FrameMsg, GeometryMsg, MotionMsg, ObstacleMsg, PoseMsg,
+    sensor_from_msg, sensor_msg, sequence_from_msg, signal_def_msg, ActionMsg, ConditionMsg,
+    ConstraintMsg, DeviceMsg, FrameMsg, GeometryMsg, MotionMsg, ObstacleMsg, PoseMsg,
     SegmentKindMsg, SensorMsg, SequenceMsg, SignalDefMsg,
 };
 use crate::{ObstacleSpec, Scene};
@@ -1023,12 +1023,21 @@ pub struct ProjectFile {
     /// Named world frames (absent in older v2 files).
     #[serde(default)]
     pub frames: Vec<FrameMsg>,
+    /// Doors, drawers and racks: scenery on a hinge or a slide, each over
+    /// the obstacles that move on it (absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenery_joints: Vec<crate::wire::SceneryJointMsg>,
     /// PLC-style sequences (absent in older v2 files).
     #[serde(default)]
     pub sequences: Vec<SequenceMsg>,
     /// Internal signal declarations (absent in older v2 files).
     #[serde(default)]
     pub signals: Vec<SignalDefMsg>,
+    /// Internal words and analog inputs (absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<crate::wire::WordDefMsg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analogs: Vec<crate::wire::AnalogMsg>,
     /// Pseudo-sensors (absent in older v2 files).
     #[serde(default)]
     pub sensors: Vec<SensorMsg>,
@@ -1199,8 +1208,11 @@ impl ProjectFile {
                     obstacles: v1.obstacles,
                     motions: v1.motions,
                     frames: Vec::new(),
+                    scenery_joints: Vec::new(),
                     sequences: Vec::new(),
                     signals: Vec::new(),
+                    words: Vec::new(),
+                    analogs: Vec::new(),
                     sensors: Vec::new(),
                     devices: Vec::new(),
                     cameras: Vec::new(),
@@ -1368,8 +1380,14 @@ impl Scene {
                 })
                 .collect(),
             motions: self.motions().iter().map(|m| motion_msg(self, m)).collect(),
-            sequences: self.sequences().iter().map(sequence_msg).collect(),
+            sequences: self
+                .sequences()
+                .iter()
+                .map(|s| crate::wire::program_msg(self, s))
+                .collect(),
             signals: self.signals().iter().map(signal_def_msg).collect(),
+            words: self.words().iter().map(crate::wire::word_def_msg).collect(),
+            analogs: self.analogs().iter().map(crate::wire::analog_msg).collect(),
             sensors: self.sensors().iter().map(sensor_msg).collect(),
             devices: self.devices().iter().map(device_msg).collect(),
             cameras: self.cameras().iter().map(crate::wire::camera_msg).collect(),
@@ -1449,6 +1467,11 @@ impl Scene {
                     name: f.name.clone(),
                     pose: PoseMsg::from(&f.pose),
                 })
+                .collect(),
+            scenery_joints: self
+                .scenery_joints()
+                .iter()
+                .map(crate::wire::scenery_joint_msg)
                 .collect(),
         }
     }
@@ -1666,6 +1689,9 @@ impl Scene {
                 .map_err(|e| ProjectError::Incompatible(e.to_string()))?;
         }
         self.set_sequences(project.sequences.iter().map(sequence_from_msg).collect());
+        for sequence in &project.sequences {
+            self.upsert_logic(crate::wire::logic_from_msg(sequence));
+        }
         self.set_sensors(project.sensors.iter().map(sensor_from_msg).collect());
         self.set_devices(project.devices.iter().map(device_from_msg).collect());
         self.set_cameras(
@@ -1776,6 +1802,24 @@ impl Scene {
                 })
                 .collect(),
         );
+        self.set_words(
+            project
+                .words
+                .iter()
+                .map(|w| crate::seq::WordDef {
+                    name: w.name.clone(),
+                    initial: w.initial,
+                    integer: w.integer,
+                })
+                .collect(),
+        );
+        self.set_analogs(
+            project
+                .analogs
+                .iter()
+                .map(crate::wire::analog_from_msg)
+                .collect(),
+        );
         self.set_frames(
             project
                 .frames
@@ -1784,6 +1828,13 @@ impl Scene {
                     name: f.name.clone(),
                     pose: (&f.pose).into(),
                 })
+                .collect(),
+        );
+        self.set_scenery_joints(
+            project
+                .scenery_joints
+                .iter()
+                .map(crate::wire::scenery_joint_from_msg)
                 .collect(),
         );
         self.set_weld_flashes(
@@ -2309,6 +2360,37 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             frame.name,
             py_tuple(&frame.pose.position),
             py_tuple(&frame.pose.quaternion)
+        ));
+    }
+    // Doors and drawers, after the obstacles they move: `add_hinge` and
+    // `add_slide` take the axis in the world as the scene stands, so the
+    // saved one (in its base's frame) is carried there by the base's pose.
+    for joint in &project.scenery_joints {
+        let frame: Isometry3<f64> = joint
+            .base
+            .as_deref()
+            .and_then(|base| project.obstacles.iter().find(|o| o.name == base))
+            .map(|base| (&base.pose).into())
+            .unwrap_or_else(Isometry3::identity);
+        let origin = frame * nalgebra::Point3::from(joint.origin);
+        let axis = frame * nalgebra::Vector3::from(joint.axis);
+        let base = joint
+            .base
+            .as_deref()
+            .map(|base| format!(", base={base:?}"))
+            .unwrap_or_default();
+        let call = match joint.kind {
+            crate::wire::SceneryJointKindMsg::Hinge => "add_hinge",
+            crate::wire::SceneryJointKindMsg::Slide => "add_slide",
+        };
+        out.push_str(&format!(
+            "scene.{call}({:?}, {}, origin={}, axis={}, range={}, position={:?}{base})\n",
+            joint.name,
+            py_str_list(&joint.objects),
+            py_tuple(&[origin.x, origin.y, origin.z]),
+            py_tuple(&[axis.x, axis.y, axis.z]),
+            py_tuple(&joint.range),
+            joint.position,
         ));
     }
     for (i, robot_msg) in project.robots.iter().enumerate() {
@@ -3014,10 +3096,37 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
             scenario.name
         ));
     }
+    for word in &project.words {
+        out.push_str(&format!(
+            "scene.define_word({:?}, {}{})\n",
+            word.name,
+            py_number(word.initial),
+            if word.integer { ", integer=True" } else { "" }
+        ));
+    }
+    for analog in &project.analogs {
+        out.push_str(&format!(
+            "scene.add_analog({:?}, source={:?}, range=({}, {}), unit={:?}, raw=({}, {}){})\n",
+            analog.name,
+            analog.source,
+            py_number(analog.range[0]),
+            py_number(analog.range[1]),
+            analog.unit,
+            analog.raw[0],
+            analog.raw[1],
+            match &analog.place {
+                Some(place) => format!(", place={place:?}"),
+                None => String::new(),
+            },
+        ));
+    }
     for sequence in &project.sequences {
         out.push('\n');
         out.push_str(&format!("sequence = scene.sequence({:?})\n", sequence.name));
         py_steps(&mut out, "sequence", &sequence.steps, 0);
+        if let Some(logic) = &sequence.logic {
+            py_logic(&mut out, "sequence", logic);
+        }
     }
     py_io_map(&mut out, &project.io);
     py_parts(&mut out, &project.parts);
@@ -3262,6 +3371,82 @@ fn py_steps(out: &mut String, owner: &str, steps: &[crate::wire::StepMsg], depth
     }
 }
 
+/// A program's gates and rungs, in the authoring vocabulary.
+fn py_logic(out: &mut String, owner: &str, logic: &crate::wire::LogicMsg) {
+    use crate::wire::RungOutputMsg;
+    let mut gates: Vec<String> = Vec::new();
+    if let Some(c) = &logic.enable {
+        gates.push(format!("enable={}", py_condition(c)));
+    }
+    if let Some(c) = &logic.reset {
+        gates.push(format!("reset={}", py_condition(c)));
+    }
+    if logic.cycle {
+        gates.push("cycle=True".to_string());
+    }
+    if !gates.is_empty() {
+        out.push_str(&format!("{owner}.gates({})\n", gates.join(", ")));
+    }
+    if logic.plant {
+        out.push_str(&format!("{owner}.plant()\n"));
+    }
+    for rung in &logic.rungs {
+        let comment = if rung.comment.is_empty() {
+            String::new()
+        } else {
+            format!(", comment={:?}", rung.comment)
+        };
+        out.push_str(&format!(
+            "{owner}.rung({}{comment})",
+            py_condition(&rung.condition)
+        ));
+        for output in &rung.outputs {
+            out.push_str(&match output {
+                RungOutputMsg::Coil { target } => format!(".coil({target:?})"),
+                RungOutputMsg::Set { signal } => format!(".set({signal:?})"),
+                RungOutputMsg::Reset { signal } => format!(".reset({signal:?})"),
+                RungOutputMsg::Ton { signal, seconds } => format!(".ton({signal:?}, {seconds})"),
+                RungOutputMsg::Ctu { signal, preset } => format!(".ctu({signal:?}, {preset})"),
+                RungOutputMsg::Move { word, value } => {
+                    format!(".move({word:?}, {})", py_word_expr(value))
+                }
+            });
+        }
+        out.push('\n');
+    }
+}
+
+/// A number as Python writes it: whole values without a fraction.
+fn py_number(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x}")
+    }
+}
+
+fn py_operand(operand: &crate::wire::OperandMsg) -> String {
+    match operand {
+        crate::wire::OperandMsg::Word(name) => format!("bt.seq.word({name:?})"),
+        crate::wire::OperandMsg::Const(x) => py_number(*x),
+    }
+}
+
+fn py_word_expr(value: &crate::wire::WordExprMsg) -> String {
+    match (&value.op, &value.right) {
+        (Some(op), Some(right)) => format!(
+            "bt.seq.calc({}, {:?}, {})",
+            py_operand(&value.left),
+            serde_json::to_value(op)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            py_operand(right)
+        ),
+        _ => py_operand(&value.left),
+    }
+}
+
 fn py_action(action: &ActionMsg) -> String {
     // A `robot=` kwarg appears only when the action names one, so
     // single-robot scripts keep their pre-multi-robot output byte for byte.
@@ -3356,6 +3541,9 @@ fn py_action(action: &ActionMsg) -> String {
             "bt.seq.set_signal({signal:?}, {})",
             if *value { "True" } else { "False" }
         ),
+        ActionMsg::SetWord { word, value } => {
+            format!("bt.seq.set_word({word:?}, {})", py_word_expr(value))
+        }
         ActionMsg::Device { device, command } => match command {
             crate::wire::DeviceCommandMsg::Start => format!("bt.seq.start({device:?})"),
             crate::wire::DeviceCommandMsg::Stop => format!("bt.seq.stop({device:?})"),
@@ -3425,6 +3613,19 @@ pub(crate) fn py_condition(condition: &ConditionMsg) -> String {
         ConditionMsg::Any { conditions } => {
             let inner: Vec<String> = conditions.iter().map(py_condition).collect();
             format!("bt.seq.any_of({})", inner.join(", "))
+        }
+        ConditionMsg::Not { condition } => format!("bt.seq.not_({})", py_condition(condition)),
+        ConditionMsg::Compare { left, op, right } => format!(
+            "bt.seq.compare({}, {:?}, {})",
+            py_operand(left),
+            serde_json::to_value(op)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            py_operand(right)
+        ),
+        ConditionMsg::StepActive { sequence, step } => {
+            format!("bt.seq.step_active({sequence:?}, {step:?})")
         }
     }
 }
@@ -3540,6 +3741,84 @@ mod tests {
         )
         .unwrap();
         assert!(legacy.toolpaths().is_empty());
+    }
+
+    #[test]
+    fn scenery_joints_round_trip_through_project_and_python() {
+        use crate::scenery::SceneryJointKind;
+        use nalgebra::Point3;
+        let mut scene = sample_scene();
+        let cube = || Geometry::Box {
+            size: Vector3::new(0.05, 0.05, 0.05),
+        };
+        // A post turned a quarter about Z, a leaf hung on it, opened a little.
+        let post = Isometry3::new(
+            Vector3::new(1.0, 2.0, 0.0),
+            Vector3::z() * std::f64::consts::FRAC_PI_2,
+        );
+        scene.add_obstacle("gate/post", cube(), post).unwrap();
+        scene
+            .add_obstacle("gate/leaf", cube(), Isometry3::translation(1.0, 2.5, 0.5))
+            .unwrap();
+        scene
+            .add_scenery_joint(
+                "gate",
+                SceneryJointKind::Hinge,
+                vec!["gate/leaf".into()],
+                Point3::new(1.0, 2.0, 0.0),
+                Vector3::z(),
+                (-2.0, 2.0),
+                0.0,
+                Some("gate/post".into()),
+            )
+            .unwrap();
+        scene.set_scenery_joint("gate", 0.25).unwrap();
+
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.scenery_joints(), scene.scenery_joints());
+        // It still moves about where it hangs.
+        let mut moved = reloaded.clone();
+        moved
+            .set_scenery_joint("gate", 0.25 + std::f64::consts::FRAC_PI_2)
+            .unwrap();
+        let leaf = |s: &Scene| {
+            s.obstacles()
+                .iter()
+                .find(|o| o.name == "gate/leaf")
+                .unwrap()
+                .pose
+                .translation
+                .vector
+        };
+        let arm = leaf(&reloaded) - Vector3::new(1.0, 2.0, 0.5);
+        let turned = leaf(&moved) - Vector3::new(1.0, 2.0, 0.5);
+        assert!(
+            (turned - Vector3::new(-arm.y, arm.x, 0.0)).norm() < 1e-9,
+            "{turned:?}"
+        );
+        // The generated Python declares it again, the axis in the world.
+        let py = generate_python(&reloaded.to_project());
+        assert!(
+            py.contains("scene.add_hinge(\"gate\", [\"gate/leaf\"], origin=(1.0, 2.0, 0.0), axis=(0.0, 0.0, 1.0), range=(-2.0, 2.0), position=0.25, base=\"gate/post\")"),
+            "{py}"
+        );
+        // Older files without the field still load, and a joint whose
+        // member is gone is dropped rather than refusing the file.
+        let mut without: serde_json::Value = serde_json::from_str(&json).unwrap();
+        without.as_object_mut().unwrap().remove("scenery_joints");
+        let legacy = Scene::from_project(
+            &ProjectFile::from_json(&serde_json::to_string(&without).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(legacy.scenery_joints().is_empty());
+        let mut orphan: serde_json::Value = serde_json::from_str(&json).unwrap();
+        orphan["scenery_joints"][0]["objects"] = serde_json::json!(["gate/ghost"]);
+        let pruned = Scene::from_project(
+            &ProjectFile::from_json(&serde_json::to_string(&orphan).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(pruned.scenery_joints().is_empty());
     }
 
     #[test]
@@ -4407,6 +4686,7 @@ mod tests {
         );
 
         project.sequences.push(crate::wire::SequenceMsg {
+            logic: None,
             name: "cycle".into(),
             steps: vec![],
         });

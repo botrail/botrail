@@ -58,6 +58,15 @@ export function ancestors(name: string): string[] {
   return out;
 }
 
+/** Whether `name` sits under the tree path `path`: `/World/Pedestal` owns
+ * everything below it, but not a sibling that merely shares the prefix
+ * (`/World/PedestalFar`). A tree path leads with a slash whether the
+ * names under it do (an imported subtree) or not (`fence/east/…`, a
+ * generated unit), so the two are compared bare. */
+export function inGroup(name: string, path: string): boolean {
+  return bare(name).startsWith(`${bare(path)}/`);
+}
+
 /** The kinds whose body a generator names under the resident's own name
  * (`conv` the device, `conv/belt` its slab; `gate_curtain` the sensor,
  * `gate_curtain/column_a` its post): a prim there is part of that line. */

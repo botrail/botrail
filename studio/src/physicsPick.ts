@@ -46,8 +46,9 @@ const raycaster = new THREE.Raycaster();
  * is what the world is doing now, not a paused or reviewed past. */
 export function pickable(): boolean {
   const s = useStudioStore.getState();
-  // Not from a headset: the ray's pointer-down selects, the grip is the
-  // TCP handle's (V2); a body in hand under physics is a V3 candidate.
+  // Not from a headset: the ray's pointer-down selects, the grips take
+  // the TCP handle and the things of the scene (`XrGrab`) — not of a
+  // stream; a body in hand under physics is a V3 candidate.
   return followsLive(s) && !s.xr.presenting;
 }
 

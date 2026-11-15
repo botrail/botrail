@@ -1,0 +1,31 @@
+Optimizing ST program...
+Generating C files...
+POUS.c
+POUS.h
+LOCATED_VARIABLES.h
+VARIABLES.csv
+Config0.c
+Config0.h
+Res0.c
+Moving Files...
+Compiling for Linux
+Generating object files...
+Generating glueVars...
+varName: __QW100	varType: INT
+varName: __QX100_0	varType: BOOL
+varName: __QX100_1	varType: BOOL
+varName: __QX100_2	varType: BOOL
+varName: __QX100_3	varType: BOOL
+varName: __IX100_0	varType: BOOL
+varName: __IX100_1	varType: BOOL
+varName: __IX100_2	varType: BOOL
+varName: __IX100_3	varType: BOOL
+varName: __IX100_4	varType: BOOL
+varName: __QX100_4	varType: BOOL
+varName: __IX100_5	varType: BOOL
+varName: __IX100_6	varType: BOOL
+varName: __IX100_7	varType: BOOL
+varName: __IX101_0	varType: BOOL
+varName: __IX101_1	varType: BOOL
+Compiling main program...
+Compilation finished successfully!

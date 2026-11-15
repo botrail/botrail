@@ -26,9 +26,11 @@ mod articulation;
 mod camera;
 pub mod export;
 pub mod recording;
+mod scenery;
 
 pub use articulation::{import_robot, import_robot_bundle, ImportedRobot, RobotImportOptions};
 pub use camera::{CameraOptics, DEFAULT_WIDTH, MAX_FAR, MIN_NEAR, RESOLUTION_ATTR};
+pub use scenery::ImportedJoint;
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -149,6 +151,10 @@ pub struct ImportedScene {
     /// the discovery handle for importing each robot via [`import_robot`]
     /// with `articulation_root`.
     pub robot_roots: Vec<String>,
+    /// The doors and drawers of props imported as scenery
+    /// ([`ImportOptions::articulations_as_scenery`]): their revolute and
+    /// prismatic joints, over the nodes that move on them.
+    pub joints: Vec<ImportedJoint>,
 }
 
 impl Default for ImportedScene {
@@ -160,6 +166,7 @@ impl Default for ImportedScene {
             warnings: Vec::new(),
             up_axis: "Y",
             robot_roots: Vec::new(),
+            joints: Vec::new(),
         }
     }
 }
@@ -227,6 +234,8 @@ fn import_stage(
         mesh_cache_dir: options.mesh_cache_dir.clone(),
         meshes_in_memory: options.meshes_in_memory,
         articulations_as_scenery: options.articulations_as_scenery,
+        worlds: HashMap::new(),
+        joint_prims: Vec::new(),
         out: ImportedScene::default(),
     };
     importer.read_stage_metadata();
@@ -240,6 +249,9 @@ fn import_stage(
     importer
         .walk(root, gf::Matrix4d::default(), None, None, (None, None))
         .map_err(|e| UsdImportError::Traverse(e.to_string()))?;
+    if importer.articulations_as_scenery {
+        importer.collect_scenery_joints();
+    }
     Ok(importer.out)
 }
 
@@ -400,6 +412,10 @@ struct Importer<'a> {
     mesh_cache_dir: Option<PathBuf>,
     meshes_in_memory: bool,
     articulations_as_scenery: bool,
+    /// Scenery articulations only: every prim's world matrix and the joint
+    /// prims met on the walk — what `collect_scenery_joints` reads.
+    worlds: HashMap<String, gf::Matrix4d>,
+    joint_prims: Vec<(Prim, String, String)>,
     out: ImportedScene,
 }
 
@@ -469,6 +485,13 @@ impl Importer<'_> {
         let renderable = view.compute_purpose().unwrap_or_default() == Purpose::Default;
         let type_name = prim.type_name()?.map(|t| t.to_string()).unwrap_or_default();
         let children = view.prim().children()?;
+        if self.articulations_as_scenery {
+            self.worlds.insert(path.clone(), world);
+            if articulation::is_joint_type(&type_name) {
+                self.joint_prims
+                    .push((prim.clone(), path.clone(), type_name.clone()));
+            }
+        }
         // Isaac Sim's convention puts the API on the fixed joint anchoring
         // the base (`/robot/root_joint`): then this prim is the robot.
         for child in children.iter().filter(|_| !self.articulations_as_scenery) {
@@ -1714,6 +1737,113 @@ def Xform "Model"
         );
         let door = node(&scenery, "/Model/Geometry/Door/panel");
         assert!((door.pose.translation.vector.x - 0.32).abs() < 1e-9);
+
+        // The door's hinge comes along: where it is, how far it opens,
+        // what moves on it and what it hangs on. The weld to the world
+        // is not a joint anyone moves.
+        assert!(skipped.joints.is_empty());
+        let [hinge] = scenery.joints.as_slice() else {
+            panic!("{:?}", scenery.joints);
+        };
+        assert_eq!(hinge.name, "/Model/Joints/door");
+        assert!(hinge.hinge);
+        // (`point3f`: single precision.)
+        assert!((hinge.origin.coords - Vector3::new(0.32, 0.0, 0.0)).norm() < 1e-6);
+        assert!((hinge.axis - Vector3::z()).norm() < 1e-9);
+        let (lower, upper) = hinge.range.unwrap();
+        assert!(lower.abs() < 1e-9 && (upper - 110f64.to_radians()).abs() < 1e-6);
+        assert_eq!(hinge.objects, vec!["/Model/Geometry/Door/panel"]);
+        assert_eq!(hinge.base.as_deref(), Some("/Model/Geometry/Carcass/box"));
+    }
+
+    /// A Y-up stage in centimetres: a drawer on a slide under a scaled,
+    /// turned carcass, with a handle welded on the drawer. The axis and
+    /// the travel come out in the Z-up world in metres, and the handle
+    /// moves with the drawer.
+    const DRAWER: &str = r#"#usda 1.0
+(
+    defaultPrim = "Unit"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Unit" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "Carcass" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (100, 0, 0)
+        float3 xformOp:scale = (2, 2, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+
+        def Cube "box"
+        {
+            double size = 30
+        }
+    }
+
+    def Xform "Drawer" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "tray"
+        {
+            double size = 10
+        }
+    }
+
+    def Xform "Handle" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Cube "bar"
+        {
+            double size = 2
+        }
+    }
+
+    def PhysicsPrismaticJoint "slide"
+    {
+        uniform token physics:axis = "Z"
+        rel physics:body0 = </Unit/Carcass>
+        rel physics:body1 = </Unit/Drawer>
+        point3f physics:localPos0 = (5, 10, 0)
+        float physics:lowerLimit = 0
+        float physics:upperLimit = 40
+    }
+
+    def PhysicsFixedJoint "grip"
+    {
+        rel physics:body0 = </Unit/Drawer>
+        rel physics:body1 = </Unit/Handle>
+    }
+}
+"#;
+
+    #[test]
+    fn scenery_joints_come_out_in_the_world() {
+        let scenery = import_str_with(
+            "drawer-scenery",
+            DRAWER,
+            &ImportOptions {
+                articulations_as_scenery: true,
+                ..Default::default()
+            },
+        );
+        let [slide] = scenery.joints.as_slice() else {
+            panic!("{:?}", scenery.joints);
+        };
+        assert!(!slide.hinge);
+        // (100 + 2·5, 2·10, 0) cm, Y-up → (1.1, 0, 0.2) m, Z-up.
+        assert!(
+            (slide.origin.coords - Vector3::new(1.1, 0.0, 0.2)).norm() < 1e-9,
+            "{:?}",
+            slide.origin
+        );
+        // The stage's +Z is the Z-up world's -Y.
+        assert!(
+            (slide.axis - Vector3::new(0.0, -1.0, 0.0)).norm() < 1e-9,
+            "{:?}",
+            slide.axis
+        );
+        assert_eq!(slide.range, Some((0.0, 0.4)));
+        assert_eq!(slide.objects, vec!["/Unit/Drawer/tray", "/Unit/Handle/bar"]);
+        assert_eq!(slide.base.as_deref(), Some("/Unit/Carcass/box"));
     }
 
     /// An authored mass travels with the geometry: a body drawn as two

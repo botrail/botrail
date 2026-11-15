@@ -139,6 +139,13 @@ def ao(count: int = 2, base: Optional[str] = None, **kw) -> list:
     return channels("ao", count, "AO", base, **kw)
 
 
+def ai(count: int = 4, base: Optional[str] = None, **kw) -> list:
+    """`count` analog input channels `AI0…` — what an analog input
+    (`scene.add_analog`) binds to; the register carries the module's
+    counts."""
+    return channels("ai", count, "AI", base, **kw)
+
+
 # ---- vendor spellings: the same channels, addressed the way the PLC
 # programmer will type them.
 

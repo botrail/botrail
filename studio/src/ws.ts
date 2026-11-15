@@ -186,6 +186,13 @@ export const sendUpdatePoses = throttledByKey<{
   rawSend({ type: "update_poses", obstacles, frames }),
 );
 
+/** Move a door, a drawer or a rack to `position` (rad / m), throttled
+ * per joint to ~30 Hz: a slider drag, a hand in the headset. */
+export const sendSetSceneryJoint = throttledByKey<number>(
+  SEND_INTERVAL_MS,
+  (name, position) => rawSend({ type: "set_scenery_joint", name, position }),
+);
+
 /** Resize/reshape an obstacle (sent immediately). */
 export function sendUpdateObstacleGeometry(
   name: string,

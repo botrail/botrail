@@ -675,6 +675,69 @@ impl SceneHub {
         pose_arrays(&self.robot_base_isometry())
     }
 
+    // ------------------------------------------------------ scenery joints
+
+    /// Declares (or replaces) a door, a drawer or a rack; `origin` and
+    /// `axis` are world coordinates as the scene stands.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_scenery_joint(
+        &self,
+        name: &str,
+        kind: botrail_scene::scenery::SceneryJointKind,
+        objects: Vec<String>,
+        origin: [f64; 3],
+        axis: [f64; 3],
+        range: (f64, f64),
+        position: f64,
+        base: Option<String>,
+    ) -> Result<(), SceneError> {
+        botrail_session::add_scenery_joint(
+            self,
+            name,
+            kind,
+            objects,
+            nalgebra::Point3::from(origin),
+            nalgebra::Vector3::from(axis),
+            range,
+            position,
+            base,
+        )
+    }
+
+    pub fn remove_scenery_joint(&self, name: &str) -> bool {
+        botrail_session::remove_scenery_joint(self, name)
+    }
+
+    pub fn set_scenery_joint(&self, name: &str, position: f64) -> Result<f64, SceneError> {
+        botrail_session::set_scenery_joint(self, name, position)
+    }
+
+    pub fn scenery_joint_names(&self) -> Vec<String> {
+        self.with_scene(|scene| {
+            scene
+                .scenery_joints()
+                .iter()
+                .map(|j| j.name.clone())
+                .collect()
+        })
+    }
+
+    /// A joint with its origin and axis in the world, as the scene stands.
+    pub fn scenery_joint(
+        &self,
+        name: &str,
+    ) -> Option<(botrail_scene::scenery::SceneryJoint, [f64; 3], [f64; 3])> {
+        self.with_scene(|scene| {
+            let joint = scene.scenery_joint(name)?;
+            let (origin, axis) = scene.scenery_joint_axis(joint);
+            Some((
+                joint.clone(),
+                [origin.x, origin.y, origin.z],
+                [axis.x, axis.y, axis.z],
+            ))
+        })
+    }
+
     // -------------------------------------------------------------- frames
 
     /// Adds or replaces a named world frame and broadcasts the frame list.
@@ -1332,7 +1395,7 @@ impl SceneHub {
     pub fn upsert_sequence_json(&self, json: &str) -> Result<(), String> {
         let msg: wire::SequenceMsg =
             serde_json::from_str(json).map_err(|e| format!("invalid sequence JSON: {e}"))?;
-        botrail_session::upsert_sequence(self, wire::sequence_from_msg(&msg));
+        botrail_session::upsert_program(self, &msg);
         Ok(())
     }
 
@@ -1350,6 +1413,22 @@ impl SceneHub {
 
     pub fn remove_signal(&self, name: &str) -> Result<(), SceneError> {
         botrail_session::remove_signal(self, name)
+    }
+
+    pub fn define_word(&self, name: &str, initial: f64, integer: bool) -> Result<(), SceneError> {
+        botrail_session::define_word(self, name, initial, integer)
+    }
+
+    pub fn remove_word(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_word(self, name)
+    }
+
+    pub fn upsert_analog(&self, analog: botrail_scene::seq::Analog) -> Result<(), SceneError> {
+        botrail_session::upsert_analog(self, analog)
+    }
+
+    pub fn remove_analog(&self, name: &str) -> Result<(), SceneError> {
+        botrail_session::remove_analog(self, name)
     }
 
     pub fn signals(&self) -> Vec<(String, bool)> {
@@ -1893,6 +1972,7 @@ impl SceneHub {
                     vehicles: Vec::new(),
                     cloths: Vec::new(),
                     ropes: Vec::new(),
+                    readings: None,
                     contacts: Vec::new(),
                     physics: None,
                     robots: rec

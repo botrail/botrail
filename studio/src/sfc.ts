@@ -6,6 +6,7 @@ import type {
   StepMsg,
   StepSpanMsg,
   SignalTrackMsg,
+  WordTrackMsg,
 } from "./protocol";
 
 /**
@@ -259,7 +260,51 @@ export type TruthCtx = {
   span: StepSpanMsg;
   signals: SignalTrackMsg[];
   robots: { name: string; moves: StepSpanMsg[] }[];
+  /** Every program's step spans — what a `step_active` contact reads
+   * (without them it never conducts). */
+  stepSpans?: StepSpanMsg[];
+  /** The word lanes — what a comparison reads (without them a word
+   * reads 0). */
+  words?: WordTrackMsg[];
 };
+
+/** `WordTrack::value_at`: the last sample at or before `t` holds. */
+export function wordValue(lane: { times: number[]; values: number[] }, t: number): number {
+  let value = 0;
+  for (let i = 0; i < lane.times.length; i++) {
+    if (lane.times[i] > t + 1e-9) break;
+    value = lane.values[i];
+  }
+  return value;
+}
+
+/** An operand's value at `t`: the constant, or its word lane's (0 when
+ * the timeline carries no such lane). */
+export function operandValue(
+  o: string | number,
+  t: number,
+  words: WordTrackMsg[] | undefined,
+): number {
+  if (typeof o === "number") return o;
+  const lane = words?.find((w) => w.name === o);
+  return lane ? wordValue(lane, t) : 0;
+}
+
+/** The span `program` stands in at `t`: the latest entered at or before
+ * `t` (an immediate chain's last), while `t` is within it — both ends
+ * included, so the open span of a live plant counts at its head. */
+export function standingAt(
+  spans: StepSpanMsg[],
+  program: string,
+  t: number,
+): StepSpanMsg | null {
+  let best: StepSpanMsg | null = null;
+  for (const s of spans) {
+    if (s.sequence !== program || s.start > t + 1e-9) continue;
+    if (!best || s.start >= best.start - 1e-12) best = s;
+  }
+  return best && t <= best.end + 1e-9 ? best : null;
+}
 
 /** `BoolTrack::value_at`: the last edge at or before `t` holds. */
 export function laneValue(lane: SignalTrackMsg, t: number): boolean {
@@ -376,6 +421,35 @@ export function truth(cond: ConditionMsg, t: number, ctx: TruthCtx): Truth {
     case "any": {
       const children = cond.conditions.map((c) => truth(c, t, ctx));
       return { cond, holds: children.some((c) => c.holds), children };
+    }
+    // A negated network is one atom: lit when what it negates is not.
+    case "not":
+      return { cond, holds: !truth(cond.condition, t, ctx).holds, children: [] };
+    case "step_active": {
+      const at = standingAt(ctx.stepSpans ?? [], cond.sequence, t);
+      return {
+        cond,
+        holds:
+          !!at && (at.name === cond.step || at.name === `${cond.sequence}/${cond.step}`),
+        children: [],
+      };
+    }
+    case "compare": {
+      const a = operandValue(cond.left, t, ctx.words);
+      const b = operandValue(cond.right, t, ctx.words);
+      const holds =
+        cond.op === ">="
+          ? a >= b
+          : cond.op === ">"
+            ? a > b
+            : cond.op === "<="
+              ? a <= b
+              : cond.op === "<"
+                ? a < b
+                : cond.op === "=="
+                  ? a === b
+                  : a !== b;
+      return { cond, holds, children: [] };
     }
   }
 }

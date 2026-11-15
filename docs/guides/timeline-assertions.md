@@ -163,6 +163,65 @@ A useful invariant to assert alongside the takt: on an indexed line, the
 takt is the transfer plus the slowest station. If that stops holding, the
 cycle time has stopped meaning what you think it means.
 
+## Waits: what a program stood waiting for
+
+```python
+tl.waiting(4.06)
+# [{'program': 'pick', 'step': 'arrival', 'flat': 2, 'since': 1.7,
+#   'exits': [{'condition': '↑part_at_pick', 'holds': False,
+#              'unmet': [{'condition': '↑part_at_pick', 'kind': 'rising', 'name': 'part_at_pick',
+#                         'level': False, 'remaining': None,
+#                         'point': 'part_at_pick', 'address': '%IX100.1'}]},
+#             {'condition': '8.00s', 'holds': False,
+#              'unmet': [{'condition': '8.00s', 'kind': 'elapsed', 'remaining': 5.64, ...}]}]}]
+
+tl.waits()                   # every step's stay, in order, and the exit that released it
+# [..., {'program': 'pick', 'step': 'arrival', 'flat': 2, 'start': 1.7, 'end': 5.64,
+#         'waited': 3.94, 'released_by': '↑part_at_pick'}, ...]
+```
+
+`tl.waiting(t)` is the question asked of a stopped cell — *what is it
+waiting for?* — asked of any instant: for every program, the step it
+stands in and the contacts of each exit that do not conduct yet (an
+`any_of` lists its alternatives), with the I/O point the program reads
+there and its bound address. A timer says what it has left, an edge
+contact the signal's level now, `done` names the moves it waits for
+(`done ▶to_pick`). `tl.waits()` is the same over the cycle: each stay
+with the exit that ended it, the first one conducting at its end — the
+rollout's own first-wins rule. Summed per `released_by` it is where the
+cycle's time went, which is the takt question asked step by step:
+
+```python
+from collections import Counter
+spent = Counter()
+for w in tl.waits():
+    spent[w["released_by"]] += w["waited"]
+spent.most_common(3)         # [('↑part_at_pick', 3.94), ('done ▶place', 2.94), ('done ▶home', 1.63)]
+```
+
+Both read the recorded lanes the way the studio's SFC chart lights them
+(its **waiting line** and **Σ waits** show the same rows), and both work on
+a [plant session's](virtual-commissioning.md) record: `Session.waiting()`
+asks at the plant's clock.
+
+## Words and analog loops
+
+```python
+tl.word("dp").value_at(6.91)        # 60.0 — the scaled value the programs read
+tl.word("dp.raw").samples           # [(0.0, 0.0), (0.92, 483.0), …] — the counts on the wire
+tl.analog(6.91)
+# [{'name': 'dp', 'unit': 'kPa', 'source': 'dp_true', 'measured': 60.08,
+#   'current': 13.6, 'raw': 2400, 'scaled': 60.0, 'open': False, 'address': '%IW100'}]
+```
+
+A [word](sequences.md#words-and-analog-inputs) is a lane like a signal's,
+with samples instead of edges. `tl.analog(t)` reads every analog input's
+loop at an instant — what its transmitter measures (the source word now),
+the loop current the counts imply, the counts, the scaled value — which is
+how a threshold is asserted where it is decided: the warning trips at the
+first scan the *scaled* value reads the setpoint, one count's resolution
+and one scan behind the true pressure.
+
 ## Golden values vs budgets
 
 Two different assertions, both worth having:

@@ -33,6 +33,7 @@ pub mod rollout;
 pub mod rope;
 pub mod routing;
 pub mod scan;
+pub mod scenery;
 pub mod script;
 pub mod seq;
 pub mod st;
@@ -79,6 +80,10 @@ pub enum SceneError {
     UnknownSequence(String),
     #[error("unknown signal `{0}`")]
     UnknownSignal(String),
+    #[error("unknown word `{0}`")]
+    UnknownWord(String),
+    #[error("{0}")]
+    BadWord(String),
     #[error("unknown sensor `{0}`")]
     UnknownSensor(String),
     #[error("unknown device `{0}`")]
@@ -123,6 +128,10 @@ pub enum SceneError {
     BadIo(String),
     #[error("{0}")]
     BadPart(String),
+    #[error("unknown scenery joint `{0}`")]
+    UnknownSceneryJoint(String),
+    #[error("{0}")]
+    BadSceneryJoint(String),
     #[error("unknown frame `{0}`")]
     UnknownFrame(String),
 }
@@ -509,7 +518,12 @@ pub struct Scene {
     grasp_bindings: Vec<grasp::GraspBinding>,
     motions: Vec<Motion>,
     sequences: Vec<seq::Sequence>,
+    /// Rungs and gates, by program name (`seq::Logic`).
+    logics: Vec<seq::Logic>,
     signals: Vec<seq::SignalDef>,
+    /// Internal words (`seq::WordDef`) and analog inputs (`seq::Analog`).
+    words: Vec<seq::WordDef>,
+    analogs: Vec<seq::Analog>,
     sensors: Vec<seq::Sensor>,
     devices: Vec<seq::Device>,
     cameras: Vec<seq::Camera>,
@@ -517,6 +531,9 @@ pub struct Scene {
     weld_flashes: Vec<seq::WeldFlash>,
     scenarios: Vec<seq::Scenario>,
     frames: Vec<Frame>,
+    /// Doors, drawers and racks: scenery posed on a hinge or a slide
+    /// (see [`scenery`]).
+    scenery_joints: Vec<scenery::SceneryJoint>,
     toolpaths: Vec<toolpath::Toolpath>,
     /// The latest face diagnosis per toolpath — the marks a check left on
     /// the path for the studio to draw. Presentation state, keyed by
@@ -576,7 +593,10 @@ impl Scene {
             grasp_bindings: Vec::new(),
             motions: Vec::new(),
             sequences: Vec::new(),
+            logics: Vec::new(),
             signals: Vec::new(),
+            words: Vec::new(),
+            analogs: Vec::new(),
             sensors: Vec::new(),
             devices: Vec::new(),
             cameras: Vec::new(),
@@ -584,6 +604,7 @@ impl Scene {
             weld_flashes: Vec::new(),
             scenarios: Vec::new(),
             frames: Vec::new(),
+            scenery_joints: Vec::new(),
             toolpaths: Vec::new(),
             toolpath_marks: Vec::new(),
             allowed_contacts: Vec::new(),
@@ -1494,6 +1515,7 @@ impl Scene {
         self.obstacle_colliders.remove(index);
         self.attachments.retain(|a| a.object != name);
         self.prune_parts();
+        self.prune_scenery_joints();
         Ok(())
     }
 
@@ -3086,6 +3108,7 @@ impl Scene {
             contacts: Vec::new(),
             cloths: Vec::new(),
             ropes: Vec::new(),
+            readings: None,
             grasps: Vec::new(),
             robots,
             objects: Vec::new(),

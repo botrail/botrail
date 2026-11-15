@@ -3,6 +3,8 @@ import { useMemo, useState } from "react";
 import { useDockReserve } from "../dockReserve";
 import { channelChoices, pointId } from "../ioEdit";
 import { forcedLevel, hostChip } from "../plant";
+import { deviationAt, readLevel, readingsOf } from "../readings";
+import { forcedWord, wordHands, wordLive } from "../words";
 import { signalAt } from "../playbackRig";
 import type {
   ChannelKind,
@@ -100,6 +102,11 @@ export function IoOverlay() {
   const selectDevice = useStudioStore((s) => s.selectDevice);
   const focusTab = useStudioStore((s) => s.focusTab);
   const plant = useStudioStore((s) => s.plant);
+  // A monitor only reads: no force column.
+  const writable = plant !== null && !plant.read_only;
+  const readings = useStudioStore((s) => readingsOf(s.plant, s.timeline));
+  const highlightLane = useStudioStore((s) => s.highlightLane);
+  const setHighlightLane = useStudioStore((s) => s.setHighlightLane);
   const docked = useStudioStore((s) => s.playback !== null);
   const [panel, setPanel] = useState<HTMLDivElement | null>(null);
   useDockReserve(panel, docked);
@@ -170,6 +177,8 @@ export function IoOverlay() {
   const warnings = io.findings.filter((f) => f.severity === "warning").length;
   const cosmetic = io.points.filter((p) => p.status === "cosmetic").length;
   const unbound = io.points.filter((p) => p.status === "unbound").length;
+  const wordDefs = useStudioStore((st) => st.wordDefs);
+  const analogs = useStudioStore((st) => st.analogs);
   const lanes = useMemo(() => {
     const m = new Map<string, { times: number[]; values: boolean[] }>();
     for (const lane of timeline?.signals ?? []) m.set(lane.name, lane);
@@ -179,6 +188,9 @@ export function IoOverlay() {
   if (!open) return null;
 
   const pick = (p: IoPointMsg) => {
+    // The point in focus everywhere: the ladder's contacts, the SFC
+    // chart's atoms, the lane, the 3D tag (a second click releases it).
+    setHighlightLane(highlightLane === p.label ? null : p.label);
     if (sensors.some((s) => s.name === p.name)) {
       selectSensor(p.name);
       focusTab("obstacle");
@@ -280,7 +292,7 @@ export function IoOverlay() {
                 <th title="lane level at the playhead (points with a lane, while a bake is loaded)">
                   live
                 </th>
-                {plant && (
+                {writable && (
                   <th title="pin the lane like a PLC force: 1 / 0 until released (×)">force</th>
                 )}
               </tr>
@@ -296,14 +308,29 @@ export function IoOverlay() {
                   sensors.some((s) => s.name === p.name) ||
                   devices.some((d) => d.name === p.name);
                 const forced = p.aspect ? null : forcedLevel(plant, p.name);
+                // What the controller read of the point, where it was read
+                // (a replayed log, a monitor), and whether the model agrees.
+                const readLane = p.aspect ? p.label : p.name;
+                const read = readLevel(readings, readLane, playbackTime);
+                const differs =
+                  deviationAt(readings, readLane, playbackTime) ??
+                  deviationAt(readings, `${p.name}.raw`, playbackTime);
+                // A word: its value (an analog input: its whole loop).
+                const number = lane ? null : wordLive(p, timeline?.words, analogs, playbackTime);
+                const hands = wordHands(p, wordDefs, analogs, timeline?.words);
+                const pinned = forcedWord(plant, p.label);
                 return (
                   <tr
                     key={`${p.label}/${p.direction}/${p.host ?? ""}`}
-                    className={`io-row io-${p.status}${clickable ? " io-clickable" : ""}${
+                    className={`io-row io-${p.status} io-clickable${
                       forced !== null ? " io-forced" : ""
-                    }`}
+                    }${highlightLane === p.label ? " io-hot" : ""}`}
                     onClick={() => pick(p)}
-                    title={clickable ? "select in the scene tree" : undefined}
+                    title={
+                      clickable
+                        ? "focus this point (ladder, SFC, lane, 3D tag) and select it in the scene tree"
+                        : "focus this point (ladder, SFC, lane, 3D tag)"
+                    }
                   >
                     <td className="io-point">
                       {p.label}
@@ -330,18 +357,30 @@ export function IoOverlay() {
                     <StepCell steps={p.writers} />
                     <StepCell steps={p.readers} />
                     <td className="io-live">
-                      {live === null ? (
+                      {number !== null ? (
+                        <span
+                          className="io-word"
+                          title="a word's value at the playhead — an analog input shows its loop: scaled value · loop current · module counts"
+                        >
+                          {number}
+                        </span>
+                      ) : live === null ? (
                         <span className="io-muted">—</span>
                       ) : (
-                        <span className={live ? "io-on" : "io-off"}>{live ? "●" : "○"}</span>
+                        <span className={(read ?? live) ? "io-on" : "io-off"}>{(read ?? live) ? "●" : "○"}</span>
                       )}
-                      {forced !== null && (
+                      {differs && (
+                        <span className="io-differs" title={differs.note}>
+                          ≠
+                        </span>
+                      )}
+                      {(forced !== null || pinned !== null) && (
                         <span className="io-forced-mark" title="forced">
                           F
                         </span>
                       )}
                     </td>
-                    {plant && (
+                    {writable && (
                       <td className="io-force" onClick={(e) => e.stopPropagation()}>
                         {lane ? (
                           <>
@@ -368,6 +407,12 @@ export function IoOverlay() {
                               </button>
                             )}
                           </>
+                        ) : hands.write || hands.force ? (
+                          <WordHands
+                            name={p.label}
+                            write={hands.write}
+                            pinned={pinned}
+                          />
                         ) : (
                           <span className="io-muted">—</span>
                         )}
@@ -515,3 +560,68 @@ function ChannelCell({
   );
 }
 
+
+/** A word's hands on a live plant: a number, then `W` keys it in once (a
+ * setpoint — defined words only), `F` pins the lane to it (on an analog
+ * input: what the transmitter measures), `×` releases the pin. */
+function WordHands({
+  name,
+  write,
+  pinned,
+}: {
+  name: string;
+  write: boolean;
+  pinned: number | null;
+}) {
+  const [text, setText] = useState("");
+  const value = Number(text);
+  const ok = text.trim() !== "" && Number.isFinite(value);
+  return (
+    <>
+      <input
+        className="io-word-input"
+        value={text}
+        placeholder={pinned !== null ? String(pinned) : "value"}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || !ok) return;
+          sendPlant(
+            write
+              ? { command: "write", word: name, value }
+              : { command: "force_word", lane: name, value },
+          );
+        }}
+        title={
+          write
+            ? "a number for this word: Enter (or W) keys it in once, F pins the word to it"
+            : "a number for this word: Enter (or F) pins it — on an analog input, what the transmitter measures"
+        }
+      />
+      {write && (
+        <button
+          disabled={!ok}
+          onClick={() => sendPlant({ command: "write", word: name, value })}
+          title="write the word once — a setpoint keyed in; the programs read it from their next scan"
+        >
+          W
+        </button>
+      )}
+      <button
+        className={pinned !== null ? "io-force-on" : undefined}
+        disabled={!ok}
+        onClick={() => sendPlant({ command: "force_word", lane: name, value })}
+        title="pin the word to this value until released"
+      >
+        F
+      </button>
+      {pinned !== null && (
+        <button
+          onClick={() => sendPlant({ command: "unforce", lane: name })}
+          title="release the pin: the word follows the programs (the transmitter) again"
+        >
+          ×
+        </button>
+      )}
+    </>
+  );
+}

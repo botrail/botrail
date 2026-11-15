@@ -144,6 +144,41 @@ That keeps the cell correct when the asset is rebuilt — the trap being that a
 hard-coded lift is silently wrong the day the mesh's origin moves, and a
 workpiece a centimetre into its fixture reads as a permanent collision.
 
+## Doors and drawers
+
+Scenery that moves on a hinge or a slide — a fence door, a cabinet door, a
+dishwasher rack — is a *scenery joint*: the obstacles that move together,
+the axis they move on, and how far.
+
+```python
+scene.add_hinge("gate", ["gate/leaf", "gate/handle"], origin=(2.0, 0.0, 0.0),
+                range=(0.0, math.radians(110)), base="gate/post")
+scene.add_slide("unit/rack", ["unit/rack"], axis=(-1, 0, 0), range=(0.0, 0.45),
+                base="unit/body")
+
+scene.set_scenery_joint("gate", math.radians(90))   # → where it stands, held within its range
+scene.scenery_joint("gate")     # kind, position, range, origin, axis, objects, base
+scene.scenery_joints            # the names
+```
+
+`origin` and `axis` are world coordinates as the scene stands (a hinge is
+vertical unless you say otherwise). `base` is the obstacle the leaf hangs
+on — a post, the carcass — and keeps them in its frame: move the unit and
+its hinges come along. The position is an angle in radians on a hinge, a
+distance in metres on a slide, and the poses the objects have when the
+joint is declared count as `position=0`.
+
+A scenery joint is passive. Setting it rewrites its objects' poses, so
+collision checking, planning and a bake see the door where it stands, and
+nothing in a sequence drives it — a door a controller opens is a
+[linear axis](sensors-and-devices.md#linear-axes). It is saved with the
+[project](projects.md). [`bt.parts.fence`](standard-parts.md) hangs its
+door on one (`<name>/door`), and a prop
+[imported as scenery](usd-import.md#simready-central-assets) keeps the
+joints its file authored. In the [studio](studio.md) the joints of what is
+selected are sliders in the LAYOUT tab, and in a headset a grip on the door
+swings it.
+
 ## Named frames
 
 A frame is a named pose — a mount point, a teach point, a fixture datum:

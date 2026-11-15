@@ -10,6 +10,12 @@ import { WORLD_UP, applyPlacement, stancePlacement } from "./locomotion";
 import { headPose, xrRig } from "./rig";
 import { stanceFromView } from "./stance";
 
+/** The origin's rotation before any turn. One object for every render:
+ * a fresh quaternion would read as a changed prop, and the renderer would
+ * copy it back over the player's heading each time the scene re-renders
+ * (a selection, say). */
+const Z_UP = xrOriginQuaternion(WORLD_UP);
+
 /**
  * The player's origin (their feet). Carries the Z-up rotation — botrail's
  * world is Z-up, the XR reference space Y-up with the floor at y = 0; the
@@ -39,7 +45,7 @@ export function XrOrigin({ children }: { children?: ReactNode }) {
     pending.current = session !== undefined;
     if (!session && ref.current) {
       ref.current.position.set(0, 0, 0);
-      ref.current.quaternion.copy(xrOriginQuaternion(WORLD_UP));
+      ref.current.quaternion.copy(Z_UP);
       xrRig.head = null;
     }
   }, [session, stance]);
@@ -65,7 +71,7 @@ export function XrOrigin({ children }: { children?: ReactNode }) {
   });
 
   return (
-    <XROrigin ref={ref} quaternion={xrOriginQuaternion(WORLD_UP)}>
+    <XROrigin ref={ref} quaternion={Z_UP}>
       {children}
     </XROrigin>
   );

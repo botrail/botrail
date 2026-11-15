@@ -23,9 +23,11 @@ Writes ``tmp/xr/<cell>.png`` and ``.json`` unless ``--out-dir`` says otherwise.
 ``--interact`` drives the emulated controllers through the V1 controls
 (design-vr.md §3.4 / §3.6) and checks each against the store and the
 report: the right ray on a robot hovers it (label), the trigger selects
-it, a right-stick flick snap-turns 45° about the head, a left-stick push
-throws the arc and letting go lands the head on its hit, X recenters on
-the launch stance, and (with ``--play``) A pauses / plays, B doubles the
+it, a right-stick flick snap-turns 45° about the head, a right-stick push
+throws the arc and letting go lands the head on its hit, the left stick
+glides (up to 2 m/s the way the head faces, analog, sideways too, coasting
+to rest when let go — and neither turning nor aiming), X recenters on the
+launch stance, and (with ``--play``) A pauses / plays, B doubles the
 speed, and a trigger pull on the panel's speed button doubles it again.
 The script only moves the emulator (``window.__IWER__``); the page's
 ``__XR__.aimPose`` turns a world target into a controller pose.
@@ -38,6 +40,22 @@ back to the real TCP); in the session the right grip on the handle,
 squeeze, a lift of 8 cm (the robot follows), a pull out of reach
 (unreachable), release (snaps back), then left Y and the panel's
 ``+ point`` each add a waypoint to the motion the MOTION panel shows.
+
+In the basics cell (``demo``, ``sequence``) ``--grab`` then takes things
+in hand (design-vr.md §3.12): a squeeze in mid-air takes nothing; a grip
+on a crate takes the crate alone, which follows the hand, turns with it
+and stays where it is let go; a block of a pallet brings the pallet and a
+lamp the stack light (the part the bill knows them as); a selected piece
+comes alone; none of it changes the selection; and (with ``--play``) a
+part the recording has moved is taken from where it is drawn, which ends
+the replay.
+
+Where the cell has doors and drawers (scenery joints: the basics cell's
+fence door; ``--cell home``, the SimReady kitchen's refrigerator and
+dishwasher) ``--grab`` works them by hand: a grip on a door takes its
+hinge, not the door — the hand's sweep about the axis opens it, a pull
+past the stop holds at the stop until the hand is back there, it stays as
+it is left, and a move from Python shows in the studio.
 """
 
 from __future__ import annotations
@@ -51,7 +69,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path[:0] = [str(ROOT / "examples" / d) for d in ("basics", "welding", "palletizing")]
+sys.path[:0] = [str(ROOT / "examples" / d) for d in ("basics", "welding", "palletizing", "home")]
 
 import botrail as bt  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
@@ -155,6 +173,11 @@ def build(cell: str) -> tuple[bt.Scene, str | None]:
 
         scene, _info = palletizing_line_demo.build()
         return scene, None
+    if cell == "home":
+        import home_tidy_demo
+
+        scene, _house = home_tidy_demo.build()
+        return scene, None
     raise SystemExit(f"unknown cell {cell!r}")
 
 
@@ -244,9 +267,20 @@ def interact(page, report: dict, errors: list[str], cell: str, play: bool, run_c
         expect("hover robot", bool(hover) and hover["kind"] == "robot" and hover["name"] == robot["name"], hover)
         label = xr()["label"]
         expect("hover label", robot["name"] in label.split("\n")[0], label.replace("\n", " | "))
+        launch = xr()
         press("right", "trigger")
         sel = xr()["selection"]
         expect("trigger selects", sel.get("type") == "tcp" and sel.get("robot") == robot["name"], sel)
+        # The scene re-renders on a selection; the player's heading is not
+        # a prop of it. Still facing what the launch stance faces.
+        kept = xr()
+        stance = kept["stance"]
+        facing = [stance["lookAt"][i] - stance["standAt"][i] for i in range(2)]
+        heading = kept["glide"]["heading"]
+        cos = ((facing[0] * heading[0] + facing[1] * heading[1]) / math.hypot(*facing)) if heading else 0.0
+        expect("a selection keeps the heading", abs(wrap_angle(kept["origin"]["yaw"] - launch["origin"]["yaw"])) < 1e-9
+               and cos > 0.9999 and math.dist(kept["headWorld"], launch["headWorld"]) < 1e-9,
+               {"yaw_deg": round(math.degrees(kept["origin"]["yaw"]), 2), "cos_to_target": round(cos, 6)})
         rest("right")
         frames(3)
         after = xr()["hover"]
@@ -272,14 +306,14 @@ def interact(page, report: dict, errors: list[str], cell: str, play: bool, run_c
     expect("snap turns back", abs(wrap_angle(xr()["origin"]["yaw"] - before["origin"]["yaw"])) < 1e-3,
            round(math.degrees(wrap_angle(xr()["origin"]["yaw"] - before["origin"]["yaw"])), 2))
 
-    # 3. Teleport: left stick forward throws the arc from the left ray;
+    # 3. Teleport: right stick forward throws the arc from the right ray;
     # letting go lands the head over the hit.
-    stick("left", 0, -1)
+    stick("right", 0, -1)
     arc = xr()["teleport"]
-    expect("arc shown while the stick is held", arc["hand"] == "left" and arc["hit"] is not None and arc["valid"], arc)
+    expect("arc shown while the stick is held", arc["hand"] == "right" and arc["hit"] is not None and arc["valid"], arc)
     head_before = xr()["headWorld"]
     yaw_before = xr()["origin"]["yaw"]
-    stick("left", 0, 0)
+    stick("right", 0, 0)
     now = xr()
     landed = math.dist(now["headWorld"][:2], arc["hit"][:2]) if arc["hit"] else None
     expect("teleport lands the head on the hit",
@@ -287,7 +321,55 @@ def interact(page, report: dict, errors: list[str], cell: str, play: bool, run_c
            and abs(wrap_angle(now["origin"]["yaw"] - yaw_before)) < 1e-6 and now["teleport"]["hand"] is None,
            {"landed_off_m": None if landed is None else round(landed, 4), "hit": arc["hit"], "head": now["headWorld"]})
 
-    # 4. Recenter (left X): back over the launch stance.
+    # 4. Glide: the left stick walks the player the way the head faces.
+    # The turns above came back to the launch heading and a teleport keeps
+    # it, so "the way the head faces" is still the stance's direction.
+    def speed(r: dict) -> float:
+        return math.hypot(*r["glide"]["velocity"])
+
+    def cosine(a: list[float], b: list[float]) -> float:
+        n = math.hypot(*a) * math.hypot(*b)
+        return (a[0] * b[0] + a[1] * b[1]) / n if n > 1e-12 else 0.0
+
+    start = xr()
+    stance = start["stance"]
+    facing = [stance["lookAt"][i] - stance["standAt"][i] for i in range(2)]
+    right_of = [facing[1], -facing[0]]
+    stick("left", 0, -1)
+    frames(60)
+    cruise = xr()
+    walked = [cruise["headWorld"][i] - start["headWorld"][i] for i in range(2)]
+    expect("left stick glides forward at full speed",
+           abs(speed(cruise) - 2.0) < 0.05 and cosine(cruise["glide"]["velocity"], facing) > 0.999
+           and cosine(walked, facing) > 0.999 and math.hypot(*walked) > 0.5,
+           {"speed_mps": round(speed(cruise), 3), "walked_m": round(math.hypot(*walked), 3),
+            "cos_to_facing": round(cosine(walked, facing), 5), "facing": facing, "heading": cruise["glide"]["heading"],
+            "stance": stance, "yaw": start["origin"]["yaw"], "head_start": start["headWorld"]})
+    expect("a glide neither turns, lifts nor aims",
+           abs(wrap_angle(cruise["origin"]["yaw"] - start["origin"]["yaw"])) < 1e-9
+           and abs(cruise["headWorld"][2] - start["headWorld"][2]) < 1e-3 and cruise["teleport"]["hand"] is None,
+           {"yaw": cruise["origin"]["yaw"], "head_z": cruise["headWorld"][2], "teleport": cruise["teleport"]})
+    stick("left", 0, -0.575)  # half of the live travel: a quarter of the speed
+    frames(60)
+    slow = xr()
+    expect("the stick is analog", abs(speed(slow) - 0.5) < 0.03 and cosine(slow["glide"]["velocity"], facing) > 0.999,
+           {"speed_mps": round(speed(slow), 3)})
+    stick("left", 1, 0)
+    frames(60)
+    side = xr()
+    expect("stick right strafes right", abs(speed(side) - 2.0) < 0.05
+           and cosine(side["glide"]["velocity"], right_of) > 0.999,
+           {"speed_mps": round(speed(side), 3), "cos_to_right": round(cosine(side["glide"]["velocity"], right_of), 5)})
+    stick("left", 0, 0)
+    frames(60)
+    stopped = xr()
+    frames(5)
+    still = xr()
+    drift = math.dist(still["headWorld"], stopped["headWorld"])
+    expect("letting go coasts to rest", stopped["glide"]["velocity"] == [0, 0] and drift < 1e-9,
+           {"velocity": stopped["glide"]["velocity"], "drift_m": drift})
+
+    # 5. Recenter (left X): back over the launch stance.
     press("left", "x-button")
     now = xr()
     stance = now["stance"]
@@ -295,7 +377,7 @@ def interact(page, report: dict, errors: list[str], cell: str, play: bool, run_c
     expect("X recenters on the stance", off is not None and off < 0.03, {"off_m": None if off is None else round(off, 4)})
 
     if play:
-        # 5. Right A pauses and plays, right B doubles the speed.
+        # 6. Right A pauses and plays, right B doubles the speed.
         playing0 = store("s.playing")
         press("right", "a-button")
         playing1 = store("s.playing")
@@ -306,7 +388,7 @@ def interact(page, report: dict, errors: list[str], cell: str, play: bool, run_c
         press("right", "b-button")
         speed1 = store("s.playbackSpeed")
         expect("B doubles the speed", speed1 == (1 if speed0 >= 8 else speed0 * 2), [speed0, speed1])
-        # 6. The panel: a trigger pull on its speed button from above.
+        # 7. The panel: a trigger pull on its speed button from above.
         panel = xr()["panel"]
         button = next((b for b in (panel or {}).get("buttons", []) if b["action"] == "speed"), None)
         if button and button["world"]:
@@ -525,9 +607,351 @@ def grab_xr(page, report: dict, errors: list[str], cell: str, scene, frames, pre
         expect("panel waypoint button", False, button)
 
 
+def q_mul(a: list[float], b: list[float]) -> list[float]:
+    """Hamilton product of two quaternions, x y z w."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz]
+
+
+def q_rotate(q: list[float], v: list[float]) -> list[float]:
+    x, y, z, w = q
+    return q_mul(q_mul(q, [*v, 0.0]), [-x, -y, -z, w])[:3]
+
+
+# The cells whose layout the hand check knows by name (the basics demo's).
+HAND_CELLS = ("demo", "sequence")
+
+
+def hand_xr(page, report: dict, errors: list[str], cell: str, scene, frames, xr, **_) -> None:
+    """Things of the cell taken in hand (design-vr.md §3.12)."""
+    checks: dict = {}
+    report["hand_xr"] = checks
+
+    def expect(name: str, ok: bool, detail) -> None:
+        checks[name] = {"ok": ok, "detail": detail}
+        print(f"[{cell}] {'ok ' if ok else 'FAIL'} {name}: {detail}", flush=True)
+        if not ok:
+            errors.append(f"hand xr {name}: {detail}")
+
+    def poses(prefix: str = "") -> dict:
+        return page.evaluate(
+            """(p) => Object.fromEntries(window.__STUDIO__.getState().obstacles
+                 .filter((o) => o.name.replace(/^[/]+/, '').startsWith(p)).map((o) => [o.name, o.pose]))""",
+            prefix.lstrip("/"))
+
+    def centre(name: str) -> list[float]:
+        lo, hi = scene.obstacle_bounds(name)
+        return [(a + b) / 2 for a, b in zip(lo, hi)]
+
+    def place(hand: str, world: list[float], quaternion: tuple = (0, 0, 0, 1)) -> None:
+        ref = page.evaluate("(w) => window.__XR__.toReference(w)", world)
+        page.evaluate("""([h, p, q]) => { const c = window.__IWER__.controllers[h];
+             c.position.set(...p); c.quaternion.set(...q); }""", [hand, ref, list(quaternion)])
+        frames(3)
+
+    def squeeze(hand: str, value: int) -> None:
+        page.evaluate("([h, v]) => window.__IWER__.controllers[h].updateButtonValue('squeeze', v)", [hand, value])
+        frames(3)
+
+    def settle() -> None:
+        # The hand's pose goes to the host and comes back as the scene's.
+        frames(6)
+        time.sleep(0.5)
+
+    def add(a: list[float], b: list[float]) -> list[float]:
+        return [x + y for x, y in zip(a, b)]
+
+    def moved(before: dict, after: dict, by: list[float]) -> float:
+        """The worst departure of a set of obstacles from `before + by`."""
+        return max(math.dist(after[n]["position"], add(before[n]["position"], by)) for n in before)
+
+    robot = page.evaluate("() => window.__STUDIO__.getState().robots[0]?.desc.name")
+    selection = "() => { const s = window.__STUDIO__.getState().selection; return [s.type, s.robot ?? s.name ?? s.path]; }"
+
+    # A part the recording has moved is taken from where it is drawn, and
+    # the replay ends (first: the rest edits the scene the bake recorded).
+    tracks = page.evaluate("() => window.__STUDIO__.getState().playback?.objects?.tracks.map((t) => t.name) ?? []")
+    if tracks:
+        page.evaluate("() => { const s = window.__STUDIO__.getState(); s.seek(0.6 * s.playback.duration); }")
+        frames(3)
+        shown = page.evaluate("""() => { const s = window.__STUDIO__.getState();
+            return Object.fromEntries(Object.entries(s.overrideObstaclePoses ?? {}).filter(([n]) => !s.stowedObstacles.has(n))); }""")
+        scene_poses = poses()
+        far = {n: math.dist(p["position"], scene_poses[n]["position"]) for n, p in shown.items()
+               if n in scene_poses and scene.obstacle_visible(n)}
+        name = max(far, key=far.get) if far else None
+        if name is None or far[name] < 0.05:
+            expect("a recorded part away from its scene pose", False, far)
+        else:
+            # The part's centre as drawn: its scene centre carried to the recorded pose.
+            was, now = scene_poses[name], shown[name]
+            inv = [-was["quaternion"][0], -was["quaternion"][1], -was["quaternion"][2], was["quaternion"][3]]
+            local = q_rotate(inv, [c - p for c, p in zip(centre(name), was["position"])])
+            at = add(now["position"], q_rotate(now["quaternion"], local))
+            place("left", at)
+            squeeze("left", 1)
+            state = page.evaluate("() => { const s = window.__STUDIO__.getState(); return [s.playing, s.overrideObstaclePoses === null]; }")
+            expect("a recorded part is taken from where it is drawn", xr()["held"]["left"] == name,
+                   {"held": xr()["held"], "part": name, "from_scene_m": round(far[name], 3)})
+            expect("taking it ends the replay", state == [False, True], {"playing": state[0], "scene_shown": state[1]})
+            settle()
+            kept = math.dist(poses()[name]["position"], now["position"])
+            expect("and stays in the hand", kept < 0.002, {"moved_m": round(kept, 4)})
+            squeeze("left", 0)
+    page.evaluate("(r) => { const s = window.__STUDIO__.getState(); s.stopPlayback(); s.selectTcp(r); }", robot)
+    frames(3)
+
+    # Mid-air: nothing.
+    place("left", add(centre("/World/PalletFar/Crate_2"), [0, 0, 1.2]))
+    before = poses()
+    squeeze("left", 1)
+    held = xr()["held"]
+    settle()
+    squeeze("left", 0)
+    expect("a squeeze in mid-air takes nothing", held == {"left": None, "right": None} and poses() == before, held)
+
+    # A workpiece: alone, following the hand, turning with it, staying put.
+    crate = "/World/PalletFar/Crate_2"
+    grip = add(centre(crate), [0.1, 0, 0])
+    place("left", grip)
+    squeeze("left", 1)
+    expect("a grip on a crate takes the crate alone", xr()["held"] == {"left": crate, "right": None}, xr()["held"])
+    before = poses()
+    lift = [0.3, -0.25, 0.4]
+    grip = add(grip, lift)
+    place("left", grip)
+    settle()
+    after = poses()
+    rest_of = {n: p for n, p in before.items() if n != crate}
+    expect("it follows the hand", moved({crate: before[crate]}, after, lift) < 0.001
+           and after[crate]["quaternion"] == before[crate]["quaternion"] and moved(rest_of, after, [0, 0, 0]) == 0,
+           {"off_m": round(moved({crate: before[crate]}, after, lift), 5), "others_moved": moved(rest_of, after, [0, 0, 0])})
+    # A quarter turn of the hand about the vertical (the reference space's Y).
+    quarter = [0, 0, math.sin(math.pi / 4), math.cos(math.pi / 4)]
+    place("left", grip, (0, math.sin(math.pi / 4), 0, math.cos(math.pi / 4)))
+    settle()
+    turned = poses()[crate]
+    want = add(grip, q_rotate(quarter, [a - b for a, b in zip(after[crate]["position"], grip)]))
+    facing = abs(sum(a * b for a, b in zip(turned["quaternion"], q_mul(quarter, after[crate]["quaternion"]))))
+    expect("it turns with the hand", math.dist(turned["position"], want) < 0.001 and facing > 1 - 1e-6,
+           {"off_m": round(math.dist(turned["position"], want), 5), "facing": round(facing, 7)})
+    squeeze("left", 0)
+    place("left", add(grip, [0.5, 0, 0]))
+    settle()
+    expect("it stays where it is let go", xr()["held"]["left"] is None and poses()[crate] == turned, poses()[crate]["position"])
+
+    # A piece of a part brings the part: a block of the pallet, a lamp of the stack light.
+    for hand, piece, unit, by in (("right", "/World/PalletFar/Blocks/Block_3", "/World/PalletFar", [0.2, 0.1, 0.05]),
+                                  ("left", "stack_light/green", "/stack_light", [-0.2, 0.0, -0.3])):
+        at = centre(piece)
+        place(hand, at)
+        before = poses(unit)
+        squeeze(hand, 1)
+        got = xr()["held"][hand]
+        place(hand, add(at, by))
+        settle()
+        squeeze(hand, 0)
+        off = moved(before, poses(unit), by)
+        expect(f"a piece of {unit} brings it whole", got == unit and len(before) > 1 and off < 0.001,
+               {"held": got, "members": len(before), "off_m": round(off, 5)})
+
+    # Selected, the piece comes alone.
+    block = "/World/PalletFar/Blocks/Block_3"
+    page.evaluate("(n) => window.__STUDIO__.getState().selectObstacle(n)", block)
+    frames(3)
+    at = centre(block)
+    place("left", at)
+    before = poses("/World/PalletFar")
+    squeeze("left", 1)
+    got = xr()["held"]["left"]
+    place("left", add(at, [0, 0, 0.3]))
+    settle()
+    squeeze("left", 0)
+    after = poses("/World/PalletFar")
+    others = {n: p for n, p in before.items() if n != block}
+    expect("a selected piece comes alone", got == block and moved({block: before[block]}, after, [0, 0, 0.3]) < 0.001
+           and moved(others, after, [0, 0, 0]) == 0, {"held": got})
+    expect("a grab leaves the selection be", page.evaluate(selection) == ["obstacle", block], page.evaluate(selection))
+    page.evaluate("(r) => window.__STUDIO__.getState().selectTcp(r)", robot)
+    page.evaluate("""() => { for (const h of ['left', 'right']) { const c = window.__IWER__.controllers[h];
+         c.quaternion.set(0, 0, 0, 1); } }""")
+    frames(3)
+
+
+def q_axis_angle(axis: list[float], angle: float) -> list[float]:
+    s = math.sin(angle / 2)
+    return [axis[0] * s, axis[1] * s, axis[2] * s, math.cos(angle / 2)]
+
+
+# The doors and drawers the joint check works, by cell (scenery joints).
+JOINT_CELLS = {
+    "demo": ["fence/west/door"],
+    "sequence": ["fence/west/door"],
+    "home": ["kitchen/refrigerator/World/Joints/LeftDoor_joint",
+             "kitchen/dishwasher/World/Joints/LowerRack_joint"],
+}
+
+
+def joints_xr(page, report: dict, errors: list[str], cell: str, scene, frames, xr, **_) -> None:
+    """Doors and drawers worked by hand (design-scenery-joints.md)."""
+    names = JOINT_CELLS.get(cell, [])
+    if not names:
+        return
+    checks: dict = {}
+    report["joints_xr"] = checks
+
+    def expect(name: str, ok: bool, detail) -> None:
+        checks[name] = {"ok": ok, "detail": detail}
+        print(f"[{cell}] {'ok ' if ok else 'FAIL'} {name}: {detail}", flush=True)
+        if not ok:
+            errors.append(f"joints xr {name}: {detail}")
+
+    def pose_controller(world: list[float]) -> None:
+        ref = page.evaluate("(w) => window.__XR__.toReference(w)", world)
+        page.evaluate("""([p]) => { const c = window.__IWER__.controllers.left;
+             c.position.set(...p); c.quaternion.set(0, 0, 0, 1); }""", [ref])
+        frames(3)
+
+    # The grip sits off the pose the emulator sets; with the controller's
+    # orientation held, by a fixed step in the world. A hinge reads the
+    # hand's sweep about its axis, so the grip itself goes where asked.
+    pose_controller([0.0, 0.0, 1.2])
+    offset = [g - c for g, c in zip(xr()["grips"]["left"], [0.0, 0.0, 1.2])]
+    checks["grip_offset_m"] = [round(v, 4) for v in offset]
+
+    def place(world: list[float]) -> None:
+        pose_controller([w - o for w, o in zip(world, offset)])
+
+    def squeeze(value: int) -> None:
+        page.evaluate("(v) => window.__IWER__.controllers.left.updateButtonValue('squeeze', v)", value)
+        frames(3)
+
+    def shown(name: str) -> float:
+        return page.evaluate(
+            "(n) => window.__STUDIO__.getState().sceneryJoints.find((j) => j.name === n)?.position ?? null", name)
+
+    waits: list[float] = []
+    checks["echo_s"] = waits
+
+    def settle(name: str) -> None:
+        """Until the host has the hand's last word and the studio has the
+        host's answer (the send is throttled; the echo is a broadcast)."""
+        frames(6)
+        start, last, since = time.time(), None, time.time()
+        while time.time() - start < 10:
+            at = scene.scenery_joint(name)["position"]
+            if at != last:
+                last, since = at, time.time()
+            elif shown(name) == at and time.time() - since > 0.3:
+                break
+            time.sleep(0.05)
+        waits.append(round(time.time() - start, 2))
+
+    def pose(name: str) -> dict:
+        return page.evaluate(
+            "(n) => window.__STUDIO__.getState().obstacles.find((o) => o.name === n)?.pose ?? null", name)
+
+    known = page.evaluate("() => window.__STUDIO__.getState().sceneryJoints.map((j) => j.name)")
+    expect("the studio knows the cell's joints", sorted(known) == sorted(scene.scenery_joints),
+           {"studio": len(known), "scene": len(scene.scenery_joints)})
+    page.evaluate("() => { const s = window.__STUDIO__.getState(); s.stopPlayback(); s.selectTcp(s.robots[0]?.desc.name); }")
+    frames(3)
+    for name in names:
+        scene.set_scenery_joint(name, 0.0)
+        time.sleep(0.5)
+        joint = scene.scenery_joint(name)
+        hinge = joint["kind"] == "hinge"
+        origin, axis, (lower, upper) = joint["origin"], joint["axis"], joint["range"]
+        label = name.rsplit("/", 1)[-1]
+
+        def off_axis(point: list[float]) -> list[float]:
+            r = [p - o for p, o in zip(point, origin)]
+            along = sum(a * b for a, b in zip(r, axis))
+            return [a - along * b for a, b in zip(r, axis)]
+
+        def centre(obstacle: str) -> list[float]:
+            lo, hi = scene.obstacle_bounds(obstacle)
+            return [(a + b) / 2 for a, b in zip(lo, hi)]
+
+        # Take it by the member furthest from the axis: the handle side.
+        drawn = [o for o in joint["objects"] if scene.obstacle_visible(o)]
+        member = max(drawn, key=lambda o: math.hypot(*off_axis(centre(o))))
+        start = centre(member)
+        before = pose(member)
+
+        def hand_at(q: float) -> list[float]:
+            """Where the hand is when it has asked the joint for `q`."""
+            if not hinge:
+                return [c + a * q for c, a in zip(start, axis)]
+            r = [c - o for c, o in zip(start, origin)]
+            return [o + v for o, v in zip(origin, q_rotate(q_axis_angle(axis, q), r))]
+
+        def sweep(a: float, b: float) -> None:
+            """The hand from `a` to `b`, in steps a hand would take."""
+            step = math.radians(10) if hinge else 0.05
+            n = max(1, math.ceil(abs(b - a) / step))
+            for i in range(1, n + 1):
+                place(hand_at(a + (b - a) * i / n))
+
+        place(start)
+        squeeze(1)
+        held = xr()["held"]["left"]
+        expect(f"{label}: a grip on it takes the joint", held == name, {"held": held, "by": member})
+        # Open part of the way.
+        part = (math.radians(40) if hinge else 0.2) * (1 if upper > 0 else -1)
+        part = max(min(part, upper), lower)
+        sweep(0.0, part)
+        settle(name)
+        at = scene.scenery_joint(name)["position"]
+        if hinge:
+            want = add(origin, q_rotate(q_axis_angle(axis, part), [p - o for p, o in zip(before["position"], origin)]))
+        else:
+            want = [p + a * part for p, a in zip(before["position"], axis)]
+        off = math.dist(pose(member)["position"], want)
+        expect(f"{label}: the hand's move opens it", abs(at - part) < 2e-3 and abs(shown(name) - at) < 1e-9 and off < 2e-3,
+               {"asked": round(part, 4), "scene": round(at, 4), "member_off_m": round(off, 5)})
+        # Past the stop, back a little (still past it), then back inside.
+        stop = upper if part > 0 else lower
+        way = 1 if part > 0 else -1
+        over = math.radians(30) if hinge else 0.1
+        sweep(part, stop + way * over)
+        settle(name)
+        at_stop = scene.scenery_joint(name)["position"]
+        sweep(stop + way * over, stop + way * over / 2)
+        settle(name)
+        still = scene.scenery_joint(name)["position"]
+        sweep(stop + way * over / 2, stop - way * over / 2)
+        settle(name)
+        back = scene.scenery_joint(name)["position"]
+        expect(f"{label}: it holds at its stop until the hand is back there",
+               abs(at_stop - stop) < 1e-9 and abs(still - stop) < 1e-9 and abs(back - (stop - way * over / 2)) < 2e-3,
+               {"stop": round(stop, 4), "past": round(at_stop, 4), "still": round(still, 4), "back": round(back, 4)})
+        squeeze(0)
+        place(add(hand_at(stop - way * over / 2), [0.3, 0.3, 0.3]))
+        settle(name)
+        left_at = scene.scenery_joint(name)["position"]
+        expect(f"{label}: it stays as it is left", xr()["held"]["left"] is None and abs(left_at - back) < 1e-9,
+               {"position": round(left_at, 4)})
+        # Shut from Python: the studio follows.
+        scene.set_scenery_joint(name, 0.0)
+        settle(name)
+        shut = math.dist(pose(member)["position"], before["position"])
+        expect(f"{label}: a move from Python shows in the studio", abs(shown(name)) < 1e-9 and shut < 1e-6,
+               {"position": shown(name), "member_off_m": round(shut, 7)})
+
+
+def add(a: list[float], b: list[float]) -> list[float]:
+    return [x + y for x, y in zip(a, b)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cell", nargs="+", default=["demo"], choices=["demo", "sequence", "weld", "palletizing"])
+    parser.add_argument("--cell", nargs="+", default=["demo"],
+                        choices=["demo", "sequence", "weld", "palletizing", "home"])
     parser.add_argument("--out-dir", default=str(ROOT / "tmp" / "xr"))
     parser.add_argument("--frames", type=int, default=4, help="XR frames to render before reporting")
     parser.add_argument("--settle", type=float, default=5.0,
@@ -543,7 +967,9 @@ def main() -> int:
     parser.add_argument("--grab", action="store_true",
                         help="V2: the TCP handle on the desktop (grab / move / release through __XR__) and in the "
                              "session (right grip squeeze, IK follows, unreachable, release), then left Y and the "
-                             "panel's + point each add a waypoint")
+                             "panel's + point each add a waypoint; in the basics cell also things taken in hand")
+    parser.add_argument("--tags", action="store_true",
+                        help="switch the studio's 3D I/O tags on before the page loads (they must show in the headset)")
     parser.add_argument("--no-emulator", action="store_true",
                         help="do not install IWER: checks that the desktop path is untouched "
                              "(no XR support, no VR button, no canvas antialias)")
@@ -573,6 +999,11 @@ def main() -> int:
             if not args.no_emulator:
                 page.add_init_script(IWER_BUNDLE.read_text() + "\n" + EMULATOR_HOOK)
             page.add_init_script(STATS_HOOK)
+            if args.tags:
+                # The 3D I/O tags on whatever the cell wires (or names, when
+                # nothing is bound): boards drawn in the scene, so the
+                # headset shows them too.
+                page.add_init_script("localStorage.setItem('botrail-studio.ioTags', 'on')")
 
             def wait_for(predicate_js: str, what: str, timeout: float = args.timeout) -> None:
                 deadline = time.time() + timeout
@@ -664,6 +1095,9 @@ def main() -> int:
                         helpers = interact(page, report, errors, cell, args.play, run_controls=args.interact)
                         if args.grab:
                             grab_xr(page, report, errors, cell, scene, **helpers)
+                            if cell in HAND_CELLS:
+                                hand_xr(page, report, errors, cell, scene, **helpers)
+                            joints_xr(page, report, errors, cell, scene, **helpers)
                     png = out_dir / f"{cell}.png"
                     page.locator("canvas").screenshot(path=png)
                     print(f"[{cell}] wrote {png}", flush=True)

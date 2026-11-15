@@ -230,6 +230,11 @@ converted with ffmpeg (system, or `pip install imageio-ffmpeg`). Needs
 playwright with a fetched Chromium (`pip install playwright && python -m
 playwright install chromium`); both are checked when called, not at import.
 
+`labels=True` films the studio's [I/O tags](studio.md#the-io-tags-tags)
+into the picture — each bound point's address and name on its sensor,
+device, lamp or robot, lit while on: a clip for a review or a FAT sheet
+rather than what the camera sees. They never reach the depth stream.
+
 ## CSV and JSON
 
 ```python

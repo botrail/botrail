@@ -224,6 +224,10 @@ is wide, and stacked they hid each other — so opening one closes the
 others, and the panel's tab strip (SFC · LD · I/O · TOPOLOGY · BOM)
 switches between them.
 
+Once the cell is wired, every atom that reads an I/O point carries the
+point's address after it (`↑part_at_pick %IX100.1`), and a click on it puts
+that point [in focus](#the-io-tags-tags).
+
 ## The ladder — ☰ LD
 
 **☰ Ladder** (in RUN, or the `ld` button on the dock) is the same
@@ -248,6 +252,29 @@ flash — while the rungs of arms the bake never took stay dimmed.
 Clicking a step's comment row seeks the transport to the moment that
 step became active.
 
+A program's own [rungs](sequences.md#rungs-and-gates) follow its step
+ladder, one group per rung (`R1 · run`): the network straight off the
+rail as it was written — series, parallel, NC contacts for `not_`, a step
+relay for `step_active` — and its outputs: coils, `(S)` / `(R)`, `TON` and
+`CTU` blocks. On a bake a contact is lit while it conducts and a coil while
+what it drives is on; the gates of the step chain are named over it
+(`enable advance=1 · reset pb_reset=1 · cycles`).
+
+A [word](sequences.md#words-and-analog-inputs) comparison is a box on the
+rung with its text over it (`dp >= dp_warn`) and, on a bake, the values it
+compares under it (`54.5 / 60`), green while it holds; a transfer or an
+arithmetic instruction is a box output (`←`) named by its word with the
+expression under it and the word's value beside it, lit while its rung
+conducts.
+
+![The filter unit's rungs: comparisons against setpoints, a millisecond count, the values at the playhead](../assets/studio/words.png)
+
+Once the cell is wired, a contact or a coil that reads or writes an I/O
+point shows the address on the wire (`%IX100.1`, `X20`) with the point's
+name as its comment under it — the way a PLC's ladder reads with device
+comments on — and a click on it puts that point in focus: outlined here,
+in the I/O table, on its lane and on its 3D tag.
+
 ## The I/O table — ⚡ I/O
 
 **⚡ I/O** (in RUN, or the `io` button on the dock) overlays the
@@ -257,7 +284,9 @@ kind, the rule that produced it, its host, the channel it is bound to
 on it — and, while a bake is loaded, the **live** level of the lane behind
 it at the playhead. The report's findings sit under the table; *unbound*
 filters to what still needs a channel, and the magazine rows (cosmetic)
-stay folded. Clicking a sensor or device row selects it in the scene
+stay folded. Clicking a row puts its point [in focus](#the-io-tags-tags)
+everywhere (the row, the ladder's contacts, the SFC chart's atoms, the
+lane, the 3D tag) and, for a sensor or a device, selects it in the scene
 tree. The assignment layer is edited here: the channel cell is a select
 over the channels the point's host (and the stations uplinked to it)
 offer — used ones named and greyed — **auto-assign** gives every unbound
@@ -272,7 +301,15 @@ edit is one message the server validates the way the Python API does, and
 `declare_io`. While a [plant session](virtual-commissioning.md) streams to
 the studio, the table also carries the controllers' chips and a **force**
 column — `1` / `0` pin a lane like a PLC force, `×` releases it, and a
-forced row is marked.
+forced row is marked. A force on a belt's or a feeder's run coil holds the
+device itself, as a forced output would: the belt stops (or runs) whatever
+the program or the controller writes meanwhile, and the release hands it
+back to their last word. A word's row shows its value in the live
+column — an analog input its whole loop, `54.5 kPa · 12.72 mA · 2180`
+(scaled value, loop current, module counts; `open` when the wire is
+broken) — and on a live plant a number field: **W** keys the value into a
+defined word once (a setpoint), **F** pins the word to it — on an analog
+input, what its transmitter measures — and `×` releases the pin.
 
 ![The I/O table over the viewport, a fault scenario's stall on the dock](../assets/studio/io.png)
 
@@ -324,6 +361,32 @@ downloads the bill as `Scene.export_bom` writes it — the same bytes.
 
 ![The bill of materials over the viewport, the arm's tool selected](../assets/studio/bom.png)
 
+## The I/O tags — tags
+
+Once the cell is wired (any point bound to a channel), each sensor,
+device, lamp and robot carries a **tag** in the viewport: one line per
+point it owns, the address on the wire and the point's name
+(`%IX100.1 part_at_pick`), the address chip green while the point is on, a
+word with its value, an amber `F` while it is forced. An analog input
+hangs on the obstacle named as its transmitter (`add_analog(...,
+place=)`) and reads its scaled value in its unit and the loop current
+(`%IW100 dp 54.5 kPa 12.72mA`). A cell with no
+wiring yet shows nothing until **tags** on the dock switches them on (names
+only). The tags follow what carries them — a cylinder's rod, a vehicle —
+stay readable at any distance, and stack instead of overprinting their
+neighbours.
+
+![The OpenPLC pick cell waiting for its part: the 3D tags, the beam in focus, the dock's waiting line](../assets/studio/io_tags.png)
+
+One point at a time is **in focus**: picked in the I/O table, on a ladder
+contact or coil, on an SFC atom, on the dock's waiting line or in the
+topology, it is outlined in all of them, on its lane and on its tag, so
+`%IX100.1` reads as one thing from five views. The tags are annotations:
+a camera's picture never shows them, except a video export that asks
+(`bt.capture.record_camera(..., labels=True)`, and the dock's **⤓ cam**
+while the tags show), and they show in a [headset](#vr-the-cell-in-a-headset)
+as on the desktop.
+
 ## The timeline dock
 
 The bottom dock is the one transport bar: every playback — a motion
@@ -332,7 +395,15 @@ baked sequence it is a timing chart: the cycle time (*cycle 16.69s* above),
 one colored band per step, and one lane per signal — internal relays,
 sensors, device running-states — each lane wearing the channel chip of the
 point bound to it, so the chart doubles as the addressed I/O waveform
-sheet. The playback cursor drives the viewport. Recordings loaded with
+sheet. The playback cursor drives the viewport. Under the step bar a
+**waiting line** says what every program is waiting for at the playhead:
+the step it stands in, the contacts of its exits that do not conduct yet
+— with the address of the point each reads (`pick › arrival  %IX100.1
+↑part_at_pick | 2.36/8.00s`) — and how long it has stood there; then the
+bound points that are on, as address chips. **Σ waits** folds out where
+the cycle's time went: each program's stays summed per exit that released
+them (`3.94s ↑part_at_pick`, `2.94s done ▶place`, …) — the same rows
+`tl.waits()` returns. Recordings loaded with
 `play_usd_animation` — including two-robot bakes and Isaac captures — play
 through the same dock.
 
@@ -352,7 +423,20 @@ controllers, the pace and the lag, and the hand on it — **❚❚ hold** /
 lands on the dock when stopped (**live** follows the plant again). A
 right-click on a lane's name sets a breakpoint on its rising edge (shift:
 falling), a click on a panel button in the viewport presses it, and the
-panel's lamps light with their signals.
+panel's lamps light with their signals. The bar counts the plant's scans
+(`scan 355 · 10 ms`), and the waiting line follows the live head.
+
+When the timeline carries a controller's **readings** — a machine's log
+replayed, or a running PLC [monitored](monitoring.md) — a line over the
+lanes says where they came from and how they sit against the model
+(`PLC1 read from log line_io.csv · ±0.10 s · 4 deviations`), with a chip
+per deviation: a click seeks there and puts the point in focus. Under each
+compared lane a thin trace is what the controller read, and a red band is
+where it parted from the model; the lane's name wears `≠`. The tags and the
+I/O table show the read value, marked `≠` while the model says otherwise.
+A live monitor's bar reads **MONITOR · read only**: the hold / scan /
+speed controls, the force column and the lane breakpoints are not there,
+and a command the session refused is named on the bar.
 
 ## VR — the cell in a headset
 
@@ -368,9 +452,12 @@ desktop view back.
 |---|---|
 | point the right ray at a robot or an obstacle | the label over the controller names it — kind, name, product — as the hover chip does |
 | trigger | selects it; the label's second line is the selection and its product |
-| either thumbstick forward, hold, let go | throws a teleport arc; letting go lands you on the green ring (red: nothing to stand on) |
-| thumbstick left / right | snap-turns 45° about you |
+| left thumbstick | walks you across the floor the way you face — forward, back and sideways, as fast as the stick is pushed (up to 2 m/s), easing in and out |
+| right thumbstick forward, hold, let go | throws a teleport arc; letting go lands you on the green ring (red: nothing to stand on) |
+| right thumbstick left / right | snap-turns 45° about you |
 | right grip near the TCP handle, hold | takes the focused robot's TCP target: the arm follows your hand (the server's IK), the handle turns red out of reach, and letting go drops it back on the real TCP |
+| either grip on a thing of the cell, hold | takes it in hand: it follows the hand, turns with it, comes along as you walk, and stays where you let go. A workpiece comes alone; a piece of a part the bill of materials knows — a board of a pallet, a lamp of a stack light, a panel of a fence run — brings the whole part; what is selected comes as it is selected (the group whole, the obstacle alone) |
+| either grip on a door, a drawer or a rack, hold | works it: a thing on a [hinge or a slide](scene-and-obstacles.md#doors-and-drawers) — a fence door, a refrigerator door, a dishwasher rack — swings about its axis or runs along it with the hand, as far as its range goes, and stays as you leave it. To carry the appliance, take it by its body |
 | right **A** / **B** | play ⇄ pause the baked cycle / speed 1× → 2× → 4× → 8× |
 | left **X** / **Y** | recenter on the launch stance / teach the pose: a joint waypoint of the motion the MOTION panel shows (its **upright** toggle applies) |
 | the panel on the left controller | the playhead; play / pause, speed, **+ point**, recenter and exit VR under the trigger |
@@ -401,6 +488,24 @@ not yet. In VR the shadow map halves; nothing else about the picture
 changes. The TCP handle is the same object the mouse gizmo drags, so a
 pose taught in the headset lands in the same motion list as one taught at
 the desk.
+
+A thing in the hand is the move the gizmo makes: the scene, the collision
+check (what it is pushed into turns red) and every other studio on the
+cell follow it, and nothing drops — it stays where the hand left it,
+turned as it was. The hand has to be on the thing, within 10 cm; the right
+grip within reach of the TCP handle takes the handle instead, and what a
+robot holds is not taken from it. Taking a part the recorded cycle moves
+ends the replay and takes the part from where it was drawn; the recording
+is still of the cell as it was, so simulate again to see the new layout
+run. While a bake streams (a physics run), nothing is taken.
+
+A door or a drawer within reach comes before the body behind it, so a hand
+pressed a little into a refrigerator door still opens the door. A hinge
+reads the hand's sweep about its axis and a slide its travel along it;
+pulled past a stop the door waits there until the hand is back. At the
+desk the same joints are sliders: select the door — or the appliance, for
+all of its doors and drawers — and they appear under **Obstacles** in
+LAYOUT.
 
 ## Serving details
 
