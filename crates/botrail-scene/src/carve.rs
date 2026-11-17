@@ -130,7 +130,7 @@ pub struct CarveStage {
 
 /// The stock's geometry as cutrail stock, in millimeters and the
 /// obstacle's local frame.
-fn stock_shape(name: &str, geometry: &Geometry) -> Result<StockShape, CarveError> {
+pub(crate) fn stock_shape(name: &str, geometry: &Geometry) -> Result<StockShape, CarveError> {
     match geometry {
         Geometry::Box { size } => Ok(StockShape::Box {
             min: [-size.x / 2.0 * MM, -size.y / 2.0 * MM, -size.z / 2.0 * MM],
@@ -171,6 +171,17 @@ fn stock_shape(name: &str, geometry: &Geometry) -> Result<StockShape, CarveError
 /// A cutrail mesh (mm) as botrail mesh data (m) with the surface classing
 /// as face colors.
 fn mesh_data(mesh: &TriMesh, kinds: &[FaceKind], options: &CarveOptions) -> MeshData {
+    colored_mesh(mesh, kinds, options.stock_color, options.cut_color)
+}
+
+/// A cutrail mesh (mm) as botrail mesh data (m): the surviving skin in
+/// `stock_color`, what the cutter made in `cut_color`.
+pub(crate) fn colored_mesh(
+    mesh: &TriMesh,
+    kinds: &[FaceKind],
+    stock_color: [f32; 3],
+    cut_color: [f32; 3],
+) -> MeshData {
     MeshData {
         vertices: mesh
             .positions
@@ -181,8 +192,8 @@ fn mesh_data(mesh: &TriMesh, kinds: &[FaceKind], options: &CarveOptions) -> Mesh
         face_colors: kinds
             .iter()
             .map(|k| match k {
-                FaceKind::Stock => options.stock_color,
-                FaceKind::Cut => options.cut_color,
+                FaceKind::Stock => stock_color,
+                FaceKind::Cut => cut_color,
             })
             .collect(),
     }

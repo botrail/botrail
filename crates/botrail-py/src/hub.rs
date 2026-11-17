@@ -1304,6 +1304,159 @@ impl SceneHub {
         self.with_scene(|scene| scene.toolpaths().iter().map(|t| t.name.clone()).collect())
     }
 
+    // ---------------------------------------------------------- NC machines
+
+    // A machine's control and its part programs: what the studio's NC
+    // panel lists, so every change of a table or a program is rebroadcast.
+    pub fn define_nc_machine(&self, machine: botrail_scene::nc::NcMachine) -> Result<(), String> {
+        let done =
+            self.with_scene(|scene| scene.define_nc_machine(machine).map_err(|e| e.to_string()));
+        botrail_session::emit_nc(self);
+        done
+    }
+
+    pub fn remove_nc_machine(&self, robot: &str) -> bool {
+        let removed = self.with_scene(|scene| scene.remove_nc_machine(robot));
+        botrail_session::emit_nc(self);
+        removed
+    }
+
+    pub fn nc_machine(&self, robot: &str) -> Option<botrail_scene::nc::NcMachine> {
+        self.with_scene(|scene| scene.nc_machine(robot).cloned())
+    }
+
+    pub fn nc_machine_names(&self) -> Vec<String> {
+        self.with_scene(|scene| {
+            scene
+                .nc_machines()
+                .iter()
+                .map(|m| m.robot.clone())
+                .collect()
+        })
+    }
+
+    pub fn nc_axes(
+        &self,
+        machine: &botrail_scene::nc::NcMachine,
+    ) -> Result<(usize, [usize; 3], botrail_scene::nc::NcAxes), String> {
+        self.with_scene(|scene| scene.nc_axes(machine).map_err(|e| e.to_string()))
+    }
+
+    /// The machine's tool changer on its robot's joints, if it has one.
+    pub fn nc_changer(
+        &self,
+        machine: &botrail_scene::nc::NcMachine,
+    ) -> Result<Option<(usize, usize, [f64; 2])>, String> {
+        self.with_scene(|scene| scene.nc_changer(machine).map_err(|e| e.to_string()))
+    }
+
+    pub fn set_work_offset(
+        &self,
+        machine: &str,
+        name: &str,
+        xyz: Option<[f64; 3]>,
+    ) -> Result<(), String> {
+        let done = self.with_scene(|scene| {
+            scene
+                .set_work_offset(machine, name, xyz)
+                .map_err(|e| e.to_string())
+        });
+        botrail_session::emit_nc(self);
+        done
+    }
+
+    pub fn set_nc_tool(
+        &self,
+        machine: &str,
+        number: u32,
+        tool: Option<botrail_scene::nc::NcTool>,
+    ) -> Result<(), String> {
+        let done = self.with_scene(|scene| {
+            scene
+                .set_nc_tool(machine, number, tool)
+                .map_err(|e| e.to_string())
+        });
+        botrail_session::emit_nc(self);
+        done
+    }
+
+    pub fn add_nc_program(&self, program: botrail_scene::nc::NcProgram) {
+        self.with_scene(|scene| scene.add_nc_program(program));
+        botrail_session::emit_nc(self);
+    }
+
+    pub fn remove_nc_program(&self, name: &str) -> bool {
+        let removed = self.with_scene(|scene| scene.remove_nc_program(name));
+        botrail_session::emit_nc(self);
+        removed
+    }
+
+    pub fn nc_program(&self, name: &str) -> Option<String> {
+        self.with_scene(|scene| scene.nc_program(name).map(|p| p.text.clone()))
+    }
+
+    pub fn nc_program_names(&self) -> Vec<String> {
+        self.with_scene(|scene| scene.nc_programs().iter().map(|p| p.name.clone()).collect())
+    }
+
+    pub fn nc_dry_run(
+        &self,
+        machine: &str,
+        program: &str,
+        carrier: &str,
+        riders: &[String],
+        start: Option<&[f64]>,
+    ) -> Result<(botrail_scene::rollout::SequenceTimeline, Scene), String> {
+        self.with_scene(|scene| {
+            scene
+                .nc_dry_run(machine, program, carrier, riders, start)
+                .map(|timeline| (timeline, scene.clone()))
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn plan_nc_program(
+        &self,
+        machine: &str,
+        program: &str,
+        start: Option<&[f64]>,
+        block: Option<usize>,
+    ) -> Result<botrail_scene::nc::PlannedProgram, String> {
+        self.with_scene(|scene| {
+            scene
+                .plan_nc_program(machine, program, start, block)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn nc_outline(
+        &self,
+        machine: &str,
+        program: &str,
+        start: Option<&[f64]>,
+    ) -> Result<Vec<botrail_scene::nc::NcBlock>, String> {
+        self.with_scene(|scene| {
+            scene
+                .nc_outline(machine, program, start)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    pub fn set_nc_m_code(
+        &self,
+        machine: &str,
+        code: u32,
+        what: Option<String>,
+    ) -> Result<(), String> {
+        let done = self.with_scene(|scene| {
+            scene
+                .set_nc_m_code(machine, code, what)
+                .map_err(|e| e.to_string())
+        });
+        botrail_session::emit_nc(self);
+        done
+    }
+
     pub fn plan_toolpath(
         &self,
         name: &str,

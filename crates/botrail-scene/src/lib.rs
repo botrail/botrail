@@ -22,6 +22,8 @@ pub mod iomap;
 pub mod layout;
 pub mod motion;
 pub mod mounting;
+pub mod nc;
+pub mod nc_cut;
 pub mod part;
 pub mod physics_world;
 pub mod plcopen;
@@ -535,6 +537,11 @@ pub struct Scene {
     /// (see [`scenery`]).
     scenery_joints: Vec<scenery::SceneryJoint>,
     toolpaths: Vec<toolpath::Toolpath>,
+    /// Machine tools' controls: the robots whose joints are NC axes, each
+    /// with its rates and its work-offset and tool tables (see [`nc`]).
+    nc_machines: Vec<nc::NcMachine>,
+    /// Part programs, by name. Authoring data, like toolpaths.
+    nc_programs: Vec<nc::NcProgram>,
     /// The latest face diagnosis per toolpath — the marks a check left on
     /// the path for the studio to draw. Presentation state, keyed by
     /// toolpath name and dropped when the path changes.
@@ -606,6 +613,8 @@ impl Scene {
             frames: Vec::new(),
             scenery_joints: Vec::new(),
             toolpaths: Vec::new(),
+            nc_machines: Vec::new(),
+            nc_programs: Vec::new(),
             toolpath_marks: Vec::new(),
             allowed_contacts: Vec::new(),
             allowed_object_contacts: Vec::new(),
@@ -762,6 +771,9 @@ impl Scene {
         // handshake bindings.
         for flash in &mut self.weld_flashes {
             swap(&mut flash.robot);
+        }
+        for machine in &mut self.nc_machines {
+            swap(&mut machine.robot);
         }
         for scenario in &mut self.scenarios {
             for (robot, _) in &mut scenario.joints {
@@ -2978,6 +2990,451 @@ impl Scene {
     pub fn set_toolpaths(&mut self, toolpaths: Vec<toolpath::Toolpath>) {
         self.toolpath_marks.clear();
         self.toolpaths = toolpaths;
+    }
+
+    // -------------------------------------------------------- NC machines
+
+    pub fn nc_machines(&self) -> &[nc::NcMachine] {
+        &self.nc_machines
+    }
+
+    /// The control of the machine whose axes are robot `robot`.
+    pub fn nc_machine(&self, robot: &str) -> Option<&nc::NcMachine> {
+        self.nc_machines.iter().find(|m| m.robot == robot)
+    }
+
+    /// Whether robot `robot` is a machine tool's axes rather than an arm:
+    /// it then has no controller box of its own, no reach to draw and no
+    /// robot program to export.
+    pub fn is_nc_machine(&self, robot: usize) -> bool {
+        let name = &self.robots[robot].name;
+        self.nc_machines.iter().any(|m| &m.robot == name)
+    }
+
+    fn nc_machine_mut(&mut self, robot: &str) -> Result<&mut nc::NcMachine, nc::NcError> {
+        self.nc_machines
+            .iter_mut()
+            .find(|m| m.robot == robot)
+            .ok_or_else(|| nc::NcError::Machine(format!("`{robot}` is not an NC machine")))
+    }
+
+    /// Declares (or replaces) the control of a machine tool. Its three
+    /// axes must be prismatic joints of the robot with travel limits.
+    pub fn define_nc_machine(&mut self, machine: nc::NcMachine) -> Result<(), nc::NcError> {
+        self.nc_axes(&machine)?;
+        self.nc_changer(&machine)?;
+        match self
+            .nc_machines
+            .iter_mut()
+            .find(|m| m.robot == machine.robot)
+        {
+            Some(existing) => *existing = machine,
+            None => self.nc_machines.push(machine),
+        }
+        Ok(())
+    }
+
+    pub fn remove_nc_machine(&mut self, robot: &str) -> bool {
+        let before = self.nc_machines.len();
+        self.nc_machines.retain(|m| m.robot != robot);
+        self.nc_machines.len() != before
+    }
+
+    pub fn set_nc_machines(&mut self, machines: Vec<nc::NcMachine>) {
+        self.nc_machines = machines;
+    }
+
+    /// Enters a work offset in a machine's table — `name` is `G54`…`G59`
+    /// or `G154 P<n>`, `xyz` the machine coordinates of the work zero (m)
+    /// — or clears it with `None`.
+    pub fn set_work_offset(
+        &mut self,
+        machine: &str,
+        name: &str,
+        xyz: Option<[f64; 3]>,
+    ) -> Result<(), nc::NcError> {
+        let name = nc::work_offset_name(name)?;
+        let machine = self.nc_machine_mut(machine)?;
+        match xyz {
+            Some(xyz) => machine.work_offsets.insert(name, xyz),
+            None => machine.work_offsets.remove(&name),
+        };
+        Ok(())
+    }
+
+    /// Enters a tool in a machine's tool table, or clears it with `None`.
+    pub fn set_nc_tool(
+        &mut self,
+        machine: &str,
+        number: u32,
+        tool: Option<nc::NcTool>,
+    ) -> Result<(), nc::NcError> {
+        if let Some(body) = tool.as_ref().and_then(|t| t.body.as_ref()) {
+            body.validate()
+                .map_err(|why| nc::NcError::Machine(format!("tool {number}: {why}")))?;
+        }
+        let machine = self.nc_machine_mut(machine)?;
+        match tool {
+            Some(tool) => machine.tools.insert(number, tool),
+            None => machine.tools.remove(&number),
+        };
+        Ok(())
+    }
+
+    /// Enters an M code in a machine's table — a function that is the
+    /// machine's to carry out (a door, a vise, a relay), with what it does
+    /// in words — or clears it with `None`. The control then stops at it
+    /// and waits instead of refusing it.
+    pub fn set_nc_m_code(
+        &mut self,
+        machine: &str,
+        code: u32,
+        what: Option<String>,
+    ) -> Result<(), nc::NcError> {
+        if nc::CONTROL_M_CODES.contains(&code) {
+            return Err(nc::NcError::Machine(format!(
+                "M{code} is the control's own — it cannot be a machine function"
+            )));
+        }
+        let machine = self.nc_machine_mut(machine)?;
+        match what {
+            Some(what) => machine.m_codes.insert(code, what),
+            None => machine.m_codes.remove(&code),
+        };
+        Ok(())
+    }
+
+    pub fn nc_programs(&self) -> &[nc::NcProgram] {
+        &self.nc_programs
+    }
+
+    pub fn nc_program(&self, name: &str) -> Option<&nc::NcProgram> {
+        self.nc_programs.iter().find(|p| p.name == name)
+    }
+
+    /// Adds or replaces a part program (keyed by name).
+    pub fn add_nc_program(&mut self, program: nc::NcProgram) {
+        match self.nc_programs.iter_mut().find(|p| p.name == program.name) {
+            Some(existing) => *existing = program,
+            None => self.nc_programs.push(program),
+        }
+    }
+
+    pub fn remove_nc_program(&mut self, name: &str) -> bool {
+        let before = self.nc_programs.len();
+        self.nc_programs.retain(|p| p.name != name);
+        self.nc_programs.len() != before
+    }
+
+    pub fn set_nc_programs(&mut self, programs: Vec<nc::NcProgram>) {
+        self.nc_programs = programs;
+    }
+
+    /// A machine's axes resolved against its robot: the robot's index, the
+    /// position in its joint vector of X, Y and Z, and the travels and
+    /// rates the interpreter and the timing read.
+    pub fn nc_axes(
+        &self,
+        machine: &nc::NcMachine,
+    ) -> Result<(usize, [usize; 3], nc::NcAxes), nc::NcError> {
+        let fail = |message: String| nc::NcError::Machine(message);
+        let robot = self
+            .robot_index(&machine.robot)
+            .ok_or_else(|| fail(format!("unknown robot `{}`", machine.robot)))?;
+        let model = &self.robots[robot].model;
+        let mut index = [0usize; 3];
+        let (mut lower, mut upper, mut rapid) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+        for (i, name) in machine.axes.iter().enumerate() {
+            let axis = ['X', 'Y', 'Z'][i];
+            let joint = model
+                .joint_index(name)
+                .map(|ji| &model.joints[ji])
+                .ok_or_else(|| {
+                    fail(format!(
+                        "`{}` has no joint `{name}` for its {axis} axis",
+                        machine.robot
+                    ))
+                })?;
+            let (Some(q), Some(limits)) = (joint.q_index, joint.limits) else {
+                return Err(fail(format!(
+                    "joint `{name}` of `{}` cannot be the {axis} axis: an axis is a driven joint with travel limits",
+                    machine.robot
+                )));
+            };
+            if joint.joint_type != botrail_model::JointType::Prismatic || limits.velocity <= 0.0 {
+                return Err(fail(format!(
+                    "joint `{name}` of `{}` cannot be the {axis} axis: an axis is a prismatic joint with a rapid rate (its velocity limit)",
+                    machine.robot
+                )));
+            }
+            index[i] = q;
+            (lower[i], upper[i], rapid[i]) = (limits.lower, limits.upper, limits.velocity);
+        }
+        if index[0] == index[1] || index[1] == index[2] || index[0] == index[2] {
+            return Err(fail(format!(
+                "`{}` names one joint for two axes",
+                machine.robot
+            )));
+        }
+        if machine.max_feed <= 0.0
+            || machine.acceleration.iter().any(|a| *a <= 0.0)
+            || machine.junction_deviation <= 0.0
+            || machine.tool_change_s < 0.0
+        {
+            return Err(fail(format!(
+                "`{}`: feed, accelerations and junction deviation must be positive",
+                machine.robot
+            )));
+        }
+        Ok((
+            robot,
+            index,
+            nc::NcAxes {
+                lower,
+                upper,
+                rapid,
+                acceleration: machine.acceleration,
+                max_feed: machine.max_feed,
+                junction_deviation: machine.junction_deviation,
+                tool_change_s: machine.tool_change_s,
+                spindle_max_rpm: machine.spindle_max_rpm,
+            },
+        ))
+    }
+
+    /// A machine's tool changer resolved against its robot's joints: the
+    /// columns of the shuttle and the carousel in the joint vector, and
+    /// the shuttle's values at rest and at the spindle. `None` for a
+    /// machine that declares no changer.
+    pub fn nc_changer(
+        &self,
+        machine: &nc::NcMachine,
+    ) -> Result<Option<(usize, usize, [f64; 2])>, nc::NcError> {
+        let Some(changer) = &machine.changer else {
+            return Ok(None);
+        };
+        let fail = |message: String| nc::NcError::Machine(message);
+        let robot = self
+            .robot_index(&machine.robot)
+            .ok_or_else(|| fail(format!("unknown robot `{}`", machine.robot)))?;
+        let model = &self.robots[robot].model;
+        let joint = |name: &str, part: &str| {
+            model
+                .joint_index(name)
+                .map(|ji| &model.joints[ji])
+                .ok_or_else(|| {
+                    fail(format!(
+                        "`{}` has no joint `{name}` for its tool changer's {part}",
+                        machine.robot
+                    ))
+                })
+        };
+        let shuttle = joint(&changer.shuttle, "shuttle")?;
+        let (Some(s), Some(limits), botrail_model::JointType::Prismatic) =
+            (shuttle.q_index, shuttle.limits, shuttle.joint_type)
+        else {
+            return Err(fail(format!(
+                "joint `{}` of `{}` cannot be the tool changer's shuttle: a shuttle is a prismatic joint whose limits are its rest and the spindle",
+                changer.shuttle, machine.robot
+            )));
+        };
+        // A carousel goes the short way round to each pocket, turn upon
+        // turn: a joint with stops would run into them.
+        let carousel = joint(&changer.carousel, "carousel")?;
+        let (Some(c), botrail_model::JointType::Continuous) =
+            (carousel.q_index, carousel.joint_type)
+        else {
+            return Err(fail(format!(
+                "joint `{}` of `{}` cannot be the tool changer's carousel: a carousel is a joint that turns freely (a continuous joint)",
+                changer.carousel, machine.robot
+            )));
+        };
+        if changer.pockets < 2 {
+            return Err(fail(format!(
+                "`{}`: a tool changer's carousel has at least two pockets",
+                machine.robot
+            )));
+        }
+        if s == c
+            || machine
+                .axes
+                .iter()
+                .any(|a| *a == changer.shuttle || *a == changer.carousel)
+        {
+            return Err(fail(format!(
+                "`{}` names one joint for two parts of its control",
+                machine.robot
+            )));
+        }
+        Ok(Some((s, c, [limits.lower, limits.upper])))
+    }
+
+    /// A program read whole by its machine's control, untimed: the moves
+    /// in machine coordinates, the axes resolved against the robot, the
+    /// robot's joint vector the reading started from.
+    #[allow(clippy::type_complexity)]
+    fn read_nc_program(
+        &self,
+        machine: &str,
+        program: &str,
+        start: Option<&[f64]>,
+        block: Option<usize>,
+    ) -> Result<(nc::NcPlan, usize, [usize; 3], nc::NcAxes, Vec<f64>), nc::NcError> {
+        let control = self
+            .nc_machine(machine)
+            .ok_or_else(|| nc::NcError::Machine(format!("`{machine}` is not an NC machine")))?;
+        let text = &self
+            .nc_program(program)
+            .ok_or_else(|| nc::NcError::Machine(format!("unknown NC program `{program}`")))?
+            .text;
+        let (robot, index, axes) = self.nc_axes(control)?;
+        let q0: Vec<f64> = match start {
+            Some(q) => q.to_vec(),
+            None => self.robots[robot].joint_positions.clone(),
+        };
+        let from = [q0[index[0]], q0[index[1]], q0[index[2]]];
+        let plan = nc::interpret(
+            text,
+            &axes,
+            &control.work_offsets,
+            &control.tools,
+            &control.m_codes,
+            from,
+            &nc::NcOptions {
+                block,
+                ..nc::NcOptions::default()
+            },
+        )?;
+        Ok((plan, robot, index, axes, q0))
+    }
+
+    /// The blocks of part program `program` on machine `machine`: what its
+    /// control runs on its own, in order, and the machine function each
+    /// stops at (see [`nc::outline`]). Read from the robot's joints
+    /// standing at `start` (the scene's own when `None`).
+    pub fn nc_outline(
+        &self,
+        machine: &str,
+        program: &str,
+        start: Option<&[f64]>,
+    ) -> Result<Vec<nc::NcBlock>, nc::NcError> {
+        let (plan, _, index, _, q0) = self.read_nc_program(machine, program, start, None)?;
+        let from = [q0[index[0]], q0[index[1]], q0[index[2]]];
+        Ok(nc::outline(&plan, from))
+    }
+
+    /// Reads part program `program` as machine `machine`'s control would
+    /// run it, from the robot's joints standing at `start` (the scene's
+    /// own when `None`), and times it. Nothing in the scene moves.
+    ///
+    /// `block` reads one block of it — what the control runs between two
+    /// machine functions, from where the axes stand; `None` reads the
+    /// program whole, its machine functions as events that take no time
+    /// (a dry run: nothing answers them here).
+    pub fn plan_nc_program(
+        &self,
+        machine: &str,
+        program: &str,
+        start: Option<&[f64]>,
+        block: Option<usize>,
+    ) -> Result<nc::PlannedProgram, nc::NcError> {
+        let (plan, robot, index, axes, q0) =
+            self.read_nc_program(machine, program, start, block)?;
+        let from = [q0[index[0]], q0[index[1]], q0[index[2]]];
+        let run = nc::time_plan(&plan, &axes, from);
+        // The axes' three columns, spread over the robot's joint vector;
+        // whatever else the robot has stands where it stood.
+        let spread = |row: &[f64], rest: &[f64]| {
+            let mut q = rest.to_vec();
+            for i in 0..3 {
+                q[index[i]] = row[i];
+            }
+            q
+        };
+        let still = vec![0.0; q0.len()];
+        let mut trajectory = botrail_traj::JointTrajectory {
+            times: run.trajectory.times.clone(),
+            positions: run
+                .trajectory
+                .positions
+                .iter()
+                .map(|p| spread(p, &q0))
+                .collect(),
+            velocities: run
+                .trajectory
+                .velocities
+                .iter()
+                .map(|v| spread(v, &still))
+                .collect(),
+        };
+        // … but a tool changer, which the control works at each tool change.
+        if let Some(control) = self.nc_machine(machine) {
+            if let (Some(changer), Some((shuttle, carousel, reach))) =
+                (&control.changer, self.nc_changer(control)?)
+            {
+                nc::work_changer(
+                    &mut trajectory,
+                    &run.changes,
+                    changer,
+                    shuttle,
+                    carousel,
+                    reach,
+                );
+            }
+        }
+        Ok(nc::PlannedProgram {
+            robot,
+            run,
+            trajectory,
+            ends: plan.ends,
+        })
+    }
+
+    /// A program run on its machine as a timeline of its own — the dry
+    /// run a setup is proven with before anything else in the cell moves.
+    /// The axes run from where they stand (or from `start`); `riders` —
+    /// the fixture, the stock: what is clamped to the link `carrier` — go
+    /// with that link from where they stand now; every other robot holds
+    /// still. The machine's track names the run after the program, as a
+    /// bake's does, so the passes that read a bake read this.
+    pub fn nc_dry_run(
+        &self,
+        machine: &str,
+        program: &str,
+        carrier: &str,
+        riders: &[String],
+        start: Option<&[f64]>,
+    ) -> Result<rollout::SequenceTimeline, nc::NcError> {
+        let planned = self.plan_nc_program(machine, program, start, None)?;
+        let fail = |message: String| nc::NcError::Machine(message);
+        let model = &self.robots[planned.robot].model;
+        let link = model
+            .link_index(carrier)
+            .ok_or_else(|| fail(format!("`{machine}` has no link `{carrier}`")))?;
+        // Where the carrier stands now is what the riders are clamped to.
+        let now = self
+            .fk_for(planned.robot, &self.robots[planned.robot].joint_positions)
+            .map_err(|e| fail(e.to_string()))?[link];
+        let mut timeline =
+            self.timeline_from_trajectory(planned.robot, &planned.trajectory, program);
+        for rider in riders {
+            let obstacle = self
+                .obstacles
+                .iter()
+                .find(|o| &o.name == rider)
+                .ok_or_else(|| fail(format!("unknown obstacle `{rider}`")))?;
+            timeline.objects.push(rollout::ObjectTrack {
+                name: rider.clone(),
+                spans: vec![rollout::TrackSpan::Follow {
+                    t0: 0.0,
+                    t1: timeline.duration,
+                    robot: planned.robot,
+                    link,
+                    offset: now.inverse() * obstacle.pose,
+                }],
+            });
+        }
+        Ok(timeline)
     }
 
     /// The marks the last check left on toolpath `name`, if any.

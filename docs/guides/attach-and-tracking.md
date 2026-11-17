@@ -47,6 +47,15 @@ nearest candidate part (within `reach_m` of the tool when given) while the
 coil is high and releases it when the coil falls, whoever wrote the coil —
 a step, a controller on the wire, a force.
 
+With `parts` named, only those are the grasp's: what else is fixed to the
+same link is neither what it holds nor what it lets go of. That is how a
+machine's vise is written — the vise bolted to the table
+(`scene.attach`), its clamp a coil on the table that takes the part in it
+(`bind_grasp(..., link=table, parts=[...], reach_m=...)`), see
+[a part program that runs the cell](machine-tending.md#a-part-program-that-runs-the-cell).
+A coil that is on as the bake opens holds what stands in its reach from
+the first instant.
+
 ### A carried part that is meant to meet something
 
 A grasped object collides with the environment as part of the robot —

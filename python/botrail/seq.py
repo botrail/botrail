@@ -42,6 +42,29 @@ def toolpath(name: str, robot: Optional[str] = None) -> Action:
     return action
 
 
+def run_program(machine: str, program: str, block: Optional[int] = None) -> Action:
+    """Run an NC part program on a machine tool's axes; await it with
+    ``done()``. ``machine`` names the robot declared as an NC machine (a
+    ``bt.parts.machine_tool`` built with ``axes=`` returns it as
+    ``.axes``), ``program`` a part program added with
+    ``scene.add_nc_program``. The program is read when the step fires —
+    against the machine's work offsets and tool table, from where its
+    axes stand — and what its control cannot read fails the bake with
+    the line number.
+
+    ``block`` runs one block of it: what the control runs on its own
+    between two machine functions — the M codes of the machine's table
+    (a door, a vise, a relay), where it stops and waits for the machine.
+    A program that calls any runs block by block, with a step of the
+    machine's own between two blocks; ``bt.nc.sequence`` writes that
+    chain from the program. Without ``block`` the program runs whole, and
+    one that calls a machine function is refused."""
+    action: Action = {"type": "run_program", "robot": machine, "program": program}
+    if block is not None:
+        action["block"] = int(block)
+    return action
+
+
 def ramp(
     targets: Mapping[str, float],
     duration: float,
@@ -485,7 +508,7 @@ def calc(left: Union[Word, int, float], op: str, right: Union[Word, int, float])
     return WordExpr(left, op, right)
 
 
-_DRIVERS = ("start_motion", "start_ramp", "policy", "crouch")
+_DRIVERS = ("start_motion", "start_ramp", "run_program", "policy", "crouch")
 
 
 def _step_dict(name: str, actions: Iterable[Action], transition: Optional[Condition]) -> dict:

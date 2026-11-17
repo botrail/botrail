@@ -267,7 +267,7 @@ impl Scene {
                                 Ok(None) | Err(_) => return Ok(()),
                             };
                             let rname = &self.robots()[r].name;
-                            if io.robot_controller_host(rname) == *host {
+                            if self.is_own_controller(r, host) {
                                 if !loopback && !streamed.contains(&rname.as_str()) {
                                     return Err(format!(
                                         "host `{host}` is the controller of robot `{rname}` and \

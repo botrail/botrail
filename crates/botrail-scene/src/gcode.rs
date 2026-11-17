@@ -63,7 +63,7 @@ enum Motion {
 }
 
 #[derive(Clone, Copy)]
-enum Plane {
+pub(crate) enum Plane {
     Xy,
     Zx,
     Yz,
@@ -72,7 +72,7 @@ enum Plane {
 impl Plane {
     /// In-plane axis indices (a, b) and the off-plane index, in the order
     /// the arc sweeps them (G17: X=a, Y=b, Z off).
-    fn axes(self) -> (usize, usize, usize) {
+    pub(crate) fn axes(self) -> (usize, usize, usize) {
         match self {
             Plane::Xy => (0, 1, 2),
             Plane::Zx => (2, 0, 1),
@@ -92,7 +92,7 @@ struct State {
     position: Vector3<f64>,
 }
 
-fn strip_comments(line: &str) -> String {
+pub(crate) fn strip_comments(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut depth = 0usize;
     for c in line.chars() {
@@ -107,24 +107,77 @@ fn strip_comments(line: &str) -> String {
     out
 }
 
-fn code_eq(value: f64, code: f64) -> bool {
+pub(crate) fn code_eq(value: f64, code: f64) -> bool {
     (value - code).abs() < 1e-6
 }
 
-/// Tessellates one arc into targets appended to `out`. `end` and `center`
-/// are absolute part-frame positions in meters; the sweep runs from
-/// `state.position` about the plane's off-axis.
-#[allow(clippy::too_many_arguments)]
-fn emit_arc(
-    out: &mut Vec<PathTarget>,
+/// One address word of a block: its letter (upper case), its number, and
+/// the word as written (`G01`, `P1.5`) — a decimal point can carry meaning.
+pub(crate) type Word = (char, f64, String);
+
+/// The address words of one block, comments already stripped. A word the
+/// number of which does not parse is returned as `Err(word)`.
+pub(crate) fn lex_words(clean: &str) -> Result<Vec<Word>, String> {
+    let mut words: Vec<Word> = Vec::new();
+    let mut chars = clean.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() || c == '%' {
+            continue;
+        }
+        let letter = c.to_ascii_uppercase();
+        let mut number = String::new();
+        while let Some(&n) = chars.peek() {
+            if n.is_ascii_digit() || n == '.' || n == '-' || n == '+' {
+                number.push(n);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let word = format!("{letter}{number}");
+        let value: f64 = number.parse().map_err(|_| word.clone())?;
+        words.push((letter, value, word));
+    }
+    Ok(words)
+}
+
+/// The centre of an R-form arc in its plane: on the chord's perpendicular
+/// bisector; `+R` takes the minor arc, `-R` the major. `None` when the
+/// radius is shorter than half the chord.
+pub(crate) fn arc_center_from_radius(
+    start_ab: (f64, f64),
+    end_ab: (f64, f64),
+    r: f64,
+    cw: bool,
+) -> Option<(f64, f64)> {
+    let (dx, dy) = (end_ab.0 - start_ab.0, end_ab.1 - start_ab.1);
+    let half = 0.5 * (dx * dx + dy * dy).sqrt();
+    if r.abs() + 1e-12 < half {
+        return None;
+    }
+    let h = (r * r - half * half).max(0.0).sqrt();
+    let (mx, my) = (0.5 * (start_ab.0 + end_ab.0), 0.5 * (start_ab.1 + end_ab.1));
+    // Left normal of the chord; a minor CCW arc has its center on the
+    // left, a minor CW arc on the right, and a negative R (major arc)
+    // flips the side.
+    let (px, py) = (-dy / (2.0 * half), dx / (2.0 * half));
+    let side = if cw == (r >= 0.0) { -1.0 } else { 1.0 };
+    Some((mx + side * h * px, my + side * h * py))
+}
+
+/// The points of one arc after its start, tessellated at `chord_tol`.
+/// `start`, `end` and the centre are absolute positions in metres; the
+/// sweep runs from `start` about the plane's off-axis, the off-plane
+/// coordinate interpolated (a helix). Identical end points are a full
+/// circle. The last point is `end` exactly.
+pub(crate) fn arc_points(
     start: Vector3<f64>,
     end: Vector3<f64>,
     center_ab: (f64, f64),
     cw: bool,
     plane: Plane,
     chord_tol: f64,
-    tool_axis: Unit<Vector3<f64>>,
-) {
+) -> Vec<Vector3<f64>> {
     let (ia, ib, ic) = plane.axes();
     let (ca, cb) = center_ab;
     let (sa, sb) = (start[ia] - ca, start[ib] - cb);
@@ -151,6 +204,7 @@ fn emit_arc(
         std::f64::consts::FRAC_PI_2
     };
     let steps = (sweep.abs() / alpha.min(0.5)).ceil().max(1.0) as usize;
+    let mut out = Vec::with_capacity(steps);
     for k in 1..=steps {
         let u = k as f64 / steps as f64;
         let ang = a0 + sweep * u;
@@ -161,16 +215,36 @@ fn emit_arc(
         // Land exactly on the commanded endpoint (float drift on the trig
         // path would otherwise leak into the datum).
         if k == steps {
-            p[ia] = end[ia];
-            p[ib] = end[ib];
-            p[ic] = end[ic];
+            p = end;
         }
-        out.push(PathTarget {
-            position: Point3::from(p),
-            tool_axis,
-            spin: None,
-        });
+        out.push(p);
     }
+    out
+}
+
+/// Tessellates one arc into targets appended to `out`. `end` and `center`
+/// are absolute part-frame positions in meters; the sweep runs from
+/// `state.position` about the plane's off-axis.
+#[allow(clippy::too_many_arguments)]
+fn emit_arc(
+    out: &mut Vec<PathTarget>,
+    start: Vector3<f64>,
+    end: Vector3<f64>,
+    center_ab: (f64, f64),
+    cw: bool,
+    plane: Plane,
+    chord_tol: f64,
+    tool_axis: Unit<Vector3<f64>>,
+) {
+    out.extend(
+        arc_points(start, end, center_ab, cw, plane, chord_tol)
+            .into_iter()
+            .map(|p| PathTarget {
+                position: Point3::from(p),
+                tool_axis,
+                spin: None,
+            }),
+    );
 }
 
 /// Parses a G-code program into toolpath moves. Consecutive targets under
@@ -200,29 +274,7 @@ pub fn parse_gcode(text: &str, options: &GcodeOptions) -> Result<ParsedGcode, Gc
     'lines: for (lineno, raw) in text.lines().enumerate() {
         let line = lineno + 1;
         let clean = strip_comments(raw);
-        let mut words: Vec<(char, f64, String)> = Vec::new();
-        let mut chars = clean.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c.is_whitespace() || c == '%' {
-                continue;
-            }
-            let letter = c.to_ascii_uppercase();
-            let mut number = String::new();
-            while let Some(&n) = chars.peek() {
-                if n.is_ascii_digit() || n == '.' || n == '-' || n == '+' {
-                    number.push(n);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            let word = format!("{letter}{number}");
-            let value: f64 = number.parse().map_err(|_| GcodeError::Malformed {
-                line,
-                word: word.clone(),
-            })?;
-            words.push((letter, value, word));
-        }
+        let words = lex_words(&clean).map_err(|word| GcodeError::Malformed { line, word })?;
         if words.is_empty() {
             continue;
         }
@@ -406,30 +458,16 @@ pub fn parse_gcode(text: &str, options: &GcodeOptions) -> Result<ParsedGcode, Gc
                         state.position[ib] + arc_center[ib].unwrap_or(0.0),
                     )
                 } else if let Some(r) = arc_radius {
-                    // R form: center on the perpendicular bisector; +R takes
-                    // the minor arc, -R the major.
-                    let (dx, dy) = (
-                        target[ia] - state.position[ia],
-                        target[ib] - state.position[ib],
-                    );
-                    let half = 0.5 * (dx * dx + dy * dy).sqrt();
-                    if r.abs() + 1e-12 < half {
-                        return Err(GcodeError::ArcRadiusTooShort {
-                            line,
-                            radius: r.abs() * 1e3,
-                        });
-                    }
-                    let h = (r * r - half * half).max(0.0).sqrt();
-                    let (mx, my) = (
-                        0.5 * (state.position[ia] + target[ia]),
-                        0.5 * (state.position[ib] + target[ib]),
-                    );
-                    // Left normal of the chord; a minor CCW arc has its
-                    // center on the left, a minor CW arc on the right, and
-                    // a negative R (major arc) flips the side.
-                    let (px, py) = (-dy / (2.0 * half), dx / (2.0 * half));
-                    let side = if cw == (r >= 0.0) { -1.0 } else { 1.0 };
-                    (mx + side * h * px, my + side * h * py)
+                    arc_center_from_radius(
+                        (state.position[ia], state.position[ib]),
+                        (target[ia], target[ib]),
+                        r,
+                        cw,
+                    )
+                    .ok_or(GcodeError::ArcRadiusTooShort {
+                        line,
+                        radius: r.abs() * 1e3,
+                    })?
                 } else {
                     return Err(GcodeError::ArcCenterMissing { line });
                 };

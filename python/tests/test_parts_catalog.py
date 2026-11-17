@@ -10,6 +10,7 @@ that a dimension nobody sells is refused with the list of the ones that are.
 """
 
 import json
+import math
 import re
 import sys
 import types
@@ -1734,6 +1735,71 @@ interface:
     - {id: M60, role: mcode, meaning: service_request}
 """
 
+VF2_MANIFEST = """
+schema_version: '0.1'
+id: haas/vf/vf-2/r1
+kind: spec
+category: machine_tool.vmc
+name: VF-2
+manufacturer:
+  name: Haas Automation
+distribution: public
+specs:
+  travel_x_mm: 762
+  mass_kg: 3539
+mechanical:
+  footprint_mm: [2316, 1984]
+  height_mm: 2724
+  mass_kg: 3539
+  mount: floor
+  envelope:
+    table: {size_mm: [914, 368], height_mm: 853}
+    head: {nose_to_table_mm: [102, 610], offset_mm: 101}
+    chamber_mm: 1139
+    enclosure_height_mm: 1818
+    doors:
+      front: {width_mm: 939, height_mm: 954, sill_mm: 816, kind: sliding}
+      side: {width_mm: 676, height_mm: 749, sill_mm: 819, kind: lift, travel_mm: 595, offset_mm: 50}
+    axes:
+      travel_mm: [762, 406, 508]
+      home_table_mm: [-381, -211.5]
+      rapid_m_min: 25.4
+      max_feed_m_min: 16.5
+      accel_m_s2: 4.9
+      tool_change_s: 4.2
+      spindle_max_rpm: 8100
+configuration:
+  generator: machine_tool
+  params:
+    side_door: {values: [air], default: air}
+    door_side: {values: [right], default: right}
+  components:
+    - role: body
+      category: machine_tool.vmc
+      part_number: "VF-2"
+      mass: {base_kg: 3539.0}
+    - role: side_door
+      category: machine_tool.door
+      part_number: "Auto Window (right side)"
+    - role: panel
+      category: hmi.panel
+      part_number: "Next Generation Control pendant"
+    - role: button
+      category: hmi.button
+      part_number: "Pendant key"
+    - role: estop
+      category: hmi.button
+      part_number: "Emergency stop switch (pendant)"
+    - role: door_switch
+      category: sensor.limit_switch
+      part_number: "Door interlock switch"
+interface:
+  template: haas_autodoor
+  signals:
+    - {id: M180, role: mcode, meaning: side_door_open}
+    - {id: M181, role: mcode, meaning: side_door_close}
+"""
+
 BUTTON_BOX_MANIFEST = """
 schema_version: '0.1'
 id: botrail/hmi/button-box-22/r1
@@ -2113,6 +2179,331 @@ def test_a_machine_tool_is_ordered_from_its_envelope_pack(tmp_path: Path) -> Non
     assert not row.get("model")
     assert "side_door" not in rows(alone)["vmc3"]["attributes"]
     assert not any(row["category"] == "machine_tool.door" for row in alone.bom().rows)
+
+
+def test_a_machine_with_a_lifting_window_and_an_open_top_is_read_from_its_pack(tmp_path: Path) -> None:
+    """A Haas VF-2: how its side window opens (`kind: lift`), where the
+    opening stands along the wall (`offset_mm`) and how tall the enclosure
+    is under the open top (`enclosure_height_mm`) are the machine's, so
+    they come from the pack and not from the cell's script."""
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    pack = _pack(tmp_path, "vf2", VF2_MANIFEST)
+    vf2 = bt.parts.machine_tool(scene, "vf2", catalog=pack, exchange=(0.381, 0.050))
+    # The window lifts its 595 mm at an air door's speed (the pack states
+    # no time), on the right — the only side the option is sold for.
+    assert vf2.door == "vf2/side_door" and vf2.door_axis == pytest.approx((0.0, 0.0, 1.0))
+    assert vf2.door_travel == pytest.approx(0.595)
+    lo, _ = scene.obstacle_bounds("vf2/side_door/leaf")
+    assert lo[0] > scene.obstacle_bounds("vf2/shell/near_sill")[1][0] and lo[2] == pytest.approx(0.819)
+    front, rear = scene.obstacle_bounds("vf2/shell/near_front"), scene.obstacle_bounds("vf2/shell/near_rear")
+    assert (front[1][1] - front[0][1], rear[1][1] - rear[0][1]) == pytest.approx((0.3415, 0.1815))
+    # The enclosure is open above 1818 mm; the head rises to 2724.
+    assert "vf2/shell/top" not in scene.obstacle_names
+    assert scene.obstacle_bounds("vf2/shell/far")[1][2] == pytest.approx(1.818)
+    assert scene.obstacle_bounds("vf2/head")[1][2] == pytest.approx(2.724)
+    assert scene.obstacle_bounds("vf2/table")[1][2] == pytest.approx(0.853)
+    sq = scene.sequence("window")
+    sq.step("open", actions=[bt.seq.move_to(vf2.door, "open")], transition=bt.seq.device_done(vf2.door))
+    tl = scene.simulate_sequence("window")
+    assert tl.signal("vf2/side_door/open").rising_edges()[0] == pytest.approx(0.595 / 0.4, abs=0.02)
+    # The pack speaks the Haas auto-door template, and the door's own
+    # interlock switch is on the bill under the pack's name, like the
+    # pendant's keys.
+    assert vf2.interface["template"] == "haas_autodoor"
+    assert bt.tending.haas_autodoor(scene, vf2, cycle_s=1.0).door == "vf2/side_door"
+    by = rows(scene)
+    assert (by["vf2"]["model"], by["vf2"]["manufacturer"]) == ("VF-2", "Haas Automation")
+    door = by["vf2/side_door"]
+    assert (door["model"], door["attributes"]["slide"], door["attributes"]["stroke_mm"]) == (
+        "Auto Window (right side)", "up", 595)
+    switch = by["vf2/front_door/closed"]
+    assert (switch["category"], switch["model"]) == ("sensor.limit_switch", "Door interlock switch")
+    assert switch["catalog"].startswith("haas/vf/vf-2/r1") and switch["attributes"]["end"] == "closed"
+    # The script may still say otherwise — a leaf that slides to the rear,
+    # an opening on the chamber's centre.
+    plain = scene_()
+    plain.set_robot_base_pose((4.0, 0.0, 0.0))
+    slid = bt.parts.machine_tool(plain, "vf2", catalog=pack, door_slide="rear", door_offset=0.0)
+    assert slid.door_axis == pytest.approx((0.0, 1.0, 0.0))
+    front, rear = plain.obstacle_bounds("vf2/shell/near_front"), plain.obstacle_bounds("vf2/shell/near_rear")
+    assert (front[1][1] - front[0][1], rear[1][1] - rear[0][1]) == pytest.approx((0.2915, 0.2315))
+    # The window is sold for one side only.
+    with pytest.raises(ValueError, match="door_side=left is not available"):
+        bt.parts.machine_tool(plain, "nope", catalog=pack, door_side="left")
+
+
+def test_a_packs_axes_stand_the_machine_as_a_mechanism(tmp_path: Path) -> None:
+    """The travels, where the table stands at home and the rates are the
+    machine's too: `axes=True` takes them from the pack, and the table
+    and the head become a mechanism an NC program runs on."""
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    pack = _pack(tmp_path, "vf2", VF2_MANIFEST)
+    vf2 = bt.parts.machine_tool(scene, "vf2", catalog=pack, exchange=(0.381, 0.050), axes=True)
+    assert vf2.axes == "vf2/axes" and vf2.park == pytest.approx((-0.762, -0.1605, 0.0))
+    control = scene.nc_machine(vf2.axes)
+    assert [v for axis in control["travel"] for v in axis] == pytest.approx([-0.762, 0.0, -0.406, 0.0, -0.508, 0.0])
+    assert control["rapid"] == pytest.approx((25.4 / 60,) * 3)
+    assert control["max_feed"] == pytest.approx(16.5 / 60) and control["acceleration"] == pytest.approx((4.9,) * 3)
+    assert (control["tool_change_s"], control["spindle_max_rpm"]) == (4.2, 8100)
+    # The spindle stands 101 mm behind the chamber's centre, the table in
+    # line with the window: at home it would be 211.5 mm ahead of the spindle.
+    nose, _ = scene.link_pose("head", robot=vf2.axes)
+    table, _ = scene.link_pose("table", robot=vf2.axes)
+    assert nose[1] - table[1] == pytest.approx(0.101 - 0.050) and nose[2] - table[2] == pytest.approx(0.610)
+    # The machine is still one line on the bill, under the pack's number.
+    by = rows(scene)
+    assert by["vf2"]["model"] == "VF-2" and not any(name.startswith("vf2/axes") for name in by)
+    # Without `axes=` the same pack stands as the envelope, the head on
+    # the spindle's offset; and a pack that states no axes has none to take.
+    still = scene_()
+    still.set_robot_base_pose((4.0, 0.0, 0.0))
+    envelope = bt.parts.machine_tool(still, "vf2", catalog=pack, exchange=(0.381, 0.050))
+    assert envelope.axes is None and still.nc_machine_names == []
+    assert still.obstacle_pose("vf2/head")[0][1] == pytest.approx(nose[1])
+    bare = _pack(tmp_path, "vmc", VMC_MANIFEST)
+    with pytest.raises(ValueError, match="states no axes"):
+        bt.parts.machine_tool(still, "vmc", catalog=bare, axes=True)
+
+
+# A machine as its maker's CAD would come out of the catalog builder, in
+# small: the root frame `machine` on the floor under the middle of the
+# body, the body's own frame 0.5 m up, the moving bodies named for what
+# they are, and the right-hand window drawn where the CAD left it — up.
+MACHINE_SHAPE_MANIFEST = """
+schema_version: '0.1'
+id: haas/vf/vf-2-cad/r1
+category: machine_tool.vmc
+name: VF-2 (manufacturer geometry)
+distribution: recipe_only
+assets:
+  usd: usd/model.usda
+"""
+
+MACHINE_SHAPE_USD = """#usda 1.0
+(
+    defaultPrim = "Machine"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Machine" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+{
+    def Xform "machine" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+    }
+
+    def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, 0.2, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "visual_0" { double size = 0.4 }
+    }
+
+    def Xform "saddle" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, -0.47, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "visual_0" { double size = 0.2 }
+    }
+
+    def Xform "table" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (-0.381, -0.47, 0.85)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "visual_0" { double size = 0.1 }
+        def Cube "visual_1" { double size = 0.05 }
+    }
+
+    def Xform "head" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (0, -0.26, 1.46)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "visual_0" { double size = 0.2 }
+    }
+
+    def Xform "side_door_right" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (1.15, -0.29, 1.41)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "visual_0" { double size = 0.05 }
+    }
+
+    def Xform "side_door_left" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        double3 xformOp:translate = (-1.15, -0.29, 1.41)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "visual_0" { double size = 0.05 }
+    }
+
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "machine_joint"
+        {
+            rel physics:body0 = </Machine/machine>
+            rel physics:body1 = </Machine/body>
+            point3f physics:localPos0 = (0, 0.2, 0.5)
+        }
+
+        def PhysicsPrismaticJoint "y"
+        {
+            rel physics:body0 = </Machine/body>
+            rel physics:body1 = </Machine/saddle>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, -0.67, 0)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.406
+        }
+
+        def PhysicsPrismaticJoint "x"
+        {
+            rel physics:body0 = </Machine/saddle>
+            rel physics:body1 = </Machine/table>
+            uniform token physics:axis = "X"
+            point3f physics:localPos0 = (-0.381, 0, 0.35)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 0.762
+        }
+
+        def PhysicsPrismaticJoint "z"
+        {
+            rel physics:body0 = </Machine/body>
+            rel physics:body1 = </Machine/head>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, -0.46, 0.96)
+            float physics:lowerLimit = -0.508
+            float physics:upperLimit = 0
+        }
+
+        def PhysicsPrismaticJoint "side_door_right"
+        {
+            rel physics:body0 = </Machine/body>
+            rel physics:body1 = </Machine/side_door_right>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (1.15, -0.49, 0.91)
+            float physics:lowerLimit = -0.595
+            float physics:upperLimit = 0
+        }
+
+        def PhysicsPrismaticJoint "side_door_left"
+        {
+            rel physics:body0 = </Machine/body>
+            rel physics:body1 = </Machine/side_door_left>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (-1.15, -0.49, 0.91)
+            float physics:lowerLimit = -0.595
+            float physics:upperLimit = 0
+        }
+    }
+}
+"""
+
+
+def _shape_pack(tmp_path: Path) -> Path:
+    directory = _pack(tmp_path, "vf2-cad", MACHINE_SHAPE_MANIFEST)
+    (directory / "usd").mkdir()
+    (directory / "usd" / "model.usda").write_text(MACHINE_SHAPE_USD)
+    return directory
+
+
+def test_a_machines_geometry_package_is_what_its_links_are_drawn_from(tmp_path: Path) -> None:
+    """A robot read from USD says which gprim each link is drawn from and
+    where it stands — what lets the picture of a link be bound to
+    something else that stands there."""
+    robot = bt.Robot.from_package(_shape_pack(tmp_path), format="usd")
+    home = robot.link_poses()
+    assert home["/Machine/machine"][0] == pytest.approx((0.0, 0.0, 0.0))
+    assert home["/Machine/table"][0] == pytest.approx((-0.381, -0.47, 0.85))
+    # Joints at a value: the table goes with its X, the head with its Z.
+    q = [{"x": 0.5, "z": -0.3}.get(name.rsplit("/", 1)[-1], 0.0) for name in robot.joint_names]
+    moved = robot.link_poses(q)
+    assert moved["/Machine/table"][0] == pytest.approx((0.119, -0.47, 0.85))
+    assert moved["/Machine/head"][0] == pytest.approx((0.0, -0.26, 1.16))
+    with pytest.raises(ValueError, match="joint"):
+        robot.link_poses([0.0])
+    shots = robot.visuals()
+    assert [(s["link"], s["asset"][1]) for s in shots if "table" in s["link"]] == [
+        ("/Machine/table", "/Machine/table/visual_0"), ("/Machine/table", "/Machine/table/visual_1")]
+    table = next(s for s in robot.visuals(q) if s["link"] == "/Machine/table")
+    assert table["position"] == pytest.approx((0.119, -0.47, 0.85))
+    assert Path(table["asset"][0]).name == "model.usda" and len(table["asset"][2]) == 16
+    # A URDF robot is drawn from primitives and mesh files, not from prims.
+    arm = bt.Robot.from_urdf(EXAMPLES / "assets" / "simple_arm.urdf")
+    assert arm.visuals() and all(shot["asset"] is None for shot in arm.visuals())
+
+
+def test_a_machine_is_drawn_as_its_makers_geometry_and_verified_as_its_envelopes(tmp_path: Path) -> None:
+    """`shape=` is the picture: the maker's bodies ride the mechanism and
+    the door, the envelopes stay what is collided — unseen — and nothing
+    the cell verifies changes."""
+    pack = _pack(tmp_path, "vf2", VF2_MANIFEST)
+    shape = _shape_pack(tmp_path)
+
+    def cell(**options):
+        scene = scene_()
+        scene.set_robot_base_pose((4.0, 0.0, 0.0))
+        return scene, bt.parts.machine_tool(scene, "vf2", catalog=pack, exchange=(0.381, 0.050),
+                                            axes=True, **options)
+
+    plain, envelope = cell()
+    scene, vf2 = cell(shape=shape)
+    pictures = [name for name in vf2.obstacles if name.startswith("vf2/shape/")]
+    assert pictures == ["vf2/shape/body", "vf2/shape/saddle", "vf2/shape/table", "vf2/shape/table_1",
+                        "vf2/shape/head", "vf2/shape/side_door_left"]
+    # The pictures are out of collision; every envelope box is still
+    # collided, and none of them is seen — except the door's leaf, which
+    # is what the maker's window is drawn on.
+    assert not any(scene.obstacle_enabled(name) for name in pictures)
+    boxes = [name for name in vf2.obstacles if name not in pictures]
+    assert all(scene.obstacle_enabled(name) == plain.obstacle_enabled(name) for name in boxes)
+    assert [name for name in boxes if scene.obstacle_visible(name)] == ["vf2/side_door/leaf"]
+    assert {name: scene.obstacle_bounds(name) for name in boxes if plain.obstacle_enabled(name)} == {
+        name: plain.obstacle_bounds(name) for name in boxes if plain.obstacle_enabled(name)}
+    assert (vf2.park, vf2.door_travel, scene.frame("vf2/table")) == (
+        envelope.park, envelope.door_travel, plain.frame("vf2/table"))
+    # The file stands at machine home: the table's picture is at the
+    # exchange position with the table, 762 mm along X and 160.5 along Y
+    # from where the file has it, the saddle's with its Y only, the head's
+    # where it was.
+    assert scene.obstacle_pose("vf2/shape/table")[0] == pytest.approx((-0.381 + 0.762, -0.47 + 0.1605, 0.85))
+    assert scene.obstacle_pose("vf2/shape/saddle")[0] == pytest.approx((0.0, -0.47 + 0.1605, 0.5))
+    assert scene.obstacle_pose("vf2/shape/head")[0] == pytest.approx((0.0, -0.26, 1.46))
+    # The window the file draws lifted stands shut on both sides: the far
+    # one on its own, the near one as the picture of the leaf.
+    assert scene.obstacle_pose("vf2/shape/side_door_left")[0] == pytest.approx((-1.15, -0.29, 1.41 - 0.595))
+    # The body's picture is carried by a box the size of the machine, so
+    # a plan view still shows the footprint.
+    lo, hi = scene.obstacle_bounds("vf2/shape/body")
+    assert (hi[0] - lo[0], hi[1] - lo[1], hi[2]) == pytest.approx((2.316, 1.984, 2.724))
+    # The pictures go where the axes and the door go.
+    sq = scene.sequence("run")
+    target = {"x": -0.381, "y": -0.3, "z": -0.25}
+    sq.step("move", actions=[bt.seq.ramp(target, 1.0, robot=vf2.axes), bt.seq.move_to(vf2.door, "open")],
+            transition=bt.seq.all_of(bt.seq.done(), bt.seq.device_done(vf2.door)))
+    tl = scene.simulate_sequence("run")
+    end = tl.duration
+    assert tl.object_pose("vf2/shape/table", end)[0] == pytest.approx((0.0, -0.47 + 0.3, 0.85), abs=1e-6)
+    assert tl.object_pose("vf2/shape/table_1", end)[0] == pytest.approx((0.0, -0.47 + 0.3, 0.85), abs=1e-6)
+    assert tl.object_pose("vf2/shape/saddle", end)[0] == pytest.approx((0.0, -0.47 + 0.3, 0.5), abs=1e-6)
+    assert tl.object_pose("vf2/shape/head", end)[0] == pytest.approx((0.0, -0.26, 1.46 - 0.25), abs=1e-6)
+    assert tl.object_pose("vf2/side_door/leaf", end)[0][2] - scene.obstacle_pose("vf2/side_door/leaf")[0][2] == (
+        pytest.approx(0.595, abs=1e-6))
+    # The machine is one line on the bill either way, and the plan view
+    # is the same cell.
+    assert rows(scene)["vf2"] == rows(plain)["vf2"]
+    # Turned, the pictures turn with the machine.
+    turned = scene_()
+    turned.set_robot_base_pose((4.0, 0.0, 0.0))
+    bt.parts.machine_tool(turned, "vf2", position=(1.0, 2.0), yaw=math.pi / 2, catalog=pack,
+                          exchange=(0.381, 0.050), axes=True, shape=shape)
+    assert turned.obstacle_pose("vf2/shape/head")[0] == pytest.approx((1.0 + 0.26, 2.0, 1.46))
+    # The picture is the machine at home, so it needs the axes that say
+    # where home is; and a package that is no model has no picture in it.
+    with pytest.raises(ValueError, match="build it with its axes"):
+        bt.parts.machine_tool(scene_(), "bare", catalog=pack, shape=shape)
+    with pytest.raises(ValueError, match="cannot be read as a model package"):
+        bt.parts.machine_tool(scene_(), "bare", catalog=pack, axes=True, shape=pack)
 
 
 def test_a_pushbutton_box_is_ordered_by_its_positions(tmp_path: Path) -> None:

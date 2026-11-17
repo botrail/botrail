@@ -359,6 +359,9 @@ pub fn action_key(action: &Action) -> Option<String> {
             )
         }
         Action::StartToolpath { toolpath, .. } => format!("toolpath:{toolpath}"),
+        Action::RunProgram { program, block, .. } => {
+            format!("program:{}", crate::nc::run_name(program, *block))
+        }
         Action::Policy { policy, .. } => format!("policy:{policy}"),
         Action::Crouch {
             depth,
@@ -412,6 +415,7 @@ pub fn action_robot(
             .ok_or_else(|| format!("unknown motion `{motion}`"))?,
         Action::StartRamp { robot, .. }
         | Action::StartToolpath { robot, .. }
+        | Action::RunProgram { robot, .. }
         | Action::Policy { robot, .. }
         | Action::Crouch { robot, .. }
         | Action::Track { robot, .. }
@@ -450,7 +454,6 @@ pub fn robot_entries(
     programs: &[&str],
     host: &str,
 ) -> Result<Vec<RobotEntry>, String> {
-    let io = scene.io_map();
     let numbers = motion_numbers(scene);
     let mut next: BTreeMap<usize, u32> = BTreeMap::new();
     for m in scene.motions() {
@@ -467,7 +470,7 @@ pub fn robot_entries(
                 return Ok(());
             };
             let rname = scene.robots()[r].name.clone();
-            if io.robot_controller_host(&rname) == host {
+            if scene.is_own_controller(r, host) {
                 return Ok(()); // the host is the robot's own controller: no wire
             }
             let key = action_key(action).expect("robot action has a key");
@@ -1075,7 +1078,7 @@ impl Exchange {
                     .iter()
                     .find(|e| &e.robot == rname && e.key == key)
                 else {
-                    if scene.io_map().robot_controller_host(rname) == self.host {
+                    if scene.is_own_controller(r, &self.host) {
                         return Ok(Encoding::Direct);
                     }
                     return Err(format!(

@@ -186,6 +186,7 @@ export function actionPoints(
     }
     case "start_ramp":
     case "start_toolpath":
+    case "run_program":
     case "policy":
     case "crouch":
       return points.filter(

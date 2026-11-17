@@ -10,6 +10,7 @@ const TABS: { kind: OverlayKind; label: string; title: string }[] = [
   { kind: "topo", label: "TOPOLOGY", title: "the electrical topology — controllers, channels, wires, handshakes" },
   { kind: "bom", label: "BOM", title: "the bill of materials — every line, identified or not, with what it stands for" },
   { kind: "routing", label: "ROUTING", title: "the cable list — every route with its line, ends and lengths, and the route checks" },
+  { kind: "nc", label: "NC", title: "a machine tool's control — the part program at the line it runs, the offsets, the tools" },
 ];
 
 /**
@@ -25,17 +26,21 @@ export function OverlayTabs({ active }: { active: OverlayKind }) {
   const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
   const setBomOpen = useStudioStore((s) => s.setBomOpen);
   const setRoutingOpen = useStudioStore((s) => s.setRoutingOpen);
+  const setNcOpen = useStudioStore((s) => s.setNcOpen);
+  // A cell with no machine tool has no control to show.
+  const machines = useStudioStore((s) => s.ncMachines.length);
   const open = (kind: OverlayKind) => {
     if (kind === "sfc") setSfcOpen(true);
     else if (kind === "ld") setLdOpen(true);
     else if (kind === "io") setIoOpen(true);
     else if (kind === "topo") setTopoOpen(true);
     else if (kind === "routing") setRoutingOpen(true);
+    else if (kind === "nc") setNcOpen(true);
     else setBomOpen(true);
   };
   return (
     <span className="overlay-tabs">
-      {TABS.map((t) => (
+      {TABS.filter((t) => t.kind !== "nc" || machines > 0 || active === "nc").map((t) => (
         <button
           key={t.kind}
           className={`overlay-tab${t.kind === active ? " active" : ""}`}

@@ -349,6 +349,9 @@ export function TimelineDock() {
   const setIoOpen = useStudioStore((s) => s.setIoOpen);
   const topoOpen = useStudioStore((s) => s.topoOpen);
   const setTopoOpen = useStudioStore((s) => s.setTopoOpen);
+  const ncOpen = useStudioStore((s) => s.ncOpen);
+  const setNcOpen = useStudioStore((s) => s.setNcOpen);
+  const ncMachines = useStudioStore((s) => s.ncMachines.length);
   const highlightLane = useStudioStore((s) => s.highlightLane);
   const ioPoints = useStudioStore((s) => s.io.points);
   const ioTags = useStudioStore((s) => s.ioTags);
@@ -592,6 +595,17 @@ export function TimelineDock() {
               title="the electrical topology — controllers, channels, wires, handshakes"
             >
               topo
+            </button>
+          )}
+          {timeline && ncMachines > 0 && (
+            <button
+              className={
+                ncOpen ? "timeline-button timeline-button-on" : "timeline-button"
+              }
+              onClick={() => setNcOpen(!ncOpen)}
+              title="the machine tool's control — the part program at the line it runs"
+            >
+              nc
             </button>
           )}
           {ioPoints.length > 0 && (

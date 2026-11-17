@@ -9,6 +9,8 @@ import type {
   SceneryJointMsg,
   GroupMsg,
   ToolpathOverlayMsg,
+  NcMachineMsg,
+  NcProgramMsg,
   IkStatusMsg,
   IoFindingMsg,
   IoMap,
@@ -208,6 +210,25 @@ function persistRoutingOpen(open: boolean): boolean {
   return open;
 }
 
+const NC_KEY = "botrail-studio.nc";
+
+function initialNcOpen(): boolean {
+  try {
+    return localStorage.getItem(NC_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistNcOpen(open: boolean): boolean {
+  try {
+    localStorage.setItem(NC_KEY, open ? "1" : "0");
+  } catch {
+    // Persistence only.
+  }
+  return open;
+}
+
 const ROUTE_DESIGN_KEY = "botrail-studio.route-design-line";
 
 function initialRouteDesignLine(): boolean {
@@ -290,6 +311,7 @@ function initialOverlays(): Overlays {
     topoOpen: initialTopoOpen(),
     bomOpen: initialBomOpen(),
     routingOpen: initialRoutingOpen(),
+    ncOpen: initialNcOpen(),
   });
 }
 
@@ -300,6 +322,7 @@ function persistOverlays(o: Overlays) {
   persistTopoOpen(o.topoOpen);
   persistBomOpen(o.bomOpen);
   persistRoutingOpen(o.routingOpen);
+  persistNcOpen(o.ncOpen);
   return o;
 }
 
@@ -565,6 +588,10 @@ export interface StudioState {
   /** Toolpath overlays (world-resolved polylines); re-sent in full on
    * every toolpath or part-frame change. */
   toolpaths: ToolpathOverlayMsg[];
+  /** The machine tools' controls — axes and the tables an operator fills
+   * in — and the part programs; re-sent in full on every change. */
+  ncMachines: NcMachineMsg[];
+  ncPrograms: NcProgramMsg[];
   /** Colliding pairs at the current configuration (empty when clear). */
   collisions: CollisionPairMsg[];
   /** Minimum robot-obstacle distance; null without obstacles. */
@@ -701,6 +728,8 @@ export interface StudioState {
   bomOpen: boolean;
   /** The cable list and route findings overlay over the viewport (persisted). */
   routingOpen: boolean;
+  /** The machine tools' controls overlay over the viewport (persisted). */
+  ncOpen: boolean;
   /** The point in focus across the studio — its label, which is its
    * lane's name when it has one: picked in the I/O table, the ladder,
    * the SFC chart or the topology diagram, lit in all of them, on the
@@ -890,6 +919,7 @@ export interface StudioState {
   setTopoOpen: (open: boolean) => void;
   setBomOpen: (open: boolean) => void;
   setRoutingOpen: (open: boolean) => void;
+  setNcOpen: (open: boolean) => void;
   setRouteFocus: (name: string | null) => void;
   setRouteDesignLine: (on: boolean) => void;
   /** A row of the bill: select what it stands for (as the tree would)
@@ -948,6 +978,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   routeFocus: null,
   routeDesignLine: initialRouteDesignLine(),
   toolpaths: [],
+  ncMachines: [],
+  ncPrograms: [],
   collisions: [],
   minDistance: null,
   selection: { type: "tcp", robot: "" },
@@ -1062,6 +1094,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
           routeCandidates: {},
           routeFocus: null,
           toolpaths: [],
+          ncMachines: [],
+          ncPrograms: [],
           collisions: [],
           minDistance: null,
           selection: { type: "tcp", robot: selected ?? "" },
@@ -1156,6 +1190,8 @@ export const useStudioStore = create<StudioState>((set, get) => ({
       set((s) => ({ routeCandidates: { ...s.routeCandidates, [msg.route]: msg.candidates } }));
     } else if (msg.type === "toolpaths") {
       set({ toolpaths: msg.toolpaths });
+    } else if (msg.type === "nc") {
+      set({ ncMachines: msg.machines, ncPrograms: msg.programs });
     } else if (msg.type === "motions") {
       set((s) => {
         // A motion that was listed and no longer is was deleted: forget the
@@ -1814,6 +1850,7 @@ export const useStudioStore = create<StudioState>((set, get) => ({
   setTopoOpen: (open) => set((s) => persistOverlays(setOverlay(s, "topo", open))),
   setBomOpen: (open) => set((s) => persistOverlays(setOverlay(s, "bom", open))),
   setRoutingOpen: (open) => set((s) => persistOverlays(setOverlay(s, "routing", open))),
+  setNcOpen: (open) => set((s) => persistOverlays(setOverlay(s, "nc", open))),
   setRouteFocus: (name) => set({ routeFocus: name }),
   setRouteDesignLine: (on) => set({ routeDesignLine: persistRouteDesignLine(on) }),
   selectTarget: (target) => {

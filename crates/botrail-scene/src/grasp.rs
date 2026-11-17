@@ -106,6 +106,10 @@ pub(crate) fn joint_kind(
 /// releases what it holds — the way a PLC expresses a grasp (it has no
 /// "attach" command). A controller's write, a program's `set`, a force on
 /// the lane: every edge counts, whoever made it.
+///
+/// With `parts` named, only those are the grasp's: what else is fixed to
+/// the anchor link — a vise bolted to the table whose clamp this is — is
+/// neither what it holds nor what it lets go of.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraspBinding {
     /// The internal signal (coil) the grasp follows.
@@ -131,6 +135,12 @@ pub struct GraspBinding {
 }
 
 impl GraspBinding {
+    /// Whether `object` is one this grasp takes: any obstacle, or one of
+    /// its `parts` where they are named.
+    pub fn takes(&self, object: &str) -> bool {
+        self.parts.is_empty() || names_match(&self.parts, object)
+    }
+
     /// What the exchange, the ST export and the studio print next to the
     /// coil: who grasps, what, how far.
     pub fn describe(&self, robot: &str) -> String {
@@ -294,7 +304,7 @@ impl Scene {
             if !o.enabled || o.walkable || self.is_attached(&o.name) {
                 continue;
             }
-            if !binding.parts.is_empty() && !names_match(&binding.parts, &o.name) {
+            if !binding.takes(&o.name) {
                 continue;
             }
             let d = botrail_collide::parts_signed_distance(&anchor, link_parts, &o.pose, c.parts())

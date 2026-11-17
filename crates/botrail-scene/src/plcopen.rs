@@ -660,6 +660,25 @@ impl<'a> Pou<'a> {
                     ));
                     started.push(format!("{inst}.done"));
                 }
+                Action::RunProgram {
+                    robot,
+                    program,
+                    block,
+                } => {
+                    let robot = self.robot_name(robot);
+                    let inst = self.instance(
+                        format!("{}_program", ident(&robot)),
+                        "FB_RunProgram",
+                        Some(&robot),
+                    );
+                    // A block of the program goes by the run's own name.
+                    st.push(format!(
+                        "{inst}(machine := {}, name := {}, start := TRUE);",
+                        st_string(&robot),
+                        st_string(&crate::nc::run_name(program, *block))
+                    ));
+                    started.push(format!("{inst}.done"));
+                }
                 // The controller runs the policy; the PLC starts it by
                 // name and waits, as for a motion program.
                 Action::Policy {
@@ -1143,6 +1162,10 @@ const STUB_FBS: &[(&str, &str)] = &[
         "start the named process path on the robot",
     ),
     (
+        "FB_RunProgram",
+        "start the named NC part program on the machine tool (cycle start)",
+    ),
+    (
         "FB_StartPolicy",
         "start the named controller-side policy on the robot",
     ),
@@ -1175,7 +1198,14 @@ pub fn render_plcopen(scene: &Scene, options: &PlcopenOptions) -> Result<String,
     if names.is_empty() {
         return Err(PlcopenError::NoSequences);
     }
-    if let Some(name) = names.iter().find(|n| scene.logic(n).is_some()) {
+    // (A chain that starts over when it ends is what the SFC written here
+    // does anyway: its last transition jumps to the first step.)
+    let beyond_sfc = |name: &&String| {
+        scene.logic(name).is_some_and(|l| {
+            !l.rungs.is_empty() || l.enable.is_some() || l.reset.is_some() || l.plant
+        })
+    };
+    if let Some(name) = names.iter().find(beyond_sfc) {
         return Err(PlcopenError::Logic(name.clone()));
     }
     for name in &names {

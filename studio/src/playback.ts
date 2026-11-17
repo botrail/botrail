@@ -533,10 +533,21 @@ export function sampleObjectPoses(
   for (const track of objects.tracks) {
     // A single-pose track is a constant: the object never moves, its
     // whole animation is the visibility flags (a carve stage).
+    if (track.poses.length === 1) {
+      out[track.name] = track.poses[0];
+      continue;
+    }
+    // An object is drawn where it is, never part-way to where it waits
+    // unseen. Between a sample at which it is drawn and one at which it is
+    // stowed the pose is the drawn sample's: a stage of a part being cut
+    // on a moving table hands over to the next in place, instead of
+    // setting off for its rest for the frames in between.
+    const flags = track.visible ?? [];
+    const drawn = (k: number) => flags.length === 0 || flags[k];
     out[track.name] =
-      track.poses.length === 1
-        ? track.poses[0]
-        : lerpPose(track.poses[lo], track.poses[hi], u);
+      drawn(lo) === drawn(hi)
+        ? lerpPose(track.poses[lo], track.poses[hi], u)
+        : track.poses[drawn(lo) ? lo : hi];
   }
   return out;
 }

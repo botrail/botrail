@@ -2,7 +2,7 @@
 //! stage obstacles (static meshes registered by the caller) shown for
 //! their windows while the original object is stowed. Presentation only.
 
-use crate::rollout::{ObjectTrack, SequenceTimeline, TrackSpan};
+use crate::rollout::{window_spans, ObjectTrack, SequenceTimeline, TrackSpan};
 use nalgebra::Isometry3;
 
 /// One visible window of a stage obstacle: `name` shows from `from` until `to`
@@ -70,6 +70,62 @@ pub fn staged_timeline_windows(
                 pose,
             });
         }
+        out.objects.push(ObjectTrack {
+            name: window.name.clone(),
+            spans,
+        });
+    }
+    out
+}
+
+/// Progressive display on something that **moves**: each window's obstacle
+/// shows for its span riding `target`'s own track — clamped to a table
+/// that traverses, carried off by an arm — and is stowed outside it.
+/// `target` keeps its track and goes on being what is collided and
+/// queried; the caller hides it, and a window from zero stands in for it
+/// until the first change. `pose` is where `target` stands when nothing
+/// ever moves it (and where a stowed stage waits). Nothing else about the
+/// timeline changes.
+pub fn staged_timeline_riding(
+    timeline: &SequenceTimeline,
+    target: &str,
+    pose: Isometry3<f64>,
+    windows: &[StageWindow],
+) -> SequenceTimeline {
+    let mut out = timeline.clone();
+    let end = out.duration;
+    let carried: Option<Vec<TrackSpan>> = out
+        .objects
+        .iter()
+        .find(|track| track.name == target)
+        .map(|track| track.spans.clone());
+    for window in windows {
+        let from = window.from.clamp(0.0, end);
+        let to = window.to.clamp(from, end);
+        let mut spans = Vec::new();
+        if from > 0.0 {
+            spans.push(TrackSpan::Stowed {
+                t0: 0.0,
+                t1: from,
+                pose,
+            });
+        }
+        match &carried {
+            Some(track) => spans.extend(window_spans(track, from, to)),
+            None => spans.push(TrackSpan::Hold {
+                t0: from,
+                t1: to,
+                pose,
+            }),
+        }
+        if to < end {
+            spans.push(TrackSpan::Stowed {
+                t0: to,
+                t1: end,
+                pose,
+            });
+        }
+        out.objects.retain(|track| track.name != window.name);
         out.objects.push(ObjectTrack {
             name: window.name.clone(),
             spans,

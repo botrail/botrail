@@ -33,6 +33,7 @@ import agv_cell_demo  # noqa: E402
 import dual_arm_demo  # noqa: E402
 import legged_patrol_demo  # noqa: E402
 import machine_tending_demo  # noqa: E402
+import vf2_tending_demo  # noqa: E402
 import cover_bolting_demo  # noqa: E402
 import semi_humanoid_demo  # noqa: E402
 import simready_demo  # noqa: E402
@@ -707,6 +708,118 @@ def main() -> None:
             page.screenshot(path=OUT / "machine_tending_hand.png")
             print("wrote machine_tending_hand.png")
             server.stop()
+
+        if want("nc_machining"):
+            # ---- the VF-2 cell with its part cut: the block in the vise as
+            # the part program leaves it — faced, pocketed, drilled — and the
+            # drill still in the spindle. The machine is drawn as its
+            # reference model where the catalog has it (as the envelopes
+            # where it cannot be reached).
+            scene, hs, tl = vf2_tending_demo.bake()
+            shown, _ = vf2_tending_demo.cut(scene, tl)
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(3.0)
+            scene.show_timeline(shown)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+            # The lanes folded away: the picture is the part.
+            page.get_by_role("button", name="lanes", exact=True).click()
+            time.sleep(0.5)
+            t = tl.step_span("vf2/N25-N220").end + 0.3
+            bands = page.locator(".timeline-bands").bounding_box()
+            page.mouse.click(bands["x"] + bands["width"] * (t / tl.duration), bands["y"] + bands["height"] / 2)
+            (px, py, pz), _ = scene.obstacle_pose("part")
+            page.evaluate(f"window.__CAM = {{pos: [{px + 0.16}, {py - 0.36}, {pz + 0.25}], "
+                          f"look: [{px + 0.02}, {py}, {pz - 0.02}]}}")
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "nc_machining.png")
+            print("wrote nc_machining.png")
+            server.stop()
+
+        if want("nc_panel"):
+            # ---- the same cell's control: the NC panel standing at the M21
+            # that calls the arm — the line marked, the position page, the
+            # offsets, the tools and the machine's M codes -------------------
+            scene, hs, tl = vf2_tending_demo.bake()
+            server = bt.studio(scene, block=False, open_browser=False)
+            page.goto(server.url)
+            page.wait_for_selector("canvas")
+            time.sleep(3.0)
+            scene.show_timeline(tl)
+            page.wait_for_selector(".timeline-bands", timeout=30000)
+            page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+            page.get_by_role("button", name="lanes", exact=True).click()
+            page.get_by_role("button", name="nc", exact=True).click()
+            t = tl.step_span("tend/down").start + 0.2
+            page.evaluate(f"window.__STUDIO__.getState().seek({t})")
+            (px, py, pz), _ = scene.obstacle_pose("part")
+            page.evaluate(f"window.__CAM = {{pos: [{px + 2.6}, {py - 2.2}, {pz + 0.9}], "
+                          f"look: [{px - 0.9}, {py + 0.2}, {pz - 0.1}]}}")
+            time.sleep(2.0)
+            page.screenshot(path=OUT / "nc_panel.png")
+            print("wrote nc_panel.png")
+            server.stop()
+
+        if want("machine_shape"):
+            # ---- the same cell drawn with the machine's reference model
+            # (`shape=`): the cut seen through the front doors' glass, the
+            # arm waiting at the window. Needs the model — the published
+            # catalog, or a local build named by BOTRAIL_CATALOG_BUILD -----
+            if vf2_tending_demo.machine_shape() is None:
+                print(f"skipped machine_shape.png: {vf2_tending_demo.MACHINE_SHAPE} is neither "
+                      "published nor built locally")
+            else:
+                scene, _, tl = vf2_tending_demo.bake()
+                server = bt.studio(scene, block=False, open_browser=False)
+                page.goto(server.url)
+                page.wait_for_selector("canvas")
+                time.sleep(5.0)
+                scene.show_timeline(tl)
+                page.wait_for_selector(".timeline-bands", timeout=30000)
+                page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+                page.get_by_role("button", name="lanes", exact=True).click()
+                t = tl.step_span("vf2/N25-N220").start + 30.0
+                page.evaluate(f"window.__STUDIO__.getState().seek({t})")
+                (px, py, pz), _ = scene.obstacle_pose("part")
+                page.evaluate(f"window.__CAM = {{pos: [{px + 0.9}, {py - 3.2}, {pz + 1.0}], "
+                              f"look: [{px - 0.1}, {py}, {pz + 0.25}]}}")
+                time.sleep(2.5)
+                page.screenshot(path=OUT / "machine_shape.png")
+                print("wrote machine_shape.png")
+                server.stop()
+
+        if want("tool_change"):
+            # ---- the reference model's tool changer at work, from inside
+            # the chamber: the carousel shuttled in under the spindle,
+            # turning from the end mill's pocket to the drill's, both
+            # tools in their pockets. Needs the model, as above ------------
+            if vf2_tending_demo.machine_shape() is None:
+                print(f"skipped tool_change.png: {vf2_tending_demo.MACHINE_SHAPE} is neither "
+                      "published nor built locally")
+            else:
+                scene, _, tl = vf2_tending_demo.bake()
+                shown, _ = vf2_tending_demo.cut(scene, tl)
+                server = bt.studio(scene, block=False, open_browser=False)
+                page.goto(server.url)
+                page.wait_for_selector("canvas")
+                time.sleep(5.0)
+                scene.show_timeline(shown)
+                page.wait_for_selector(".timeline-bands", timeout=30000)
+                page.evaluate("window.__STUDIO__.getState().setPlaying(false)")
+                page.get_by_role("button", name="lanes", exact=True).click()
+                # The middle of the program's second tool change.
+                second = [t for t, _, what, _ in vf2_tending_demo.dry_run(scene).events if what == "tool"][1]
+                t = tl.step_span("vf2/N25-N220").start + second - 2.1
+                page.evaluate(f"window.__STUDIO__.getState().seek({t})")
+                (cx, cy, cz), _ = scene.obstacle_pose("vf2/shape/tool_carousel")
+                page.evaluate(f"window.__CAM = {{pos: [{cx + 0.82}, {cy - 0.54}, {cz - 0.41}], "
+                              f"look: [{cx + 0.27}, {cy}, {cz - 0.06}]}}")
+                time.sleep(2.5)
+                page.screenshot(path=OUT / "tool_change.png")
+                print("wrote tool_change.png")
+                server.stop()
 
         if want("assembly"):
             # ---- the cover bolting cell: the screwdriver on a screw, mid-rundown,

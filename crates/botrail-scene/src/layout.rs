@@ -665,6 +665,11 @@ impl Scene {
 
         // ---- robots ----------------------------------------------------
         for (index, robot) in self.robots().iter().enumerate() {
+            // A machine tool's axes stand inside the machine's own outline:
+            // no base to mark, no reach to draw.
+            if self.is_nc_machine(index) {
+                continue;
+            }
             let base = robot.base_pose().translation.vector;
             let at = [base.x, base.y];
             footprint.include(at);

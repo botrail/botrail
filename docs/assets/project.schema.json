@@ -104,6 +104,20 @@
         "$ref": "#/$defs/MotionMsg"
       }
     },
+    "nc_machines": {
+      "description": "Machine tools' controls — the robots whose joints are NC axes, with\ntheir work-offset and tool tables (absent in older files).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NcMachine"
+      }
+    },
+    "nc_programs": {
+      "description": "NC part programs, by name (absent in older files).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/NcProgram"
+      }
+    },
     "obstacles": {
       "type": "array",
       "items": {
@@ -237,6 +251,38 @@
           "required": [
             "type",
             "toolpath"
+          ]
+        },
+        {
+          "description": "Run an NC part program on a machine tool's axes (`robot`, an NC\nmachine); await with `done`. `block` runs one block of it — what\nthe control runs between two machine functions.",
+          "type": "object",
+          "properties": {
+            "block": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            },
+            "program": {
+              "type": "string"
+            },
+            "robot": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "run_program"
+            }
+          },
+          "required": [
+            "type",
+            "program"
           ]
         },
         {
@@ -4816,6 +4862,270 @@
         }
       },
       "additionalProperties": false
+    },
+    "NcChanger": {
+      "description": "An umbrella tool changer as the control works it: a carousel of\npockets — tool `n` in pocket `n` — on a shuttle that carries it to the\nspindle. At a tool change the head stands at the top of its travel;\nthe shuttle runs in, the empty pocket taking the tool that is in the\nspindle; the carousel turns the next tool's pocket to the spindle; and\nthe shuttle runs out again, leaving that tool behind — all within the\nmachine's tool-to-tool time ([`work_changer`]). The head's lift off the\ntool is not part of it, and nothing of the changer is collided: it is\ndrawn, not checked.",
+      "type": "object",
+      "properties": {
+        "carousel": {
+          "description": "The carousel's joint: at 0 pocket 1 stands at the spindle's side,\nand pocket `n` is `n - 1` pockets further round its positive turn.",
+          "type": "string"
+        },
+        "pockets": {
+          "description": "How many pockets the carousel has.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "shuttle": {
+          "description": "The shuttle's joint: prismatic, at rest at its lower limit and at\nthe spindle at its upper.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "shuttle",
+        "carousel",
+        "pockets"
+      ]
+    },
+    "NcCutter": {
+      "description": "The shape of a cutter's end.",
+      "oneOf": [
+        {
+          "description": "Flat end mill.",
+          "type": "string",
+          "const": "flat"
+        },
+        {
+          "description": "Ball end mill: a hemispherical end.",
+          "type": "string",
+          "const": "ball"
+        },
+        {
+          "description": "Bull-nose end mill: a flat end with rounded corners.",
+          "type": "string",
+          "const": "bull_nose"
+        },
+        {
+          "description": "Twist drill. Cut as a flat end of its diameter: the hole's wall\nand depth are right, the cone at its bottom is not drawn.",
+          "type": "string",
+          "const": "drill"
+        }
+      ]
+    },
+    "NcMachine": {
+      "description": "A machine tool's control, as far as running a program needs it: which\njoints of its robot are the X, Y and Z axes (a joint's value is that\naxis's machine coordinate, its limits the travel, its velocity limit\nthe rapid rate), the rates the model does not carry, and the two tables\nan operator fills in — work offsets and tools.",
+      "type": "object",
+      "properties": {
+        "acceleration": {
+          "description": "Acceleration bound of X, Y and Z (m/s²).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "axes": {
+          "description": "Joint names of X, Y and Z.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "changer": {
+          "description": "The tool changer the control works at a tool change, where the\nmachine's model has one to move.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NcChanger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "junction_deviation": {
+          "description": "How far the path may round a corner (m) — what sets the speed a\ncorner is taken at.",
+          "type": "number",
+          "format": "double",
+          "default": 0.00005
+        },
+        "m_codes": {
+          "description": "The machine's M-code table: the M codes that are the machine's to\ncarry out, not the control's — `M180` a window, `M70` a vise, `M21`\na relay that waits for its M-FIN — each with what it does, in\nwords. The control stops at one and waits; what happens then is the\nmachine's own program ([`outline`]). An M code that is neither the\ncontrol's nor here is refused.",
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^\\d+$": {
+              "type": "string"
+            }
+          }
+        },
+        "max_feed": {
+          "description": "Greatest cutting feed (m/s).",
+          "type": "number",
+          "format": "double"
+        },
+        "robot": {
+          "description": "The robot whose joints are the axes; also the machine's name.",
+          "type": "string"
+        },
+        "spindle_max_rpm": {
+          "description": "Greatest spindle speed (rev/min); an `S` word past it is refused.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tool_change_s": {
+          "description": "Tool-to-tool time of the changer (s).",
+          "type": "number",
+          "format": "double"
+        },
+        "tools": {
+          "description": "The tool table, by tool number.",
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "patternProperties": {
+            "^\\d+$": {
+              "$ref": "#/$defs/NcTool"
+            }
+          }
+        },
+        "work_offsets": {
+          "description": "Work offsets by name (`G54`, `G154 P1`): the machine coordinates of\nthe work zero.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "double"
+            },
+            "maxItems": 3,
+            "minItems": 3
+          },
+          "default": {}
+        }
+      },
+      "required": [
+        "robot",
+        "axes",
+        "max_feed",
+        "acceleration",
+        "tool_change_s"
+      ]
+    },
+    "NcProgram": {
+      "description": "A named part program.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "text"
+      ]
+    },
+    "NcTool": {
+      "description": "One entry of a machine's tool table: what `G43 H<n>` adds to Z — the\nfigure the control works with — and, where it is known, the tool that\nis actually in that pocket.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "The tool as a body: what cuts, and what must not touch anything.\nThe table's `length` is what the axes are positioned by; this one's\nis where the tip really is. They agree unless somebody measured\nwrong — which is what a setup is checked for.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NcToolBody"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diameter": {
+          "description": "Cutter diameter (m), where it is known — carried for the setup\nsheet, not used for motion.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "length": {
+          "description": "Gauge line to tip (m), as entered in the table.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "length"
+      ]
+    },
+    "NcToolBody": {
+      "description": "A tool as it stands in the spindle, from the gauge line down: the\nholder, the shank, the flutes. Lengths in metres.",
+      "type": "object",
+      "properties": {
+        "corner_radius": {
+          "description": "Corner radius of a bull-nose cutter.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "cutter": {
+          "$ref": "#/$defs/NcCutter"
+        },
+        "diameter": {
+          "description": "Cutting diameter.",
+          "type": "number",
+          "format": "double"
+        },
+        "flute_length": {
+          "description": "How far up from the tip it cuts.",
+          "type": "number",
+          "format": "double"
+        },
+        "holder": {
+          "description": "The holder: its diameter, and how far below the gauge line it\nreaches.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "length": {
+          "description": "Gauge line to tip.",
+          "type": "number",
+          "format": "double"
+        },
+        "shank_diameter": {
+          "description": "Diameter of the shank between the flutes and the holder; the\ncutter's without.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "cutter",
+        "diameter",
+        "flute_length",
+        "length"
+      ]
     },
     "ObstacleMsg": {
       "type": "object",

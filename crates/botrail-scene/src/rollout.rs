@@ -1429,6 +1429,87 @@ fn clip_spans(spans: &[TrackSpan], by: f64, to: f64) -> Vec<TrackSpan> {
     spans.iter().filter_map(|s| clip_span(s, by, to)).collect()
 }
 
+/// `span` moved later by `by` seconds: the same motion, on a later clock.
+fn delay_span(span: TrackSpan, by: f64) -> TrackSpan {
+    match span {
+        TrackSpan::Wheel {
+            motion,
+            axis,
+            pivot,
+            angle,
+            rate,
+        } => TrackSpan::Wheel {
+            motion: Box::new(delay_span(*motion, by)),
+            axis,
+            pivot,
+            angle,
+            rate,
+        },
+        TrackSpan::Hold { t0, t1, pose } => TrackSpan::Hold {
+            t0: t0 + by,
+            t1: t1 + by,
+            pose,
+        },
+        TrackSpan::Stowed { t0, t1, pose } => TrackSpan::Stowed {
+            t0: t0 + by,
+            t1: t1 + by,
+            pose,
+        },
+        TrackSpan::Follow {
+            t0,
+            t1,
+            robot,
+            link,
+            offset,
+        } => TrackSpan::Follow {
+            t0: t0 + by,
+            t1: t1 + by,
+            robot,
+            link,
+            offset,
+        },
+        TrackSpan::Linear {
+            t0,
+            t1,
+            from,
+            velocity,
+        } => TrackSpan::Linear {
+            t0: t0 + by,
+            t1: t1 + by,
+            from,
+            velocity,
+        },
+        TrackSpan::Pivot {
+            t0,
+            t1,
+            from,
+            center,
+            omega,
+        } => TrackSpan::Pivot {
+            t0: t0 + by,
+            t1: t1 + by,
+            from,
+            center,
+            omega,
+        },
+        TrackSpan::Sampled { t0, dt, poses } => TrackSpan::Sampled {
+            t0: t0 + by,
+            dt,
+            poses,
+        },
+    }
+}
+
+/// What a track does over `[from, to]`, on the timeline's own clock: the
+/// spans in force there, cut to the window and nothing else changed — the
+/// motion a second object has to copy to ride along for that stretch.
+pub(crate) fn window_spans(spans: &[TrackSpan], from: f64, to: f64) -> Vec<TrackSpan> {
+    clip_spans(spans, from, (to - from).max(0.0))
+        .into_iter()
+        .map(|span| delay_span(span, from))
+        .collect()
+}
+
 /// `spans` cut to `[by, by + to]` and moved earlier by `by`; those wholly
 /// outside are dropped.
 fn clip_step_spans(spans: &[StepSpan], by: f64, to: f64) -> Vec<StepSpan> {
@@ -3826,6 +3907,11 @@ struct Rollout {
     render_decimate: Option<f64>,
     /// Policy runs in flight.
     policy_runs: Vec<PolicyRun>,
+    /// Per robot: the lanes its control writes, for an NC machine.
+    nc_lanes: Vec<Option<NcLanes>>,
+    /// What the programs running have yet to write on those lanes, in
+    /// time order.
+    nc_writes: Vec<NcWrite>,
 
     // Accumulating outputs.
     objects: Vec<ObjectTrack>,
@@ -3839,6 +3925,36 @@ struct Rollout {
     /// external hosts are not scanned, their controllers write and read
     /// through an exchange instead. `None` is the ordinary bake.
     plant: Option<plant::PlantState>,
+}
+
+/// The lanes of a machine tool's control — what a program switches that
+/// is not an axis, recorded as it runs: `<machine>.spindle` and
+/// `<machine>.coolant` (signals), `<machine>.rpm`, `<machine>.tool` (the
+/// tool in the spindle) and `<machine>.line` (the source line running; 0
+/// while the control runs none — it waits at a machine function, or the
+/// program has ended) as words.
+#[derive(Debug, Clone, Copy)]
+struct NcLanes {
+    spindle: usize,
+    coolant: usize,
+    rpm: usize,
+    tool: usize,
+    line: usize,
+}
+
+/// One write a running program has scheduled on its control's lanes.
+#[derive(Debug, Clone, Copy)]
+enum NcWrite {
+    Signal { t: f64, lane: usize, value: bool },
+    Word { t: f64, lane: usize, value: f64 },
+}
+
+impl NcWrite {
+    fn t(&self) -> f64 {
+        match self {
+            NcWrite::Signal { t, .. } | NcWrite::Word { t, .. } => *t,
+        }
+    }
 }
 
 /// A motion currently driving joints, sampled per scan tick.
@@ -5657,6 +5773,43 @@ impl Rollout {
             .iter()
             .filter_map(|(name, _)| analogs.iter().position(|a| &a.def.name == name))
             .collect();
+        // A machine tool's control: its lanes, last of all (nothing reads
+        // them, so no index before them moves).
+        let nc_lanes: Vec<Option<NcLanes>> = world
+            .robots()
+            .iter()
+            .enumerate()
+            .map(|(r, robot)| {
+                if !world.is_nc_machine(r) {
+                    return None;
+                }
+                let mut signal = |suffix: &str| {
+                    signals.push(BoolTrack {
+                        name: format!("{}.{suffix}", robot.name),
+                        edges: vec![(0.0, false)],
+                        kind: LaneKind::Device,
+                    });
+                    signals.len() - 1
+                };
+                let (spindle, coolant) = (signal("spindle"), signal("coolant"));
+                let mut word = |suffix: &str| {
+                    words.push(WordTrack {
+                        name: format!("{}.{suffix}", robot.name),
+                        samples: vec![(0.0, 0.0)],
+                        kind: LaneKind::Device,
+                        integer: true,
+                    });
+                    words.len() - 1
+                };
+                Some(NcLanes {
+                    spindle,
+                    coolant,
+                    rpm: word("rpm"),
+                    tool: word("tool"),
+                    line: word("line"),
+                })
+            })
+            .collect();
         Rollout {
             world,
             programs: sequences
@@ -5710,6 +5863,8 @@ impl Rollout {
             collisions: Vec::new(),
             policies,
             policy_runs: Vec::new(),
+            nc_lanes,
+            nc_writes: Vec::new(),
             noise_seed: 0,
             render_cache: [std::sync::OnceLock::new(), std::sync::OnceLock::new()],
             lighting: crate::raster::Lighting::default(),
@@ -5841,6 +5996,10 @@ impl Rollout {
     /// they stand at `t = 0` before it writes anything.
     fn start_world(&mut self) -> Result<(), SeqError> {
         self.init_physics()?;
+        // A coil that is on as the bake opens holds what stands in its
+        // reach from the first instant — a vise that was clamped before
+        // the cycle started — not from the first tick on.
+        self.grasp_follow_tick()?;
         self.update_sensors();
         // Seed every program's edge memory from the evaluated startup
         // state: a sensor already tripped at t = 0 is a level, not an
@@ -5894,6 +6053,7 @@ impl Rollout {
         self.plant_begin_tick();
         self.scan_policies()?;
         self.advance_world()?;
+        self.apply_nc_writes();
         self.grasp_follow_tick()?;
         if self.settle_from.is_some() {
             self.rest_since = if self.world_at_rest() {
@@ -10359,11 +10519,13 @@ impl Rollout {
         self.world
             .attachments()
             .iter()
-            .any(|a| a.robot == binding.robot && a.link == binding.link)
-            || self
-                .friction_holds
-                .iter()
-                .any(|h| h.robot == binding.robot && h.link == binding.link && h.end.is_nan())
+            .any(|a| a.robot == binding.robot && a.link == binding.link && binding.takes(&a.object))
+            || self.friction_holds.iter().any(|h| {
+                h.robot == binding.robot
+                    && h.link == binding.link
+                    && h.end.is_nan()
+                    && binding.takes(&h.object)
+            })
     }
 
     /// Takes the binding's target when the anchor is free and a candidate
@@ -10415,6 +10577,8 @@ impl Rollout {
                 .filter(|h| h.robot == binding.robot && h.link == binding.link && h.end.is_nan())
                 .map(|h| h.object.clone()),
         );
+        // What else is fixed to the link is not the grasp's to let go of.
+        objects.retain(|object| binding.takes(object));
         for object in objects {
             self.fire(&Action::Detach { object })?;
         }
@@ -10445,6 +10609,67 @@ impl Rollout {
             }
         }
         Ok(())
+    }
+
+    /// Schedules what a program about to run writes on its control's
+    /// lanes: every line as it starts, the spindle, the coolant and the
+    /// tool as they switch, and no line once the run is over — what the
+    /// control then waits at is a step of the machine's program.
+    fn schedule_nc_lanes(&mut self, robot: usize, planned: &crate::nc::PlannedProgram) {
+        use crate::nc::NcEvent;
+        let Some(lanes) = self.nc_lanes.get(robot).copied().flatten() else {
+            return;
+        };
+        let t0 = self.t;
+        let word = |t: f64, lane: usize, value: f64| NcWrite::Word { t, lane, value };
+        let mut writes: Vec<NcWrite> = planned
+            .run
+            .spans
+            .iter()
+            .map(|span| word(t0 + span.start, lanes.line, span.line as f64))
+            .collect();
+        for event in &planned.run.events {
+            let t = t0 + event.t;
+            let spindle = |value: bool| NcWrite::Signal {
+                t,
+                lane: lanes.spindle,
+                value,
+            };
+            match event.event {
+                NcEvent::Spindle { rpm, .. } => {
+                    writes.extend([spindle(true), word(t, lanes.rpm, rpm)]);
+                }
+                NcEvent::SpindleStop => writes.extend([spindle(false), word(t, lanes.rpm, 0.0)]),
+                NcEvent::Coolant(value) => writes.push(NcWrite::Signal {
+                    t,
+                    lane: lanes.coolant,
+                    value,
+                }),
+                NcEvent::Tool(number) => writes.push(word(t, lanes.tool, f64::from(number))),
+                NcEvent::Function(_) | NcEvent::End => {}
+            }
+        }
+        writes.push(word(t0 + planned.run.duration(), lanes.line, 0.0));
+        self.nc_writes.extend(writes);
+        // Stable: writes of one instant keep the order they were made in.
+        self.nc_writes.sort_by(|a, b| a.t().total_cmp(&b.t()));
+    }
+
+    /// Writes what the running programs scheduled up to now, each stamped
+    /// with its own instant.
+    fn apply_nc_writes(&mut self) {
+        let due = self
+            .nc_writes
+            .iter()
+            .take_while(|w| w.t() <= self.t + 1e-9)
+            .count();
+        let writes: Vec<NcWrite> = self.nc_writes.drain(..due).collect();
+        for write in writes {
+            match write {
+                NcWrite::Signal { t, lane, value } => self.set_lane(lane, t, value),
+                NcWrite::Word { t, lane, value } => self.set_word(lane, t, value),
+            }
+        }
     }
 
     fn lane_index(&self, name: &str) -> Option<usize> {
@@ -10827,9 +11052,8 @@ impl Rollout {
                 | Action::Attach { robot, .. }
                 | Action::Track { robot, .. }
                 | Action::Untrack { robot, .. }
-                | Action::StartToolpath { robot, .. } => {
-                    self.world.resolve_seq_robot(robot) == Ok(r)
-                }
+                | Action::StartToolpath { robot, .. }
+                | Action::RunProgram { robot, .. } => self.world.resolve_seq_robot(robot) == Ok(r),
                 _ => false,
             })
     }
@@ -11171,6 +11395,102 @@ impl Rollout {
                         traj,
                     },
                 });
+            }
+            Action::RunProgram {
+                robot,
+                program,
+                block,
+            } => {
+                let r = self.action_robot(robot)?;
+                let machine = self.world.robots()[r].name.clone();
+                // What the run goes by on the machine's lane: the program,
+                // and the block where it runs by block.
+                let run = crate::nc::run_name(program, *block);
+                let refused = |step: usize, name: String, message: String| SeqError::PlanFailed {
+                    step,
+                    name,
+                    message: format!("NC program `{run}` on `{machine}`: {message}"),
+                };
+                // Read and timed against the tables and from the axes as
+                // they stand now: a control starts a program where it is.
+                let current = self.robots[r].q.clone();
+                let planned = self
+                    .world
+                    .plan_nc_program(&machine, program, Some(&current), *block)
+                    .map_err(|e| refused(self.cur_step(), self.cur_step_name(), e.to_string()))?;
+                // Run whole, a program has nobody to hand a machine
+                // function to: the control would wait there for ever.
+                if let Some((line, code)) = planned.run.events.iter().find_map(|e| match e.event {
+                    crate::nc::NcEvent::Function(code) => Some((e.line, code)),
+                    _ => None,
+                }) {
+                    return Err(refused(
+                        self.cur_step(),
+                        self.cur_step_name(),
+                        format!(
+                            "line {line}: M{code} is a machine function — the control waits \
+                             there for the machine, so this program runs block by block as the \
+                             machine's own step chain (bt.nc.sequence)"
+                        ),
+                    ));
+                }
+                self.schedule_nc_lanes(r, &planned);
+                let traj = planned.trajectory;
+                let program = &run;
+                // A program drives every axis of its machine.
+                let owned: Vec<usize> = (0..self.world.robots()[r].model.dof()).collect();
+                self.claim_joints(r, &owned, program)?;
+                let concurrent =
+                    !self.robots[r].active.is_empty() || !self.robots[r].tracking.is_empty();
+                let rt = &mut self.robots[r];
+                if concurrent {
+                    rt.truncate_after(self.t);
+                    rt.tick_bake = true;
+                } else {
+                    for i in 0..traj.times.len() {
+                        rt.append_waypoint(
+                            self.t + traj.times[i],
+                            traj.positions[i].clone(),
+                            traj.velocities[i].clone(),
+                        );
+                    }
+                }
+                let end = self.t + traj.duration();
+                rt.planned.push(PlannedMove {
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
+                    motion: Some(program.clone()),
+                    segments: vec![crate::motion::PlannedSegment {
+                        kind: crate::motion::SegmentKind::Joint,
+                        waypoints: vec![
+                            current,
+                            traj.positions.last().expect("a run has a waypoint").clone(),
+                        ],
+                        tcp_speed: None,
+                    }],
+                    duration: traj.duration(),
+                    feed_report: None,
+                    process_spans: Vec::new(),
+                });
+                self.programs[self.current].move_ends.push(end);
+                rt.moves.push(StepSpan {
+                    name: program.clone(),
+                    start: self.t,
+                    end,
+                    sequence: self.programs[self.current].sequence.name.clone(),
+                    step: step_index,
+                    group: None,
+                });
+                if traj.duration() > 1e-9 {
+                    rt.active.push(ActiveMove {
+                        owned,
+                        label: program.clone(),
+                        kind: MoveKind::Traj {
+                            start: self.t,
+                            traj,
+                        },
+                    });
+                }
             }
             Action::Policy {
                 policy,
@@ -12011,7 +12331,46 @@ impl Rollout {
         while !self.policy_runs.is_empty() {
             self.finish_policy(0);
         }
-        self.timeline_at()
+        let mut timeline = self.timeline_at();
+        // A program that cycles may have a move in flight as the bake
+        // ends — a machine already on its next part: its track holds the
+        // whole move, planned ahead. The record ends at the clock.
+        let end = timeline.duration;
+        for track in &mut timeline.robots {
+            let trajectory = &mut track.trajectory;
+            if trajectory
+                .times
+                .last()
+                .is_some_and(|last| *last > end + 1e-9)
+            {
+                // Where the move stands at the clock, and how fast.
+                const H: f64 = 1e-4;
+                let at = trajectory.sample(end);
+                let before = trajectory.sample((end - H).max(0.0));
+                let after = trajectory.sample(end + H);
+                let velocity = after
+                    .iter()
+                    .zip(&before)
+                    .map(|(a, b)| (a - b) / (end + H - (end - H).max(0.0)))
+                    .collect();
+                while trajectory
+                    .times
+                    .last()
+                    .is_some_and(|last| *last > end - 1e-9)
+                {
+                    trajectory.times.pop();
+                    trajectory.positions.pop();
+                    trajectory.velocities.pop();
+                }
+                trajectory.times.push(end);
+                trajectory.positions.push(at);
+                trajectory.velocities.push(velocity);
+            }
+            for span in &mut track.moves {
+                span.end = span.end.min(end);
+            }
+        }
+        timeline
     }
 
     /// The timeline as the bake stands at this tick, without ending it:
@@ -15601,6 +15960,89 @@ pub(crate) mod tests {
         let vacuum = tl.signals.iter().find(|s| s.name == "vacuum").unwrap();
         let levels: Vec<bool> = vacuum.edges.iter().map(|(_, v)| *v).collect();
         assert_eq!(levels, vec![false, true, false], "{:?}", vacuum.edges);
+    }
+
+    /// A vise is bolted to the table whose clamp it is: the clamp's coil
+    /// takes and frees the part, and leaves the vise where it is — and a
+    /// coil that is on as the bake opens holds its part from the start.
+    #[test]
+    fn a_coil_grasp_minds_its_parts_and_nothing_else_on_the_link() {
+        let mut scene = sample_scene();
+        for (name, z) in [("vise", 0.45), ("part", 0.5)] {
+            scene
+                .add_obstacle(
+                    name,
+                    Geometry::Box {
+                        size: Vector3::new(0.04, 0.04, 0.04),
+                    },
+                    nalgebra::Isometry3::from_parts(
+                        Translation3::new(0.1, 0.0, z),
+                        UnitQuaternion::identity(),
+                    ),
+                )
+                .unwrap();
+        }
+        joint_motion(&mut scene, "go", 0.8);
+        scene.attach_obstacle("vise", None, None).unwrap();
+        scene.define_signal("clamp", true);
+        scene
+            .bind_grasp(
+                "clamp",
+                0,
+                None,
+                None,
+                Some(&["part".to_string()]),
+                Some(10.0),
+                None,
+            )
+            .unwrap();
+        let set = |value: bool| Action::Set {
+            signal: "clamp".into(),
+            value,
+        };
+        scene.upsert_sequence(Sequence {
+            name: "cycle".into(),
+            steps: vec![
+                step(
+                    "move",
+                    vec![Action::StartMotion {
+                        motion: "go".into(),
+                    }],
+                    Condition::Done,
+                ),
+                step("open", vec![set(false)], Condition::Immediately),
+                step("settle", vec![], Condition::Elapsed { seconds: 0.2 }),
+                step("close", vec![set(true)], Condition::Immediately),
+                step("hold", vec![], Condition::Elapsed { seconds: 0.2 }),
+            ],
+        });
+        let tl = scene
+            .simulate_sequence("cycle", &RolloutOptions::default())
+            .unwrap();
+        let spans = |name: &str| {
+            &tl.objects
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is not tracked"))
+                .spans
+        };
+        let follows = |span: &TrackSpan| match span {
+            TrackSpan::Follow { t0, t1, .. } => Some((*t0, *t1)),
+            _ => None,
+        };
+        // The vise rides the link from end to end, whatever the coil does.
+        let vise: Vec<(f64, f64)> = spans("vise").iter().filter_map(follows).collect();
+        assert_eq!(vise.len(), 1, "{:?}", spans("vise"));
+        assert_eq!(vise[0].0, 0.0);
+        assert!((vise[0].1 - tl.duration).abs() < 1e-9);
+        // The part is held from the first instant, freed while the coil is
+        // off, and taken again.
+        let part: Vec<(f64, f64)> = spans("part").iter().filter_map(follows).collect();
+        assert_eq!(part.len(), 2, "{:?}", spans("part"));
+        assert_eq!(part[0].0, 0.0);
+        let opened = tl.step_spans.iter().find(|s| s.name == "open").unwrap();
+        assert!((part[0].1 - opened.start).abs() < 1e-9, "{part:?}");
+        assert!((part[1].0 - (opened.start + 0.2)).abs() < 0.011, "{part:?}");
     }
 
     /// A one-axis slider: link `b` rides `a` along +x.

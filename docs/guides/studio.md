@@ -218,11 +218,11 @@ for a beat, so the cause of every transition stays readable at playback
 speed. Clicking any baked step seeks the transport to the moment it
 began; the chart stays up across reloads until closed.
 
-The chart, the ladder, the I/O table, the topology and the bill of
-materials below are five views of **one panel** over the viewport — each
-is wide, and stacked they hid each other — so opening one closes the
-others, and the panel's tab strip (SFC · LD · I/O · TOPOLOGY · BOM)
-switches between them.
+The chart, the ladder, the I/O table, the topology, the bill of
+materials and — in a cell with a machine tool — its control are views of
+**one panel** over the viewport — each is wide, and stacked they hid each
+other — so opening one closes the others, and the panel's tab strip
+(SFC · LD · I/O · TOPOLOGY · BOM · ROUTING · NC) switches between them.
 
 Once the cell is wired, every atom that reads an I/O point carries the
 point's address after it (`↑part_at_pick %IX100.1`), and a click on it puts
@@ -360,6 +360,32 @@ stands for in the scene tree, and the PART card follows. **⤓ csv**
 downloads the bill as `Scene.export_bom` writes it — the same bytes.
 
 ![The bill of materials over the viewport, the arm's tool selected](../assets/studio/bom.png)
+
+## The control — NC
+
+A cell with a machining centre built with its axes
+([machine tending](machine-tending.md#a-machine-that-runs-its-program))
+has an **NC** tab, and an `nc` button on the dock after a Simulate: the
+machine's control, the way its own screen shows it.
+
+![The NC panel: the part program at the M code it waits on, the position page, the offset and tool tables](../assets/studio/nc_panel.png)
+
+* **The program**, with the line the control is running kept in view
+  (green). While it runs none it stands at a **machine function** — an M
+  code the machine answers, a door, a vise, a relay that calls a robot —
+  and that line is marked instead (amber) with what it waits for; an
+  alarm marks it red. The lines that call the machine carry what the
+  code does at their end.
+* **The position page**: the axes in machine coordinates, the tool in
+  the spindle, the speed, the coolant, and where the program stands —
+  the block running, or the step of the machine's program that answers
+  the M code.
+* **The tables** an operator fills in at setup — the work offsets and the
+  tools, a pocket whose entry is not the tool's own length flagged with
+  the difference — and the machine's M-code table.
+
+Scrub the timeline and the panel follows; without a baked cycle it is
+the setup as it stands. Several machines get a selector.
 
 ## The I/O tags — tags
 

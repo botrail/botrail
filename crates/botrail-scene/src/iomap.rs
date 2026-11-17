@@ -982,6 +982,14 @@ impl Scene {
         &self.io
     }
 
+    /// Whether `host` is robot `robot`'s own control, so that a program on
+    /// it drives the robot with no wire between them: the robot's
+    /// controller — or, for a machine tool's axes, whichever host runs
+    /// their program (the CNC is that program's host and the axes' drive).
+    pub fn is_own_controller(&self, robot: usize, host: &str) -> bool {
+        self.is_nc_machine(robot) || self.io.robot_controller_host(&self.robots[robot].name) == host
+    }
+
     /// Replaces the whole assignment layer (project load). Every binding
     /// must name an existing node and channel, every robot controller an
     /// existing robot.
@@ -2235,6 +2243,11 @@ pub fn derive(scene: &Scene, sequences: Option<&[&str]>) -> Result<IoDerivation,
             let ctrl = io.robot_controller_host(rname);
             if u.host == ctrl {
                 continue; // the robot's own controller runs the program: no wire
+            }
+            if scene.is_nc_machine(*robot) {
+                // A machine tool's axes are driven by the machine's own
+                // control, which is where its program runs: no wire.
+                continue;
             }
             let mut steps = steps.clone();
             dedup(&mut steps);

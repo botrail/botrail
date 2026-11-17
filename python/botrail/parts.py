@@ -5246,6 +5246,211 @@ def _rotate(q, v):
     )
 
 
+@dataclass(frozen=True)
+class MachineAxes:
+    """The three linear axes of a vertical machining centre, as figures.
+
+    `travel = (X, Y, Z)` in metres. Machine coordinates read zero at home
+    and run to the negative side, the way these machines are built: at
+    home the head is at the top of Z and the table at one end of X and Y,
+    its centre `home_table = (x, y)` from the spindle's axis (+x to the
+    machine's right, +y to its rear). X and Y move the table — a positive
+    command carries it left and toward the front, so the tool goes right
+    and rearward over it — and Z the head.
+
+    `rapid` is the axes' rapid rate (m/s, one figure or one per axis) and
+    `max_feed` the greatest cutting feed (m/s). `acceleration` (m/s²) is
+    rarely published and usually a design value; `tool_change_s` is the
+    changer's tool-to-tool time."""
+
+    travel: Point3
+    home_table: Point2
+    rapid: Union[float, Point3] = 0.40
+    max_feed: float = 0.25
+    acceleration: Union[float, Point3] = 5.0
+    tool_change_s: float = 0.0
+    spindle_max_rpm: Optional[float] = None
+
+
+# Where the axes' joints point, in the machine's own frame: a joint's value
+# is its axis's machine coordinate.
+_AXIS_DIRECTIONS: tuple[Point3, Point3, Point3] = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
+
+
+def _triple(value: Union[float, Sequence[float]]) -> Point3:
+    if isinstance(value, (int, float)):
+        return (float(value),) * 3
+    x, y, z = (float(v) for v in value)
+    return (x, y, z)
+
+
+def _axes_urdf(name: str, links: Sequence[tuple], joints: Sequence[tuple]) -> str:
+    """A tree of box links on prismatic joints, as URDF text. `links` are
+    `(name, size | None, centre, colour)` — a link without a colour is
+    collided and not drawn (something else is its picture), one without a
+    size is a frame and nothing else — `joints`
+    `(name, parent, child, origin, axis, lower, upper, velocity)`; a joint
+    with no `lower` turns freely about its axis instead of sliding."""
+    def vec(p: Sequence[float]) -> str:
+        return " ".join(f"{float(v):.9f}" for v in p)
+
+    out = [f'<?xml version="1.0"?>\n<robot name="{name}">', '  <link name="base"/>']
+    for link, size, centre, colour in links:
+        if size is None:
+            out.append(f'  <link name="{link}"/>')
+            continue
+        geometry = f'<origin xyz="{vec(centre)}"/><geometry><box size="{vec(size)}"/></geometry>'
+        visual = "" if colour is None else (
+            f'<visual>{geometry}<material name="{link}_m"><color rgba="{vec(colour)} 1"/></material></visual>'
+        )
+        out.append(f'  <link name="{link}">{visual}<collision>{geometry}</collision></link>')
+    for joint, parent, child, origin, axis, lower, upper, velocity in joints:
+        kind, stops = ("continuous", "") if lower is None else (
+            "prismatic", f'lower="{lower:.9f}" upper="{upper:.9f}" ')
+        out.append(
+            f'  <joint name="{joint}" type="{kind}"><parent link="{parent}"/><child link="{child}"/>'
+            f'<origin xyz="{vec(origin)}"/><axis xyz="{vec(axis)}"/>'
+            f'<limit {stops}velocity="{velocity:.9f}" effort="0"/></joint>'
+        )
+    out.append("</robot>\n")
+    return "\n".join(out)
+
+
+def _placed(transform: Sequence[float], quaternion, offset: Point3) -> tuple[float, ...]:
+    """A column-major `transform` turned by `quaternion` (x, y, z, w) and
+    then moved by `offset`."""
+    columns = tuple(_rotate(quaternion, transform[i:i + 3]) for i in (0, 4, 8))
+    at = _rotate(quaternion, transform[12:15])
+    return _transform(columns, (at[0] + offset[0], at[1] + offset[1], at[2] + offset[2]))
+
+
+#: The links of a machine's geometry package that ride the mechanism's.
+_SHAPE_AXES = ("saddle", "table", "head")
+#: The links of a package that draws an umbrella tool changer: the shuttle,
+#: and the carousel of pockets it carries to the spindle.
+_SHAPE_CHANGER = ("tool_shuttle", "tool_carousel")
+
+
+class _MachineShape:
+    """A machine's geometry as a model of it: a catalog model package (a
+    reference model, or one built from the maker's CAD) whose root frame
+    is the machine's own —
+    the middle of its footprint on the floor, front on -Y — standing at
+    machine home, and whose links are named for what they are: `saddle`,
+    `table` and `head` move with the axes, `side_door` (or
+    `side_door_left` / `side_door_right`) is the side door's leaf, and
+    everything else stands still. `pictures` are the gprims by link, each
+    with where it stands in that frame."""
+
+    def __init__(self, ref) -> None:
+        from ._core import Robot
+        from ._spec import _snapshot_revision, package
+
+        directory, manifest, revision = package(ref)
+        self.id = str(manifest.get("id") or directory)
+        self.manifest = manifest
+        # A directory of the download cache (what `catalog_package` returns)
+        # is the catalog's package too, at the revision it stands under.
+        revision = revision or _snapshot_revision(directory)
+        try:
+            # A package out of the catalog is read as the catalog's — at the
+            # revision it was resolved to; its files stand in the download
+            # cache as links, which a local package may not be. Any other
+            # directory is a local build.
+            if revision is None:
+                self.robot = Robot.from_package(str(directory), format="usd")
+            else:
+                self.robot = Robot.from_catalog(self.id, revision=revision, format="usd")
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"machine_tool: shape {self.id} cannot be read as a model package: {exc}") from exc
+        self.home = self.robot.link_poses()
+        self.pictures: dict[str, list[dict]] = {}
+        for shot in self.robot.visuals():
+            if shot["asset"] is None:
+                raise ValueError(
+                    f"machine_tool: shape {self.id} draws link {shot['link']!r} from something "
+                    "other than a USD prim"
+                )
+            self.pictures.setdefault(shot["link"].rsplit("/", 1)[-1], []).append(shot)
+        if not self.pictures:
+            raise ValueError(f"machine_tool: shape {self.id} draws nothing")
+
+    def opened(self, role: str, along: Point3) -> float:
+        """How far `role` stands open in the file, `along` the way the
+        door opens: the file draws a door wherever its author left it (a
+        VF-2's side window is drawn lifted), and its joint's range says
+        which way shut is — the end of it that lies against `along`.
+        Zero for a link nothing moves: it is drawn as it stands."""
+        link = next((name for name in self.home if name.rsplit("/", 1)[-1] == role), None)
+        if link is None:
+            return 0.0
+        here = self.home[link][0]
+        for index, limits in enumerate(self.robot.joint_limits):
+            step = [0.0] * self.robot.dof
+            step[index] = 1.0
+            there = self.robot.link_poses(step)[link][0]
+            run = sum((b - a) * d for a, b, d in zip(here, there, along))
+            if abs(run) < 1e-6 or limits is None:
+                continue
+            lower, upper = limits
+            return max(0.0, -lower * run if run > 0 else upper * -run)
+        return 0.0
+
+    def changer(self) -> Optional[dict]:
+        """The umbrella tool changer the package draws, if it draws one:
+        links `tool_shuttle` and `tool_carousel` — the shuttle on a
+        sliding joint of its name, drawn at rest and at the spindle at the
+        joint's upper limit; the carousel on a joint of its name that
+        turns freely, its frame on its axis; and `specs.tool_capacity` in
+        the manifest for the pockets. Returned as what the mechanism needs
+        to move the same way, in the machine's own frame: `origin` (a
+        point on the carousel's axis, at rest), the shuttle's `axis` and
+        `limits`, the carousel's `turn` axis, and `pockets`."""
+        def named(names, role):
+            return next((i for i, name in enumerate(names) if name.rsplit("/", 1)[-1] == role), None)
+
+        links = [next((name for name in self.home if name.rsplit("/", 1)[-1] == role), None)
+                 for role in _SHAPE_CHANGER]
+        if None in links:
+            return None
+        slide, turn = (named(self.robot.joint_names, role) for role in _SHAPE_CHANGER)
+        limits = None if slide is None else self.robot.joint_limits[slide]
+        if slide is None or turn is None or limits is None or self.robot.joint_limits[turn] is not None:
+            raise ValueError(
+                f"machine_tool: shape {self.id} draws a tool changer the control cannot work — its "
+                "`tool_shuttle` slides between two limits on a joint of that name, and its "
+                "`tool_carousel` turns freely on one of its name"
+            )
+
+        def moved(joint: int) -> dict:
+            step = [0.0] * self.robot.dof
+            step[joint] = 1.0
+            return self.robot.link_poses(step)
+
+        (rest, level), carried = self.home[links[1]], moved(slide)[links[1]][0]
+        axis = tuple(b - a for a, b in zip(rest, carried))
+        # The carousel a radian round: its frame stays on the axis, and how
+        # it has turned from where it stood says which way the axis points.
+        at, turned = moved(turn)[links[1]]
+        x, y, z, w = _mul_quat(turned, (-level[0], -level[1], -level[2], level[3]))
+        about = tuple(v / math.sin(0.5) * (1.0 if w >= 0.0 else -1.0) for v in (x, y, z))
+        if (abs(math.hypot(*axis) - 1.0) > 1e-6 or abs(math.hypot(*about) - 1.0) > 1e-6
+                or math.dist(at, rest) > 1e-6):
+            raise ValueError(
+                f"machine_tool: shape {self.id} draws a tool changer the control cannot work — its "
+                "`tool_carousel` is carried by the shuttle's slide, with its frame on the axis it "
+                "turns about"
+            )
+        pockets = (self.manifest.get("specs") or {}).get("tool_capacity")
+        if not isinstance(pockets, int) or pockets < 2:
+            raise ValueError(
+                f"machine_tool: shape {self.id} draws a tool changer and does not say how many "
+                "pockets its carousel has (`specs.tool_capacity` in its manifest)"
+            )
+        return {"origin": tuple(rest), "axis": axis, "limits": tuple(limits), "turn": about,
+                "pockets": pockets}
+
+
 @dataclass
 class MachineTool(Built):
     """What `machine_tool` built, plus the names a tending program
@@ -5265,8 +5470,25 @@ class MachineTool(Built):
     door_lanes: Optional[tuple[str, str]] = None
     #: The front door's closed switch (`<name>/front_door/closed`), `None`
     #: without a front door — the lane the side door's opening is guarded
-    #: by (the two doors are never open together).
+    #: by (the two doors are never open together). On a driven front door
+    #: it is the first of `front_closed`.
     front_door_lane: Optional[str] = None
+    #: A driven front door (`front_drive=`): the axes of its leaves — two,
+    #: parting from the middle — each with the stops `closed` and `open`.
+    #: Empty where the front door stands closed.
+    front_doors: tuple[str, ...] = ()
+    #: Every lane that is on while the front door is shut — the closed
+    #: switch of a door that stands closed, each leaf's closed end on a
+    #: driven one — and every lane that is on while it stands open (none
+    #: on a door that never opens). What a guard reads.
+    front_closed: tuple[str, ...] = ()
+    front_open: tuple[str, ...] = ()
+    #: What rides the driven front door's leaves, leaf by leaf — for a
+    #: teach that has to stand them open — with how far each travels and
+    #: the world direction it opens along.
+    front_door_objects: tuple[tuple[str, ...], ...] = ()
+    front_door_travel: float = 0.0
+    front_door_axes: tuple[Point3, ...] = ()
     #: The panel's E-stop lane (`<name>/panel/estop`), `None` without one —
     #: what every start is guarded by.
     estop: Optional[str] = None
@@ -5275,6 +5497,23 @@ class MachineTool(Built):
     #: The control interface the catalog pack states (`template` and a
     #: signal table) — what `bt.tending` checks its template against.
     interface: Optional[dict] = None
+    #: The mechanism of a machine built with its axes (`axes=`): the name
+    #: of the robot whose joints `x`, `y`, `z` are the machine coordinates
+    #: — an NC machine, what `bt.seq.run_program` runs a part program on —
+    #: `None` for the envelope with its table standing still. Its link
+    #: `table_link` has its frame on the centre of the table top (what a
+    #: fixture is attached to, so it rides the table), `head_link` on the
+    #: spindle nose.
+    axes: Optional[str] = None
+    table_link: str = "table"
+    head_link: str = "head"
+    #: Where the axes were built standing, in machine coordinates — the
+    #: table at its exchange position, the head at the top.
+    park: Optional[Point3] = None
+    #: The tool changer's two joints on `axes` — the shuttle and the
+    #: carousel — where the machine's picture (`shape=`) draws one: the
+    #: control works them at each tool change. `None` without one.
+    changer: Optional[tuple[str, str]] = None
 
 
 def operator_panel(
@@ -5740,16 +5979,24 @@ def machine_tool(
     door_side: Union[str, object] = _DEFAULT,
     door_travel: Optional[float] = None,
     door_speed: Optional[float] = None,
+    door_slide: Union[str, object] = _DEFAULT,
+    door_offset: Optional[float] = None,
     front_door: Union[Point3, None, object] = _DEFAULT,
+    front_drive: Optional[str] = None,
+    front_speed: Optional[float] = None,
     chamber: Optional[float] = None,
+    enclosure_height: Optional[float] = None,
     table: Optional[Point3] = None,
     exchange: Optional[Point2] = None,
     head_clearance: Optional[float] = None,
+    head_offset: Optional[float] = None,
+    axes: Union[bool, MachineAxes, None] = None,
     panel: Optional[str] = "front",
     buttons: Optional[Sequence[str]] = None,
     panel_pitch: float = 0.045,
     wall: float = 0.06,
     catalog: Optional["CatalogRef"] = None,
+    shape: Optional["CatalogRef"] = None,
     detail: Optional[str] = None,
     model: Optional[str] = None,
     manufacturer: Optional[str] = None,
@@ -5768,15 +6015,30 @@ def machine_tool(
     * the enclosure — bed, side walls, roof, the rear column block (the
       last `depth - chamber` of the body), and a front wall around the
       front door opening (`front_door = (width, height, sill)`), with its
-      leaf standing closed;
+      leaf standing closed — or, with `front_drive="air"` / `"servo"`, an
+      **automatic front door**: two leaves that part from the middle, each
+      half the opening's travel, on the axes `<name>/front_door/left` and
+      `<name>/front_door/right` (stops `closed` and `open`; the speed
+      comes from the drive, `front_speed` overrides). They are checked
+      against every robot each tick like the side door, and
+      `front_doors`, `front_closed` and `front_open` name the axes and
+      their end lanes. `enclosure_height` is a machine whose
+      enclosure is lower than the machine and open on top: the walls stop
+      there and no roof is built, while the column block and the spindle
+      head rise to the body's height;
     * the **table** `table = (width, depth, top height)` at the exchange
       position (`exchange = (x, y)` offset from the chamber centre, x
       toward the door side — a table that traverses to the door is what
       a tending robot reaches), and the spindle head above it from
-      `head_clearance` (nose to table at Z max) to the roof;
+      `head_clearance` (nose to table at Z max) to the roof, on the
+      chamber's centre or `head_offset` toward the rear of it;
     * the **side door**: an opening `aperture = (width, height, sill)` in
-      the `door_side` wall and a leaf that slides toward the rear by
-      `door_travel`. `door="servo"` / `"air"` make it a linear axis
+      the `door_side` wall — centred on the chamber, or `door_offset`
+      toward the rear of that — and a leaf that slides toward the rear by
+      `door_travel`. `door_slide="up"` is a window that lifts instead: the
+      leaf rests on the sill and rises by `door_travel`, and where that
+      is less than the opening's height the raised leaf's lower edge is
+      what an arm passes under. `door="servo"` / `"air"` make it a linear axis
       `<name>/side_door` with the stops `closed` and `open`
       (`bt.seq.move_to(door, "open")` opens it, `move_to(door, "closed")`
       closes; the speed comes from the drive — `door_speed` overrides),
@@ -5793,14 +6055,26 @@ def machine_tool(
       door-side wall ahead of the opening (`panel="door"`, where a robot
       at the door reaches it); `panel=None` leaves it off.
 
+    With `axes=` — a `MachineAxes`, or `True` to take the catalog pack's
+    — the table and the head **move**: the saddle, the table and the head
+    become the links of a mechanism `<name>/axes` (a robot of three
+    prismatic joints `x`, `y`, `z` whose values are the machine
+    coordinates), declared as an NC machine so that a part program runs
+    on it (`bt.seq.run_program`, `bt.nc`). It is built standing at
+    `exchange`, which must lie inside the travels; what machine
+    coordinates that is comes back as `park`. Attach a fixture to the
+    link `table` and it rides the table. The mechanism is checked against
+    every arm each tick, like any two robots.
+
     Frames: `<name>/table` (centre of the table top), `<name>/entry` (the
-    side opening's centre, 150 mm outside the door leaf — where a robot
-    waits), `<name>/door/side/handle` (the leaf's handle, +Z into the
+    centre of what the open door leaves clear, 150 mm outside the door
+    leaf — where a robot waits), `<name>/door/side/handle` (the leaf's handle, +Z into the
     leaf), and the panel's `<name>/panel/<button>[/press]`.
 
     Refused rather than clipped, like a wall plan that does not close: an
     opening that does not fit its wall, a leaf whose stroke runs off the
-    body, a spindle head that would stand through the roof.
+    body (a lifting leaf rises clear of it), a spindle head that would
+    stand through the roof.
 
     `detail="full"` adds framed transparent windows, the enclosure skirt,
     the accent band and the stack light.
@@ -5813,12 +6087,39 @@ def machine_tool(
 
     With `catalog=` — the id of a machine-tool spec pack, or a package
     directory — a machine you can order: the body, the openings, the
-    table and the head come from the pack's `mechanical.envelope`, the
+    table and the head come from the pack's `mechanical.envelope` (with
+    the side door's `kind: lift` and `offset_mm`, and the
+    `enclosure_height_mm` of an open-topped enclosure, the spindle's
+    `offset_mm` and the `axes`' travels and rates), the
     options it sells (`column_mm`, `side_door`, `door_side`) are chosen
     by name and refused when nobody sells them, the door's speed follows
     the drive's published time, every article lands on the bill with its
     number, and the pack's `interface` (its handshake template and
-    signal table) rides on the returned `MachineTool` for `bt.tending`."""
+    signal table) rides on the returned `MachineTool` for `bt.tending`.
+
+    With `shape=` — a model package of the machine's geometry (a
+    catalog id or a package directory: a reference model drawn from
+    published dimensions, or one built from the maker's CAD, which is
+    usually yours to build and not anyone's to redistribute) — the
+    machine is **drawn** as that and still
+    **verified** as the envelopes: every box above stays where it is,
+    collided and unseen, and the package's links are their picture. Its
+    `saddle`, `table` and `head` ride the mechanism's links of the same
+    name, so the picture runs the part program with the axes; its
+    `side_door` (or `side_door_<left|right>`, the one on `door_side`)
+    rides the door, shut where the door is shut whatever pose the file
+    drew it in; its `front_door_left` and `front_door_right` ride the
+    leaves of a driven front door; its `tool_shuttle` and `tool_carousel`
+    — an umbrella tool changer — become two more joints of the mechanism
+    (`MachineTool.changer`) that the control works at each tool change,
+    drawn and not collided; everything else stands still. The package's
+    root frame is
+    the machine's — the middle of the footprint on the floor, front on
+    -Y — and it stands at machine home, which is what the picture is
+    placed from: `shape` needs the machine's `axes`. The pictures are
+    `<name>/shape/<link>`, out of collision — the first that stands still
+    (the body's) on a box the size of the machine, so a plan view keeps
+    the footprint — and the generator's own trim is left out."""
     spec = None
     params: dict = {}
     if catalog is not None:
@@ -5861,6 +6162,14 @@ def machine_tool(
             aperture = (side["width_mm"] / 1000.0, side["height_mm"] / 1000.0, side["sill_mm"] / 1000.0)
             if door_travel is None and side.get("travel_mm") is not None:
                 door_travel = float(side["travel_mm"]) / 1000.0
+        if isinstance(side, dict):
+            # How the leaf opens and where the opening stands along the
+            # wall are the machine's, not an option: the caller's word
+            # still wins.
+            if door_slide is _DEFAULT and side.get("kind") == "lift":
+                door_slide = "up"
+            if door_offset is None and side.get("offset_mm") is not None:
+                door_offset = float(side["offset_mm"]) / 1000.0
         front = spec.envelope("doors", "front")
         if front_door is _DEFAULT and isinstance(front, dict):
             front_door = (front["width_mm"] / 1000.0, front["height_mm"] / 1000.0, front["sill_mm"] / 1000.0)
@@ -5872,8 +6181,30 @@ def machine_tool(
         nose = spec.envelope("head", "nose_to_table_mm")
         if head_clearance is None and isinstance(nose, (list, tuple)) and len(nose) == 2:
             head_clearance = float(nose[1]) / 1000.0
+        if head_offset is None and spec.envelope("head", "offset_mm") is not None:
+            head_offset = float(spec.envelope("head", "offset_mm")) / 1000.0
+        if axes is True:
+            stated = spec.envelope("axes")
+            if not isinstance(stated, dict):
+                raise ValueError(
+                    f"machine_tool: {spec.id} states no axes — pass axes=bt.parts.MachineAxes(...)"
+                )
+            rapid = stated["rapid_m_min"]
+            axes = MachineAxes(
+                travel=tuple(float(v) / 1000.0 for v in stated["travel_mm"]),
+                home_table=tuple(float(v) / 1000.0 for v in stated["home_table_mm"]),
+                rapid=(float(rapid) / 60.0 if isinstance(rapid, (int, float))
+                       else tuple(float(v) / 60.0 for v in rapid)),
+                max_feed=float(stated["max_feed_m_min"]) / 60.0,
+                **({"acceleration": float(stated["accel_m_s2"])} if stated.get("accel_m_s2") else {}),
+                tool_change_s=float(stated.get("tool_change_s") or 0.0),
+                spindle_max_rpm=(float(stated["spindle_max_rpm"])
+                                 if stated.get("spindle_max_rpm") else None),
+            )
         if chamber is None and spec.envelope("chamber_mm") is not None:
             chamber = float(spec.envelope("chamber_mm")) / 1000.0
+        if enclosure_height is None and spec.envelope("enclosure_height_mm") is not None:
+            enclosure_height = float(spec.envelope("enclosure_height_mm")) / 1000.0
         if door_speed is None and door in ("air", "servo"):
             open_s = spec.behavior(f"door_open_s_{door}")
             if isinstance(open_s, (int, float)) and open_s > 0 and door_travel is not None:
@@ -5889,9 +6220,27 @@ def machine_tool(
         raise ValueError(f"machine_tool: door must be one of {DOOR_DRIVES} or None, not {door!r}")
     if door_side not in ("left", "right"):
         raise ValueError(f"machine_tool: door_side is 'left' or 'right', not {door_side!r}")
+    if axes is True:
+        raise ValueError("machine_tool: axes=True takes a catalog pack's axes — pass a MachineAxes")
+    if axes is False:
+        axes = None
+    if door_slide is _DEFAULT:
+        door_slide = "rear"
+    if door_slide not in ("rear", "up"):
+        raise ValueError(f"machine_tool: door_slide is 'rear' or 'up', not {door_slide!r}")
+    lift = door_slide == "up"
     if panel not in (None, "front", "door"):
         raise ValueError(f"machine_tool: panel is 'front', 'door' or None, not {panel!r}")
     mode = _detail(detail, spec is not None)
+    drawn = None
+    if shape is not None:
+        if axes is None:
+            raise ValueError(
+                "machine_tool: shape is the machine drawn at machine home — build it with its "
+                "axes (axes=True from a catalog pack, or a MachineAxes), which say where home is"
+            )
+        drawn = _MachineShape(shape)
+        mode = "plain"   # the maker's drawing is the detail
     w, d, h = (float(v) for v in (size or VMC_SIZE))
     aw, ah, sill = (float(v) for v in (aperture or VMC_APERTURE))
     tw, td, th = (float(v) for v in (table or VMC_TABLE))
@@ -5910,8 +6259,23 @@ def machine_tool(
         raise ValueError(
             f"machine_tool: a {cd:.2f} m chamber does not fit a {d:.2f} m deep body"
         )
-    travel = aw + 0.055 if door_travel is None else float(door_travel)
+    # A lifting leaf clears its opening by default; a sliding one runs a
+    # little past it.
+    travel = (ah if lift else aw + 0.055) if door_travel is None else float(door_travel)
     speed = door_speed if door_speed is not None else DOOR_SPEED.get(door or "", 0.0)
+    if travel <= 0:
+        raise ValueError("machine_tool: door_travel must be positive")
+    # An enclosure lower than the machine is open on top: its walls stop
+    # at `eh`, and an opening may run right up to their edge (under a roof
+    # it stops a wall's thickness short).
+    eh = h if enclosure_height is None else float(enclosure_height)
+    if eh <= 0 or eh > h + 1e-9:
+        raise ValueError(
+            f"machine_tool: a {eh * 1e3:.0f} mm enclosure does not fit a {h * 1e3:.0f} mm machine"
+        )
+    open_top = eh < h - 1e-9
+    lintel = eh if open_top else h - t
+    head_top = h if open_top else h - t
 
     x, y = float(position[0]), float(position[1])
     z0 = float(position[2]) if len(position) > 2 else 0.0
@@ -5923,6 +6287,7 @@ def machine_tool(
     ls = t + cd                       # the side walls' length
     yc_wall = (y0 + y_r) / 2
     y_c = y0 + t + cd / 2             # the chamber's centre
+    y_a = y_c + (0.0 if door_offset is None else float(door_offset))   # the side opening's
     inner = w / 2 - t
     leaf_t, over = 0.04, 0.05
     half = aw / 2 + over
@@ -5931,17 +6296,17 @@ def machine_tool(
     # Refused before anything is placed: a plan that does not fit is not
     # a smaller machine.
     if door is not None:
-        if sill + ah > h - t + 1e-9:
+        if sill + ah > lintel + 1e-9:
             raise ValueError(
                 f"machine_tool: the side opening tops out at {(sill + ah) * 1e3:.0f} mm, "
-                f"through a {h * 1e3:.0f} mm body"
+                f"through a {eh * 1e3:.0f} mm body"
             )
-        if (y_c - aw / 2) - y0 < t or y_r - (y_c + aw / 2) < 0:
+        if (y_a - aw / 2) - y0 < t or y_r - (y_a + aw / 2) < 0:
             raise ValueError(
                 f"machine_tool: a {aw * 1e3:.0f} mm side opening does not fit the "
                 f"{cd * 1e3:.0f} mm chamber"
             )
-        if y_c + half + travel > d / 2 + 1e-9:
+        if not lift and y_a + half + travel > d / 2 + 1e-9:
             raise ValueError(
                 f"machine_tool: a {travel * 1e3:.0f} mm door stroke runs the leaf off the "
                 f"{d * 1e3:.0f} mm body"
@@ -5952,18 +6317,55 @@ def machine_tool(
         raise ValueError("machine_tool: panel='door' needs a side door to stand beside")
     if front_door is not None:
         fw, fh, fs = (float(v) for v in front_door)
-        if fw > w - 2 * t + 1e-9 or fs + fh > h - t + 1e-9:
+        if fw > w - 2 * t + 1e-9 or fs + fh > lintel + 1e-9:
             raise ValueError(
                 f"machine_tool: a {fw * 1e3:.0f} x {fh * 1e3:.0f} mm front opening on a "
-                f"{fs * 1e3:.0f} mm sill does not fit a {w * 1e3:.0f} x {h * 1e3:.0f} mm front"
+                f"{fs * 1e3:.0f} mm sill does not fit a {w * 1e3:.0f} x {eh * 1e3:.0f} mm front"
             )
+    if front_drive is not None:
+        if front_drive not in ("air", "servo"):
+            raise ValueError(f"machine_tool: front_drive is 'air', 'servo' or None, not {front_drive!r}")
+        if front_door is None:
+            raise ValueError("machine_tool: front_drive needs a front door to drive (front_door=...)")
+        # Two leaves parting from the middle: each travels half the
+        # opening, and must stay on the machine's front as it does.
+        if fw + 0.05 > w / 2 + 1e-9:
+            raise ValueError(
+                f"machine_tool: the leaves of a {fw * 1e3:.0f} mm front door part off the "
+                f"{w * 1e3:.0f} mm front"
+            )
+        front_rate = float(front_speed) if front_speed is not None else DOOR_SPEED[front_drive]
+        if front_rate <= 0:
+            raise ValueError("machine_tool: front_speed must be positive")
     tx_, ty_ = sx * ex, y_c + ey
     if abs(tx_) + tw / 2 > inner + 1e-9 or ty_ - td / 2 < y0 + t - 1e-9 or ty_ + td / 2 > y_r + 1e-9:
         raise ValueError(
             f"machine_tool: the table ({tw * 1e3:.0f} x {td * 1e3:.0f} mm) at the exchange "
             f"offset ({ex * 1e3:.0f}, {ey * 1e3:.0f}) stands into the enclosure"
         )
-    if th + hc > h - t - 1e-9:
+    y_sp = y_c + (0.0 if head_offset is None else float(head_offset))   # the spindle's axis
+    park = None
+    if axes is not None:
+        strokes = _triple(axes.travel)
+        if min(strokes) <= 0 or min(_triple(axes.rapid)) <= 0 or min(_triple(axes.acceleration)) <= 0:
+            raise ValueError("machine_tool: the axes' travels, rapid rates and accelerations must be positive")
+        # Home, and where the exchange offset stands from it: the table
+        # goes the other way from its axis's command.
+        x_home, y_home = float(axes.home_table[0]), y_sp + float(axes.home_table[1])
+        park = (x_home - tx_, y_home - ty_, 0.0)
+        for letter, at, reach in zip("XY", park, strokes):
+            if at > 1e-9 or at < -reach - 1e-9:
+                raise ValueError(
+                    f"machine_tool: the exchange offset ({ex * 1e3:.0f}, {ey * 1e3:.0f}) puts the table at "
+                    f"{letter}{at * 1e3:.1f} in machine coordinates, outside the {letter} travel "
+                    f"({-reach * 1e3:.0f} to 0 mm)"
+                )
+        if hc - strokes[2] <= 0:
+            raise ValueError(
+                f"machine_tool: a {strokes[2] * 1e3:.0f} mm Z travel takes the spindle nose "
+                f"through the table from {hc * 1e3:.0f} mm above it"
+            )
+    if th + hc > head_top - 1e-9:
         raise ValueError(
             f"machine_tool: the spindle head retracted to {(th + hc) * 1e3:.0f} mm stands "
             f"through a {h * 1e3:.0f} mm roof"
@@ -5987,6 +6389,45 @@ def machine_tool(
         px, py = world(at[0], at[1])
         return _trim(scene, built, f"{name}/{tag}", sz,
                      (px, py, z0 + at[2]), q, colour, finish=finish)
+
+    pictured: set[str] = set()
+
+    def picture(tag, shot, shift=(0.0, 0.0, 0.0), onto=None):
+        """One gprim of the shape package, where the file has it moved by
+        `shift` (the machine's own frame): bound to `onto` — a box
+        `(name, centre)` that is already what it draws — or to a carrier
+        of its own standing on it, out of collision."""
+        at = tuple(p + s for p, s in zip(shot["position"], shift))
+        if onto is None:
+            px, py = world(at[0], at[1])
+            made, centre = _trim(scene, built, f"{name}/shape/{tag}", (0.01, 0.01, 0.01),
+                                 (px, py, z0 + at[2]), q), at
+        else:
+            made, centre = onto
+        path, prim, transform = shot["asset"]
+        scene.set_obstacle_visual_asset(
+            made, path, prim,
+            _placed(transform, shot["quaternion"], tuple(a - b for a, b in zip(at, centre))),
+        )
+        scene.set_obstacle_material(made)
+        pictured.add(made)
+        return made
+
+    # The links of the shape package that ride a driven front door's leaves.
+    front_roles: set[str] = set()
+    # The way a side door opens in the machine's own frame, and the links
+    # of the shape package that are side doors: the one on the door's side
+    # rides the door, any other stands shut.
+    opens = (0.0, 0.0, 1.0) if lift else (0.0, 1.0, 0.0)
+    door_role = None
+    if drawn is not None:
+        door_role = next((role for role in (f"side_door_{door_side}", "side_door")
+                          if role in drawn.pictures), None)
+
+    def shut(role):
+        """What moves `role`'s picture from where the file drew it to shut."""
+        back = drawn.opened(role, opens)
+        return tuple(-back * v for v in opens)
 
     def glazed_leaf(group, leaf, width, height, at, side=False):
         # All dimensions derive from this leaf, including small custom doors.
@@ -6018,54 +6459,167 @@ def machine_tool(
     bed_h = min(0.60, th - 0.10)
     box("bed", (w - 2 * t, cd, bed_h), (0.0, y_c, bed_h / 2), MACHINE_BED, group="", finish=_CAST_METAL)
     box("column", (w, d - ls, h), (0.0, (y_r + d / 2) / 2, h / 2), color, group="")
-    box("top", (w, ls, t), (0.0, yc_wall, h - t / 2))
-    box("far", (t, ls, h), (-sx * (w / 2 - t / 2), yc_wall, h / 2))
+    if not open_top:
+        box("top", (w, ls, t), (0.0, yc_wall, h - t / 2))
+    box("far", (t, ls, eh), (-sx * (w / 2 - t / 2), yc_wall, eh / 2))
     # The door-side wall, around the opening (or solid, without a door).
     if door is None:
-        box("near", (t, ls, h), (sx * (w / 2 - t / 2), yc_wall, h / 2))
+        box("near", (t, ls, eh), (sx * (w / 2 - t / 2), yc_wall, eh / 2))
     else:
-        front_pier = (y_c - aw / 2) - y0
-        rear_pier = y_r - (y_c + aw / 2)
+        front_pier = (y_a - aw / 2) - y0
+        rear_pier = y_r - (y_a + aw / 2)
         xw = sx * (w / 2 - t / 2)
         box("near_sill", (t, ls, sill), (xw, yc_wall, sill / 2))
-        box("near_head", (t, ls, h - sill - ah), (xw, yc_wall, (sill + ah + h) / 2))
+        if eh - sill - ah > 1e-9:
+            box("near_head", (t, ls, eh - sill - ah), (xw, yc_wall, (sill + ah + eh) / 2))
         box("near_front", (t, front_pier, ah), (xw, y0 + front_pier / 2, sill + ah / 2))
         if rear_pier > 1e-9:
             box("near_rear", (t, rear_pier, ah), (xw, y_r - rear_pier / 2, sill + ah / 2))
     # The front wall, around the front door opening (or solid).
     if front_door is None:
-        box("front", (w, t, h), (0.0, y0 + t / 2, h / 2))
+        box("front", (w, t, eh), (0.0, y0 + t / 2, eh / 2))
     else:
         yf = y0 + t / 2
         box("front_sill", (w, t, fs), (0.0, yf, fs / 2))
-        box("front_head", (w, t, h - fs - fh), (0.0, yf, (fs + fh + h) / 2))
+        if eh - fs - fh > 1e-9:
+            box("front_head", (w, t, eh - fs - fh), (0.0, yf, (fs + fh + eh) / 2))
         pier = (w - fw) / 2
         for tag, sign in (("front_left", -1.0), ("front_right", 1.0)):
             box(tag, (pier, t, fh), (sign * (w / 2 - pier / 2), yf, fs + fh / 2))
-        front_leaf = box("leaf", (fw + 0.10, leaf_t, fh + 0.10), (0.0, y0 - 0.01 - leaf_t / 2, fs + fh / 2),
-                         color, group="front_door")
-        # The front door's closed switch: a sliver the shut leaf overlaps
-        # by 5 mm at its left edge — the confirmation the machine's program
-        # reads before it opens the side door (never both at once).
-        lx, ly = world(-(fw + 0.10) / 2 - 0.005, y0 - 0.01 - leaf_t / 2)
-        lane = f"{name}/front_door/closed"
-        scene.add_zone_sensor(lane, position=(lx, ly, z0 + fs + 0.10), size=(0.02, leaf_t + 0.02, 0.20),
-                              quaternion=q, watch=[front_leaf])
-        built.sensors.append(lane)
-        built.front_door_lane = lane
-        scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end="closed")
-        if mode == "full":
-            glazed_leaf("front_door", front_leaf, fw + 0.10, fh + 0.10,
-                        (0.0, y0 - 0.01 - leaf_t / 2, fs + fh / 2))
-            trim("front_door/handle", (0.016, 0.030, fh * 0.32),
-                 (fw / 2, y0 - 0.01 - leaf_t - 0.015, fs + fh / 2), DARK_STEEL, _PLASTIC)
+        yl_front = y0 - 0.01 - leaf_t / 2
+        if front_drive is None:
+            front_leaf = box("leaf", (fw + 0.10, leaf_t, fh + 0.10), (0.0, yl_front, fs + fh / 2),
+                             color, group="front_door")
+            # The front door's closed switch: a sliver the shut leaf overlaps
+            # by 5 mm at its left edge — the confirmation the machine's program
+            # reads before it opens the side door (never both at once).
+            lx, ly = world(-(fw + 0.10) / 2 - 0.005, yl_front)
+            lane = f"{name}/front_door/closed"
+            scene.add_zone_sensor(lane, position=(lx, ly, z0 + fs + 0.10), size=(0.02, leaf_t + 0.02, 0.20),
+                                  quaternion=q, watch=[front_leaf])
+            built.sensors.append(lane)
+            built.front_door_lane = lane
+            built.front_closed = (lane,)
+            scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end="closed")
+            if mode == "full":
+                glazed_leaf("front_door", front_leaf, fw + 0.10, fh + 0.10,
+                            (0.0, yl_front, fs + fh / 2))
+                trim("front_door/handle", (0.016, 0.030, fh * 0.32),
+                     (fw / 2, y0 - 0.01 - leaf_t - 0.015, fs + fh / 2), DARK_STEEL, _PLASTIC)
+        else:
+            # An automatic front door: two leaves that meet in the middle
+            # and part, each on an axis of its own with two named stops —
+            # their lanes are the limit switches, and what each drives is
+            # checked against every robot each tick.
+            leaf_w = (fw + 0.10) / 2
+            riders, slides, axes_made = [], [], []
+            for tag, sign in (("left", -1.0), ("right", 1.0)):
+                xl_front = sign * leaf_w / 2
+                leaf = box(f"leaf_{tag}", (leaf_w, leaf_t, fh + 0.10), (xl_front, yl_front, fs + fh / 2),
+                           color, group="front_door")
+                rides = [leaf]
+                role = f"front_door_{tag}"
+                if drawn is not None and role in drawn.pictures:
+                    # The leaf is what the package's door draws, shut where
+                    # the leaf stands shut whatever pose the file drew it in.
+                    back = drawn.opened(role, (sign, 0.0, 0.0))
+                    for i, shot in enumerate(drawn.pictures[role]):
+                        if i == 0:
+                            picture(role, shot, (-sign * back, 0.0, 0.0),
+                                    onto=(leaf, (xl_front, yl_front, fs + fh / 2)))
+                        else:
+                            rides.append(picture(f"{role}_{i}", shot, (-sign * back, 0.0, 0.0)))
+                    front_roles.add(role)
+                if mode == "full":
+                    rides.extend(glazed_leaf(f"front_door/{tag}", leaf, leaf_w, fh + 0.10,
+                                             (xl_front, yl_front, fs + fh / 2)))
+                slide = (sign * c, sign * s, 0.0)
+                axis = f"{name}/front_door/{tag}"
+                scene.add_linear_axis(axis, objects=rides, axis=slide, speed=front_rate,
+                                      range=(0.0, fw / 2), position=0.0,
+                                      stops={"closed": 0.0, "open": fw / 2})
+                built.devices.append(axis)
+                riders.append(tuple(rides))
+                slides.append(slide)
+                axes_made.append(axis)
+            built.front_doors = tuple(axes_made)
+            built.front_door_objects = tuple(riders)
+            built.front_door_axes = tuple(slides)
+            built.front_door_travel = fw / 2
+            built.front_closed = tuple(f"{axis}/closed" for axis in axes_made)
+            built.front_open = tuple(f"{axis}/open" for axis in axes_made)
+            built.front_door_lane = built.front_closed[0]
+            # Where a robot waits at the open front door: the centre of
+            # the opening, 150 mm outside the leaves.
+            fx_, fy_ = world(0.0, y0 - 0.01 - leaf_t - 0.15)
+            scene.add_frame(f"{name}/front_entry", position=(fx_, fy_, z0 + fs + fh / 2),
+                            quaternion=_mul_quat(q, _yaw_quat(-math.pi / 2)))
+            built.frames.append(f"{name}/front_entry")
 
     # ---- the table at the exchange position, and the head over it -------
-    box("saddle", (min(tw * 0.7, 0.45), min(td * 1.4, 0.55), th - plate - bed_h),
-        (tx_, ty_, (bed_h + th - plate) / 2), MACHINE_BED, group="", finish=_CAST_METAL)
-    box("table", (tw, td, plate), (tx_, ty_, th - plate / 2), TABLE_STEEL, group="", finish=_MACHINED_METAL)
-    box("head", (0.32, 0.42, h - t - th - hc), (0.0, y_c, (th + hc + h - t) / 2),
-        MACHINE_BED, group="", finish=_CAST_METAL)
+    if axes is None:
+        box("saddle", (min(tw * 0.7, 0.45), min(td * 1.4, 0.55), th - plate - bed_h),
+            (tx_, ty_, (bed_h + th - plate) / 2), MACHINE_BED, group="", finish=_CAST_METAL)
+        box("table", (tw, td, plate), (tx_, ty_, th - plate / 2), TABLE_STEEL, group="", finish=_MACHINED_METAL)
+        box("head", (0.32, 0.42, head_top - th - hc), (0.0, y_sp, (th + hc + head_top) / 2),
+            MACHINE_BED, group="", finish=_CAST_METAL)
+    else:
+        # The same three boxes as the links of a mechanism: the saddle on
+        # Y, the table on X over it, the head on Z — each frame where the
+        # link's work is done (the table's on its top, the head's on the
+        # spindle nose), each joint's value its axis's machine coordinate.
+        from ._core import Robot
+
+        rapid = _triple(axes.rapid)
+        saddle_h = th - plate - bed_h
+        head_h = head_top - th - hc
+        # A tool changer the picture draws is two more links of the
+        # mechanism, for the control to work at a tool change: the shuttle
+        # that slides to the spindle and the carousel that turns on it.
+        # Frames only — the changer is drawn, not checked.
+        changer = None if drawn is None else drawn.changer()
+        changing = [] if changer is None else [
+            ("tool_shuttle", "base", "tool_shuttle", changer["origin"], changer["axis"],
+             *changer["limits"], 0.3),
+            ("tool_carousel", "tool_shuttle", "tool_carousel", (0.0, 0.0, 0.0), changer["turn"],
+             None, None, 3.0),
+        ]
+        urdf = _axes_urdf(
+            f"{name}_axes".replace("/", "_"),
+            links=[
+                (link, size_, centre, None if drawn is not None and link in drawn.pictures else colour)
+                for link, size_, centre, colour in (
+                    ("saddle", (min(tw * 0.7, 0.45), min(td * 1.4, 0.55), saddle_h),
+                     (0.0, 0.0, bed_h + saddle_h / 2), MACHINE_BED),
+                    ("table", (tw, td, plate), (0.0, 0.0, -plate / 2), TABLE_STEEL),
+                    ("head", (0.32, 0.42, head_h), (0.0, 0.0, head_h / 2), MACHINE_BED),
+                )
+            ] + [(joint[2], None, None, None) for joint in changing],
+            joints=[
+                ("y", "base", "saddle", (0.0, y_home, 0.0), _AXIS_DIRECTIONS[1], -strokes[1], 0.0, rapid[1]),
+                ("x", "saddle", "table", (x_home, 0.0, th), _AXIS_DIRECTIONS[0], -strokes[0], 0.0, rapid[0]),
+                ("z", "base", "head", (0.0, y_sp, th + hc), _AXIS_DIRECTIONS[2], -strokes[2], 0.0, rapid[2]),
+                *changing,
+            ],
+        )
+        mechanism = scene.add_robot(Robot.from_urdf_string(urdf), name=f"{name}/axes",
+                                    base_position=(x, y, z0), base_quaternion=q)
+        order = scene.robot_of(mechanism).joint_names
+        scene.set_joint_positions([dict(zip("xyz", park)).get(joint, 0.0) for joint in order], robot=mechanism)
+        # The saddle rides the bed, and under a roof the head stands up to
+        # it at home: contacts by construction, declared rather than found.
+        scene.allow_link_obstacle_contact("saddle", f"{name}/bed", robot=mechanism)
+        if not open_top:
+            scene.allow_link_obstacle_contact("head", f"{name}/shell/top", robot=mechanism)
+        scene.define_nc_machine(
+            mechanism, axes=("x", "y", "z"), max_feed=float(axes.max_feed),
+            acceleration=_triple(axes.acceleration), tool_change_s=float(axes.tool_change_s),
+            spindle_max_rpm=axes.spindle_max_rpm,
+            changer=None if changer is None else (*_SHAPE_CHANGER, changer["pockets"]),
+        )
+        built.axes = mechanism
+        built.park = park
+        built.changer = None if changer is None else _SHAPE_CHANGER
     tx, ty = world(tx_, ty_)
     scene.add_frame(f"{name}/table", position=(tx, ty, z0 + th), quaternion=q)
     built.frames.append(f"{name}/table")
@@ -6073,16 +6627,27 @@ def machine_tool(
     # ---- the side door ----------------------------------------------------
     if door is not None:
         xl = sx * (w / 2 + 0.01 + leaf_t / 2)
-        zl = sill + ah / 2
-        leaf = box("leaf", (leaf_t, 2 * half, ah + 2 * over), (xl, y_c, zl), color, group="side_door")
+        # A sliding leaf laps the opening all round; a lifting one rests
+        # on the sill, so what it leaves clear starts at the sill.
+        leaf_h = ah + over if lift else ah + 2 * over
+        zl = sill + leaf_h / 2 if lift else sill + ah / 2
+        leaf = box("leaf", (leaf_t, 2 * half, leaf_h), (xl, y_a, zl), color, group="side_door")
         built.door_objects.append(leaf)
+        if door_role is not None:
+            # The leaf is what the package's door draws: the first gprim
+            # is bound to it, any more ride beside it.
+            for i, shot in enumerate(drawn.pictures[door_role]):
+                if i == 0:
+                    picture(door_role, shot, shut(door_role), onto=(leaf, (xl, y_a, zl)))
+                else:
+                    built.door_objects.append(picture(f"{door_role}_{i}", shot, shut(door_role)))
         # The handle: a vertical bar standing 90 mm off the leaf's outer
         # face at its front edge, 200 mm above the sill — decoration a
         # gripper closes on (never collided), and far enough out for one
         # to close on it with its knuckles clear of the leaf. The frame
         # is the bar's centre, +Z into the leaf.
         xh = xl + sx * (leaf_t / 2 + 0.090)
-        yh = y_c - aw / 2
+        yh = y_a - aw / 2
         zh = sill + 0.20
         hx, hy = world(xh, yh)
         built.door_objects.append(
@@ -6099,21 +6664,29 @@ def machine_tool(
         scene.add_frame(f"{name}/door/side/handle", position=(hx, hy, z0 + zh), quaternion=q_handle)
         built.frames.append(f"{name}/door/side/handle")
         if mode == "full":
-            built.door_objects.extend(glazed_leaf("side_door", leaf, 2 * half, ah + 2 * over,
-                                                  (xl, y_c, zl), side=True))
-            for tag, dz in (("rail_top", ah / 2 + over + 0.02), ("rail_bottom", -(ah / 2 + over + 0.02))):
-                rx, ry = world(sx * (w / 2 + 0.01 + leaf_t / 2), y_c + travel / 2)
-                _trim(scene, built, f"{name}/side_door/{tag}", (0.015, 2 * half + travel, 0.03),
-                      (rx, ry, z0 + zl + dz), q, DARK_STEEL, finish=_MACHINED_METAL)
+            built.door_objects.extend(glazed_leaf("side_door", leaf, 2 * half, leaf_h,
+                                                  (xl, y_a, zl), side=True))
+            if lift:
+                # The guides a lifting leaf runs in, either side of it.
+                for tag, dy in (("rail_front", -(half + 0.02)), ("rail_rear", half + 0.02)):
+                    rx, ry = world(xl, y_a + dy)
+                    _trim(scene, built, f"{name}/side_door/{tag}", (0.015, 0.03, leaf_h + travel),
+                          (rx, ry, z0 + zl + travel / 2), q, DARK_STEEL, finish=_MACHINED_METAL)
+            else:
+                for tag, dz in (("rail_top", ah / 2 + over + 0.02), ("rail_bottom", -(ah / 2 + over + 0.02))):
+                    rx, ry = world(xl, y_a + travel / 2)
+                    _trim(scene, built, f"{name}/side_door/{tag}", (0.015, 2 * half + travel, 0.03),
+                          (rx, ry, z0 + zl + dz), q, DARK_STEEL, finish=_MACHINED_METAL)
+        slide = (0.0, 0.0, 1.0) if lift else (-s, c, 0.0)
         built.door_travel = travel
-        built.door_axis = (-s, c, 0.0)
+        built.door_axis = slide
         if door != "manual":
             # A driven door is an axis with two named stops: their lanes
             # `<axis>/closed` and `<axis>/open` are the limit switches an
             # interlock waits on, and what the axis drives is checked
             # against every robot each tick.
             axis = f"{name}/side_door"
-            scene.add_linear_axis(axis, objects=list(built.door_objects), axis=(-s, c, 0.0),
+            scene.add_linear_axis(axis, objects=list(built.door_objects), axis=slide,
                                   speed=float(speed), range=(0.0, travel), position=0.0,
                                   stops={"closed": 0.0, "open": travel})
             built.devices.append(axis)
@@ -6124,17 +6697,28 @@ def machine_tool(
             # the leaf overlaps by 5 mm at each end of its stroke, are the
             # closed and open limit switches.
             lanes = []
-            for tag, yz in (("closed", y_c - half - 0.005), ("open", y_c + travel + half + 0.005)):
-                zx, zy = world(xl, yz)
+            for tag, end in (("closed", -1.0), ("open", 1.0)):
+                # 5 mm past the leaf's trailing edge where it stands shut,
+                # and past its leading edge where it stands open.
+                reach = (leaf_h if lift else 2 * half) / 2 + 0.005 + (travel if end > 0 else 0.0)
+                if lift:
+                    zx, zy = world(xl, y_a)
+                    at, size = (zx, zy, z0 + zl + end * reach), (leaf_t + 0.02, 0.20, 0.02)
+                else:
+                    zx, zy = world(xl, y_a + end * reach)
+                    at, size = (zx, zy, z0 + zl), (leaf_t + 0.02, 0.02, 0.20)
                 lane = f"{name}/side_door/{tag}"
-                scene.add_zone_sensor(lane, position=(zx, zy, z0 + zl), size=(leaf_t + 0.02, 0.02, 0.20),
+                scene.add_zone_sensor(lane, position=at, size=size,
                                       quaternion=q, watch=[leaf])
                 built.sensors.append(lane)
                 lanes.append(lane)
                 scene.set_part(lane, kind="sensor", category="sensor.limit_switch", end=tag)
             built.door_lanes = (lanes[0], lanes[1])
-        ex_, ey_ = world(sx * (w / 2 + 0.01 + leaf_t + 0.15), y_c)
-        scene.add_frame(f"{name}/entry", position=(ex_, ey_, z0 + zl), quaternion=q)
+        ex_, ey_ = world(sx * (w / 2 + 0.01 + leaf_t + 0.15), y_a)
+        # What the open door leaves clear: the whole opening, or the part
+        # of it under a leaf that lifts less than the opening is tall.
+        clear = min(ah, travel) if lift else ah
+        scene.add_frame(f"{name}/entry", position=(ex_, ey_, z0 + sill + clear / 2), quaternion=q)
         built.frames.append(f"{name}/entry")
 
     # ---- the operator panel -------------------------------------------------
@@ -6153,7 +6737,7 @@ def machine_tool(
                                   buttons=keys, pitch=panel_pitch, button_model=button_models or None,
                                   manufacturer=manufacturer if button_models else None, detail=mode)
         else:
-            gap = (y_c - aw / 2) - y0
+            gap = (y_a - aw / 2) - y0
             width = min(0.24, gap - 0.04)
             px, py = world(sx * (w / 2 + 0.015 + 0.005), y0 + gap / 2)
             made = operator_panel(scene, f"{name}/panel", (px, py, z0 + 1.30), yaw=yaw + sx * math.pi / 2,
@@ -6190,15 +6774,47 @@ def machine_tool(
             xs = sign * (w / 2 + seam / 2)
             trim(f"trim/{tag}_skirt", (seam, d, skirt), (xs, 0, skirt / 2), DARK_STEEL)
         bx, by = world(0.0, y0 - 0.005)
-        _trim(scene, built, f"{name}/trim/band", (w, 0.01, 0.06), (bx, by, z0 + h - 0.10),
+        _trim(scene, built, f"{name}/trim/band", (w, 0.01, 0.06), (bx, by, z0 + eh - 0.10),
               q, MACHINE_ACCENT, finish=_PAINT)
         mx, my = world(sx * (w / 2 - 0.15), y0 + 0.15)
         _trim_cylinder(scene, built, f"{name}/trim/mast", 0.012, 0.10,
-                       (mx, my, z0 + h + 0.05), q, DARK_STEEL, finish=_PAINT)
+                       (mx, my, z0 + eh + 0.05), q, DARK_STEEL, finish=_PAINT)
         for i, (tag, colour) in enumerate((("green", (0.023, 0.332, 0.061)), ("amber", (0.686, 0.323, 0.005)),
                                            ("red", (0.578, 0.018, 0.012)))):
             _trim_cylinder(scene, built, f"{name}/trim/light_{tag}", 0.03, 0.06,
-                           (mx, my, z0 + h + 0.13 + 0.06 * i), q, colour, finish=_GLOSS)
+                           (mx, my, z0 + eh + 0.13 + 0.06 * i), q, colour, finish=_GLOSS)
+
+    # ---- the maker's geometry over the envelopes ---------------------------------
+    if drawn is not None:
+        # Everything built above is what the cell is verified against and
+        # stays collided; what is seen from here on is the package.
+        for made in built.obstacles:
+            if made not in pictured:
+                scene.set_obstacle_visible(made, False)
+        # The file stands at machine home: the table's picture goes with
+        # the table to the exchange position, the saddle's with its Y.
+        ride = {"table": (tx_ - x_home, ty_ - y_home, 0.0), "saddle": (0.0, ty_ - y_home, 0.0)}
+        footprint = False
+        for role, shots in drawn.pictures.items():
+            if (role == door_role and door is not None) or role in front_roles:
+                continue   # on the leaf already
+            for i, shot in enumerate(shots):
+                tag = role if i == 0 else f"{role}_{i}"
+                if role in _SHAPE_AXES or (role in _SHAPE_CHANGER and built.changer):
+                    made = picture(tag, shot, ride.get(role, (0.0, 0.0, 0.0)))
+                    scene.attach(made, link=role, robot=built.axes)
+                elif role.startswith("side_door"):
+                    picture(tag, shot, shut(role))
+                elif not footprint:
+                    # The first picture that stands still — the body's — is
+                    # bound to a box the size of the machine, so a plan
+                    # view still shows the footprint.
+                    footprint = True
+                    bx, by = world(0.0, 0.0)
+                    carrier = _trim(scene, built, f"{name}/shape/{tag}", (w, d, h), (bx, by, z0 + h / 2), q)
+                    picture(tag, shot, onto=(carrier, (0.0, 0.0, h / 2)))
+                else:
+                    picture(tag, shot)
 
     # ---- the identity ---------------------------------------------------------
     figures = {
@@ -6210,8 +6826,21 @@ def machine_tool(
         "drive": door,
         "opening_mm": f"{aw * 1e3:.0f}x{ah * 1e3:.0f}",
         "stroke_mm": round(travel * 1e3, 1),
+        **({"slide": "up"} if lift else {}),
         **({"open_s": round(travel / speed, 3)} if built.door else {}),
     }
+
+    def front_article() -> None:
+        """The automatic front door on the bill: each leaf's axis is a
+        door row — an option to order, with no number here to order it
+        by, so the rows stand unidentified until somebody pins one."""
+        for axis, tag in zip(built.front_doors, ("left", "right")):
+            scene.set_part(
+                axis, kind="device", category="machine_tool.door",
+                description=f"automatic front door, {tag} leaf",
+                drive=front_drive, opening_mm=f"{fw * 1e3:.0f}x{fh * 1e3:.0f}",
+                stroke_mm=round(fw / 2 * 1e3, 1), open_s=round(fw / 2 / front_rate, 3),
+            )
     if spec is None:
         scene.set_part(
             name, kind="group", category="machine_tool.vmc",
@@ -6226,6 +6855,7 @@ def machine_tool(
                 kind="device" if built.door else "group", category="machine_tool.door",
                 **door_figures,
             )
+        front_article()
         return built
     built.interface = spec.interface
     recorded = {key: str(_plain(value)) for key, value in {**params, **spec.specs()}.items()}
@@ -6254,6 +6884,20 @@ def machine_tool(
             catalog=spec.catalog_ref, manufacturer=manufacturer,
             model=spec.part_number("panel", **params), buttons=float(len(built.buttons)),
         )
+    if spec.has_component("door_switch"):
+        # The doors' limit switches are the machine's own articles, like
+        # the panel's buttons: a pack that names them names their rows.
+        for lane in built.sensors:
+            part = scene.part(lane) or {}
+            if part.get("category") != "sensor.limit_switch":
+                continue
+            scene.set_part(
+                lane, kind="sensor", category=spec.category("door_switch", "sensor.limit_switch"),
+                catalog=spec.catalog_ref, manufacturer=manufacturer,
+                model=spec.part_number("door_switch", **params), qty=int(part.get("qty") or 1),
+                attributes=dict(part.get("attributes") or {}),
+            )
+    front_article()
     return built
 
 

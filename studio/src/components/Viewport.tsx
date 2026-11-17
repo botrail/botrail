@@ -40,6 +40,7 @@ import { IoOverlay } from "./IoOverlay";
 import { BomOverlay } from "./BomOverlay";
 import { IoTopologyOverlay } from "./IoTopologyOverlay";
 import { LadderOverlay } from "./LadderChart";
+import { NcOverlay } from "./NcOverlay";
 import { SfcOverlay } from "./SfcChart";
 import { TimelineDock } from "./TimelineDock";
 import { UsdRobotView } from "./UsdRobotView";
@@ -262,6 +263,7 @@ export function Viewport() {
       <IoOverlay />
       <BomOverlay />
       <RoutingOverlay />
+      <NcOverlay />
       <IoTopologyOverlay />
       <LegendHud />
       <TimelineDock />

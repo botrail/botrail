@@ -30,6 +30,16 @@ struct Robot {
     inner: Arc<RobotModel>,
 }
 
+impl Robot {
+    /// Every link's pose in the root frame, the joints at `positions` or
+    /// all at zero.
+    fn fk(&self, positions: Option<Vec<f64>>) -> PyResult<Vec<nalgebra::Isometry3<f64>>> {
+        let q = positions.unwrap_or_else(|| vec![0.0; self.inner.dof()]);
+        botrail_kin::forward_kinematics(&self.inner, &q)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
 #[pymethods]
 impl Robot {
     fn _mounting_report_json(&self) -> String {
@@ -276,6 +286,63 @@ impl Robot {
     #[getter]
     fn link_names(&self) -> Vec<String> {
         self.inner.links.iter().map(|l| l.name.clone()).collect()
+    }
+
+    /// Where every link's frame stands with the joints at `positions` (all
+    /// at zero without), in the robot's root frame: `{link: (position,
+    /// quaternion_xyzw)}`.
+    #[pyo3(signature = (positions=None))]
+    fn link_poses(
+        &self,
+        positions: Option<Vec<f64>>,
+    ) -> PyResult<BTreeMap<String, hub::PoseArrays>> {
+        let poses = self.fk(positions)?;
+        Ok(self
+            .inner
+            .links
+            .iter()
+            .zip(&poses)
+            .map(|(link, pose)| (link.name.clone(), pose_arrays(pose)))
+            .collect())
+    }
+
+    /// What each link is drawn from, with the joints at `positions` (all at
+    /// zero without): one entry per visual shape — its `link`, where the
+    /// shape stands in the robot's root frame (`position`, `quaternion`
+    /// xyzw) and, for a robot read from USD, the gprim it is drawn from as
+    /// `asset = (file, prim path, transform)` — the arguments of
+    /// `Scene.set_obstacle_visual_asset`, so the picture of a link can be
+    /// bound to something else that stands where the link does. `asset` is
+    /// `None` for a primitive or a mesh file (a URDF robot).
+    #[pyo3(signature = (positions=None))]
+    fn visuals<'py>(
+        &self,
+        py: Python<'py>,
+        positions: Option<Vec<f64>>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let poses = self.fk(positions)?;
+        let mut out = Vec::new();
+        for (link, pose) in self.inner.links.iter().zip(&poses) {
+            for shape in &link.visuals {
+                let (position, quaternion) = pose_arrays(&(pose * shape.origin));
+                let d = PyDict::new(py);
+                d.set_item("link", &link.name)?;
+                d.set_item("position", position)?;
+                d.set_item("quaternion", quaternion)?;
+                d.set_item(
+                    "asset",
+                    shape.visual_asset.as_ref().map(|asset| {
+                        (
+                            asset.path.to_string_lossy().into_owned(),
+                            asset.prim_path.clone(),
+                            asset.transform.to_vec(),
+                        )
+                    }),
+                )?;
+                out.push(d);
+            }
+        }
+        Ok(out)
     }
 
     /// Default end-effector link name: the TCP declared by a tool
@@ -608,6 +675,136 @@ impl Robot {
             self.inner.links.len()
         )
     }
+}
+
+/// What a machining pass takes besides the cell: how fine to cut and how
+/// often to look.
+#[derive(Clone, Copy)]
+struct MachiningArgs {
+    tolerance: f64,
+    chord_tolerance: f64,
+    max_deviation: f64,
+    tile_size: Option<f64>,
+    dt: f64,
+    stage_period: f64,
+    max_stages: usize,
+}
+
+/// Runs the machining pass of `nc_cut` with names resolved: the machine
+/// by its robot's name, the spindle by its link's, the design model by
+/// its file.
+#[allow(clippy::too_many_arguments)]
+fn run_machining(
+    scene: &botrail_scene::Scene,
+    timeline: &botrail_scene::rollout::SequenceTimeline,
+    stock: &str,
+    machine: &str,
+    spindle_link: &str,
+    fixtures: &[String],
+    design: Option<&Path>,
+    args: MachiningArgs,
+) -> PyResult<(usize, usize, botrail_scene::nc_cut::Machining)> {
+    let index = scene
+        .robot_index(machine)
+        .ok_or_else(|| PyValueError::new_err(format!("unknown robot `{machine}`")))?;
+    let spindle = resolve_link(&scene.robots()[index].model, Some(spindle_link))?;
+    let model = design
+        .map(|path| {
+            botrail_mesh::load_path(path)
+                .map_err(|e| PyValueError::new_err(format!("design model {}: {e}", path.display())))
+        })
+        .transpose()?;
+    let options = botrail_scene::nc_cut::MachiningOptions {
+        chord_tolerance: args.chord_tolerance,
+        max_deviation: args.max_deviation,
+        tile_size: args.tile_size,
+        dt: args.dt,
+        stage_period: args.stage_period,
+        max_stages: args.max_stages,
+        ..botrail_scene::nc_cut::MachiningOptions::default()
+    };
+    let result = botrail_scene::nc_cut::machine_stock(
+        scene,
+        timeline,
+        stock,
+        index,
+        spindle,
+        fixtures,
+        model.as_ref().map(|m| (m, args.tolerance)),
+        &options,
+    )
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok((index, spindle, result))
+}
+
+/// A machining pass's result as the dict `bt.nc` reads.
+fn machining_report<'py>(
+    py: Python<'py>,
+    result: &botrail_scene::nc_cut::Machining,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item(
+        "carve",
+        Py::new(
+            py,
+            StockCarve {
+                inner: result.carve.clone(),
+            },
+        )?,
+    )?;
+    d.set_item("initial_volume", result.carve.initial_volume)?;
+    d.set_item("removed_volume", result.carve.removed_volume)?;
+    d.set_item("remaining_volume", result.carve.remaining_volume)?;
+    let issues: Vec<_> = result
+        .issues
+        .iter()
+        .map(|issue| {
+            (
+                issue.kind.as_str(),
+                issue.program.clone(),
+                issue.line,
+                issue.tool,
+                issue.time,
+                issue.volume,
+                issue.what.clone(),
+            )
+        })
+        .collect();
+    d.set_item("issues", issues)?;
+    let lines: Vec<_> = result
+        .lines
+        .iter()
+        .map(|line| (line.program.clone(), line.line, line.tool, line.volume))
+        .collect();
+    d.set_item("lines", lines)?;
+    d.set_item("cut_span", result.cut_span)?;
+    let tools: Vec<_> = result
+        .tools
+        .iter()
+        .map(|span| (span.tool, span.from, span.to))
+        .collect();
+    d.set_item("tools", tools)?;
+    let changes: Vec<_> = result
+        .changes
+        .iter()
+        .map(|change| (change.tool, change.start, change.end))
+        .collect();
+    d.set_item("changes", changes)?;
+    d.set_item("unbodied", result.unbodied.clone())?;
+    d.set_item("stages", result.stages.len())?;
+    match &result.design {
+        Some(check) => {
+            let design = PyDict::new(py);
+            design.set_item("tolerance", check.tolerance)?;
+            design.set_item("excess_volume", check.excess_volume)?;
+            design.set_item("gouge_volume", check.gouge_volume)?;
+            design.set_item("excess_bounds", check.excess_bounds)?;
+            design.set_item("gouge_bounds", check.gouge_bounds)?;
+            d.set_item("design", design)?;
+        }
+        None => d.set_item("design", py.None())?,
+    }
+    Ok(d)
 }
 
 fn resolve_link(model: &RobotModel, link: Option<&str>) -> PyResult<usize> {
@@ -6255,6 +6452,387 @@ impl Scene {
         self.hub.toolpath_names()
     }
 
+    // ---------------------------------------------------------- NC machines
+
+    /// Declares robot `robot` as a machine tool's axes — its control, as
+    /// far as running a part program needs it. `axes` names the joints of
+    /// X, Y and Z: a joint's value is that axis's machine coordinate, its
+    /// limits the travel, its velocity limit the rapid rate. `max_feed`
+    /// (m/s) and `acceleration` (m/s², one figure or one per axis) are
+    /// the rates the model does not carry; `junction_deviation` (m) is
+    /// how far a cutting path may round a corner, which sets the speed
+    /// the corner is taken at; `tool_change_s` the changer's tool-to-tool
+    /// time; an `S` word past `spindle_max_rpm` is refused.
+    ///
+    /// `changer` — `(shuttle, carousel, pockets)` — names two more joints
+    /// of the robot as an umbrella tool changer the control works at each
+    /// tool change: the shuttle (prismatic: its lower limit is rest, its
+    /// upper the spindle) runs in, the carousel (continuous: at 0 pocket 1
+    /// is at the spindle's side, pocket `n` is `n - 1` pockets further
+    /// round its positive turn) turns the next tool's pocket to the
+    /// spindle, and the shuttle runs out, within `tool_change_s`. Tool `n`
+    /// lives in pocket `n`. It is drawn, not checked.
+    ///
+    /// The robot stops being an arm: no controller on the bill, no reach
+    /// on the layout sheet. Declaring it again replaces the control —
+    /// with empty work-offset and tool tables.
+    #[pyo3(signature = (robot, axes, max_feed, acceleration, tool_change_s = 0.0, junction_deviation = 5e-5, spindle_max_rpm = None, changer = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn define_nc_machine(
+        &self,
+        robot: &str,
+        axes: (String, String, String),
+        max_feed: f64,
+        acceleration: Bound<'_, PyAny>,
+        tool_change_s: f64,
+        junction_deviation: f64,
+        spindle_max_rpm: Option<f64>,
+        changer: Option<(String, String, u32)>,
+    ) -> PyResult<()> {
+        let acceleration: [f64; 3] = match acceleration.extract::<f64>() {
+            Ok(a) => [a; 3],
+            Err(_) => {
+                let (x, y, z): (f64, f64, f64) = acceleration.extract().map_err(|_| {
+                    PyValueError::new_err("acceleration is one figure or (x, y, z), in m/s²")
+                })?;
+                [x, y, z]
+            }
+        };
+        self.hub
+            .define_nc_machine(botrail_scene::nc::NcMachine {
+                robot: robot.to_string(),
+                axes: [axes.0, axes.1, axes.2],
+                max_feed,
+                acceleration,
+                junction_deviation,
+                tool_change_s,
+                spindle_max_rpm,
+                work_offsets: Default::default(),
+                tools: Default::default(),
+                m_codes: Default::default(),
+                changer: changer.map(
+                    |(shuttle, carousel, pockets)| botrail_scene::nc::NcChanger {
+                        shuttle,
+                        carousel,
+                        pockets,
+                    },
+                ),
+            })
+            .map_err(PyValueError::new_err)
+    }
+
+    fn remove_nc_machine(&self, robot: &str) -> PyResult<()> {
+        if !self.hub.remove_nc_machine(robot) {
+            return Err(PyValueError::new_err(format!(
+                "`{robot}` is not an NC machine"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The robots declared as NC machines.
+    #[getter]
+    fn nc_machine_names(&self) -> Vec<String> {
+        self.hub.nc_machine_names()
+    }
+
+    /// A machine's control as a dict: `axes` (the X, Y, Z joints),
+    /// `travel` (each axis's `(low, high)` in machine coordinates, m),
+    /// `rapid` (m/s per axis), `max_feed`, `acceleration`,
+    /// `junction_deviation`, `tool_change_s`, `spindle_max_rpm`, and the
+    /// three tables — `work_offsets` (`{"G54": (x, y, z)}`), `tools`
+    /// (`{number: {"length": …, "diameter": …}}`) and `m_codes`
+    /// (`{180: "window open"}`: the M codes that are the machine's to
+    /// carry out, see `set_nc_m_code`) — and `changer`, the tool changer
+    /// the control works (`{"shuttle": …, "carousel": …, "pockets": …,
+    /// "reach": (rest, at the spindle)}`), `None` without one.
+    fn nc_machine<'py>(
+        &self,
+        py: Python<'py>,
+        robot: &str,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let machine = self
+            .hub
+            .nc_machine(robot)
+            .ok_or_else(|| PyValueError::new_err(format!("`{robot}` is not an NC machine")))?;
+        let (_, _, axes) = self.hub.nc_axes(&machine).map_err(PyValueError::new_err)?;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item(
+            "axes",
+            (&machine.axes[0], &machine.axes[1], &machine.axes[2]),
+        )?;
+        let travel: Vec<(f64, f64)> = (0..3).map(|i| (axes.lower[i], axes.upper[i])).collect();
+        d.set_item("travel", (travel[0], travel[1], travel[2]))?;
+        d.set_item("rapid", (axes.rapid[0], axes.rapid[1], axes.rapid[2]))?;
+        d.set_item("max_feed", machine.max_feed)?;
+        let a = machine.acceleration;
+        d.set_item("acceleration", (a[0], a[1], a[2]))?;
+        d.set_item("junction_deviation", machine.junction_deviation)?;
+        d.set_item("tool_change_s", machine.tool_change_s)?;
+        d.set_item("spindle_max_rpm", machine.spindle_max_rpm)?;
+        let offsets = pyo3::types::PyDict::new(py);
+        for (name, xyz) in &machine.work_offsets {
+            offsets.set_item(name, (xyz[0], xyz[1], xyz[2]))?;
+        }
+        d.set_item("work_offsets", offsets)?;
+        let tools = pyo3::types::PyDict::new(py);
+        for (number, tool) in &machine.tools {
+            let entry = pyo3::types::PyDict::new(py);
+            entry.set_item("length", tool.length)?;
+            entry.set_item("diameter", tool.diameter)?;
+            let body = match &tool.body {
+                Some(body) => json_to_py(
+                    py,
+                    &serde_json::to_value(body).expect("a tool body serializes"),
+                )?,
+                None => py.None(),
+            };
+            entry.set_item("body", body)?;
+            tools.set_item(number, entry)?;
+        }
+        d.set_item("tools", tools)?;
+        let m_codes = pyo3::types::PyDict::new(py);
+        for (code, what) in &machine.m_codes {
+            m_codes.set_item(code, what)?;
+        }
+        d.set_item("m_codes", m_codes)?;
+        match (
+            &machine.changer,
+            self.hub
+                .nc_changer(&machine)
+                .map_err(PyValueError::new_err)?,
+        ) {
+            (Some(changer), Some((_, _, reach))) => {
+                let entry = pyo3::types::PyDict::new(py);
+                entry.set_item("shuttle", &changer.shuttle)?;
+                entry.set_item("carousel", &changer.carousel)?;
+                entry.set_item("pockets", changer.pockets)?;
+                entry.set_item("reach", (reach[0], reach[1]))?;
+                d.set_item("changer", entry)?;
+            }
+            _ => d.set_item("changer", py.None())?,
+        }
+        Ok(d)
+    }
+
+    /// Enters an M code in a machine's M-code table: a function that is
+    /// the machine's to carry out, not the control's — a door, a vise, a
+    /// relay that calls a robot and waits for its M-FIN — with `what` it
+    /// does, in words. The control then stops at it instead of refusing
+    /// it: the program is read in **blocks**, the stretches between two
+    /// such codes (`nc_blocks`), and what happens at the code is a step of
+    /// the machine's own program (`bt.nc.sequence` writes both). `None`
+    /// clears the entry. The codes the control carries out itself (`M3`,
+    /// `M6`, `M30`…) cannot be entered.
+    #[pyo3(signature = (machine, code, what))]
+    fn set_nc_m_code(&self, machine: &str, code: u32, what: Option<String>) -> PyResult<()> {
+        self.hub
+            .set_nc_m_code(machine, code, what)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// The blocks of part program `program` on `machine`: what its control
+    /// runs on its own, in order, each ending on the machine function it
+    /// stops at. One dict per block: `lines` — `(first, last)` source line
+    /// of what it does, `None` when it does nothing (two machine functions
+    /// in a row); `moves` — whether the axes move in it; `spindle` —
+    /// whether the spindle turns at any time in it; `at` — where the axes
+    /// stand as it ends (machine coordinates); and `end` — `"function"`
+    /// (with `code` and `line`), `"end"` (`M30`), `"repeat"` (`M99`: the
+    /// program starts over) or `"text"` (the text ran out). Read from the
+    /// axes standing at `start` (the robot's joint vector; the scene's own
+    /// when not given); what the control cannot read is a `ValueError`
+    /// naming the line.
+    #[pyo3(signature = (machine, program, start = None))]
+    fn nc_blocks<'py>(
+        &self,
+        py: Python<'py>,
+        machine: &str,
+        program: &str,
+        start: Option<Vec<f64>>,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        use botrail_scene::nc::NcEnd;
+        let blocks = self
+            .hub
+            .nc_outline(machine, program, start.as_deref())
+            .map_err(PyValueError::new_err)?;
+        blocks
+            .iter()
+            .map(|block| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("lines", block.lines.map(|[a, b]| (a, b)))?;
+                d.set_item("moves", block.moves)?;
+                d.set_item("spindle", block.spindle)?;
+                d.set_item("at", (block.at[0], block.at[1], block.at[2]))?;
+                let (end, code) = match block.ends {
+                    NcEnd::Function { code, .. } => ("function", Some(code)),
+                    NcEnd::End { .. } => ("end", None),
+                    NcEnd::Repeat { .. } => ("repeat", None),
+                    NcEnd::Text => ("text", None),
+                };
+                d.set_item("end", end)?;
+                d.set_item("code", code)?;
+                d.set_item("line", block.ends.line())?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    /// Enters a work offset in a machine's table: `name` is `"G54"`…
+    /// `"G59"` or `"G154 P<n>"`, `xyz` the machine coordinates of the
+    /// work zero (m). `None` clears it.
+    #[pyo3(signature = (machine, name, xyz))]
+    fn set_work_offset(
+        &self,
+        machine: &str,
+        name: &str,
+        xyz: Option<(f64, f64, f64)>,
+    ) -> PyResult<()> {
+        self.hub
+            .set_work_offset(machine, name, xyz.map(|(x, y, z)| [x, y, z]))
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Enters tool `number` in a machine's tool table: `length` is gauge
+    /// line to tip (m) — what `G43 H<number>` adds to Z — and `diameter`
+    /// the cutter's, where it is known. `body` is the tool that is
+    /// actually in the pocket, as JSON (`cutter`: `flat` | `ball` |
+    /// `bull_nose` | `drill`, `diameter`, `flute_length`, `length`, and
+    /// optionally `corner_radius`, `shank_diameter`, `holder` =
+    /// `[diameter, length]`) — what `bt.nc.set_tool` writes: what cuts the
+    /// stock, and what must not touch it. Without `length` the entry is
+    /// cleared.
+    #[pyo3(signature = (machine, number, length = None, diameter = None, body = None))]
+    fn set_nc_tool(
+        &self,
+        machine: &str,
+        number: u32,
+        length: Option<f64>,
+        diameter: Option<f64>,
+        body: Option<&str>,
+    ) -> PyResult<()> {
+        let body: Option<botrail_scene::nc::NcToolBody> = body
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| PyValueError::new_err(format!("tool {number}: body: {e}")))?;
+        let tool = length.map(|length| botrail_scene::nc::NcTool {
+            length,
+            diameter,
+            body,
+        });
+        self.hub
+            .set_nc_tool(machine, number, tool)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Adds or replaces a part program (keyed by name) — the text a CAM
+    /// post writes. It is read when it runs (`bt.seq.run_program`) or is
+    /// planned (`plan_nc_program`), against the machine it runs on.
+    fn add_nc_program(&self, name: &str, text: &str) {
+        self.hub.add_nc_program(botrail_scene::nc::NcProgram {
+            name: name.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    fn remove_nc_program(&self, name: &str) -> PyResult<()> {
+        if !self.hub.remove_nc_program(name) {
+            return Err(PyValueError::new_err(format!(
+                "unknown NC program `{name}`"
+            )));
+        }
+        Ok(())
+    }
+
+    #[getter]
+    fn nc_program_names(&self) -> Vec<String> {
+        self.hub.nc_program_names()
+    }
+
+    /// The text of a part program.
+    fn nc_program(&self, name: &str) -> PyResult<String> {
+        self.hub
+            .nc_program(name)
+            .ok_or_else(|| PyValueError::new_err(format!("unknown NC program `{name}`")))
+    }
+
+    /// Reads part program `program` the way `machine`'s control would run
+    /// it — against its work offsets and tool table, from the axes
+    /// standing at `start` (the robot's joint vector; the scene's own
+    /// when not given) — and times it by the machine's rates. Nothing in
+    /// the scene moves. What the control cannot read is a `ValueError`
+    /// that names the line: a word it does not know, an offset or a tool
+    /// nobody entered, a point past an axis's travel.
+    ///
+    /// Returns a dict: `duration`, and its parts `cutting_time`,
+    /// `rapid_time`, `pause_time` (dwells and tool changes);
+    /// `cutting_distance`, `rapid_distance` (m); `tool_changes`; `lower`
+    /// / `upper` (the box the axes sweep) and `end`, machine coordinates;
+    /// `warnings`; `spans` — `(start, end, line)` per source line in
+    /// order; `events` — `(t, line, what, value)` with `what` one of
+    /// `"spindle"` (rev/min, negative counter-clockwise, 0 stopped),
+    /// `"coolant"` (1 / 0), `"tool"` (the number), `"function"` (the M
+    /// code of a machine function the program calls — nothing answers it
+    /// here, so it takes no time) and `"end"`; and the motion itself as
+    /// `times` and `positions` (X, Y, Z per waypoint).
+    ///
+    /// `block` reads one block of the program — what the control runs
+    /// between two machine functions (`nc_blocks`), from where the axes
+    /// stand.
+    #[pyo3(signature = (machine, program, start = None, block = None))]
+    fn plan_nc_program<'py>(
+        &self,
+        py: Python<'py>,
+        machine: &str,
+        program: &str,
+        start: Option<Vec<f64>>,
+        block: Option<usize>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        use botrail_scene::nc::NcEvent;
+        let planned = self
+            .hub
+            .plan_nc_program(machine, program, start.as_deref(), block)
+            .map_err(PyValueError::new_err)?;
+        let run = planned.run;
+        let d = pyo3::types::PyDict::new(py);
+        d.set_item("duration", run.duration())?;
+        d.set_item("cutting_time", run.cutting_time)?;
+        d.set_item("rapid_time", run.rapid_time)?;
+        d.set_item("pause_time", run.pause_time)?;
+        d.set_item("cutting_distance", run.cutting_distance)?;
+        d.set_item("rapid_distance", run.rapid_distance)?;
+        d.set_item("tool_changes", run.tool_changes)?;
+        d.set_item("lower", (run.lower[0], run.lower[1], run.lower[2]))?;
+        d.set_item("upper", (run.upper[0], run.upper[1], run.upper[2]))?;
+        let end = run.trajectory.positions.last().cloned().unwrap_or_default();
+        d.set_item("end", (end[0], end[1], end[2]))?;
+        d.set_item("warnings", run.warnings.clone())?;
+        let spans: Vec<(f64, f64, usize)> =
+            run.spans.iter().map(|s| (s.start, s.end, s.line)).collect();
+        d.set_item("spans", spans)?;
+        let events: Vec<(f64, usize, &str, f64)> = run
+            .events
+            .iter()
+            .map(|e| {
+                let (what, value) = match &e.event {
+                    NcEvent::Spindle { rpm, clockwise } => {
+                        ("spindle", if *clockwise { *rpm } else { -*rpm })
+                    }
+                    NcEvent::SpindleStop => ("spindle", 0.0),
+                    NcEvent::Coolant(on) => ("coolant", if *on { 1.0 } else { 0.0 }),
+                    NcEvent::Tool(n) => ("tool", f64::from(*n)),
+                    NcEvent::Function(code) => ("function", f64::from(*code)),
+                    NcEvent::End => ("end", 0.0),
+                };
+                (e.t, e.line, what, value)
+            })
+            .collect();
+        d.set_item("events", events)?;
+        d.set_item("times", run.trajectory.times.clone())?;
+        d.set_item("positions", run.trajectory.positions.clone())?;
+        Ok(d)
+    }
+
     /// Bakes a toolpath into one continuous trajectory: seed-continuous IK
     /// along the resampled path (5-DOF axis-aligned where the spin is
     /// free), collision-checked per sample, then time-parameterized in one
@@ -6901,6 +7479,365 @@ impl Scene {
             inner: augmented,
             scene: snapshot,
         })
+    }
+
+    /// A part program run on its machine as a timeline of its own — a dry
+    /// run: the axes from where they stand (or from the joint vector
+    /// `start`), `riders` (obstacles clamped to the link `carrier`: the
+    /// fixture, the stock) going with that link from where they stand,
+    /// everything else still. What reads a bake — `machine_stock`,
+    /// playback, `export_usd` — reads it. Nothing in the scene moves.
+    #[pyo3(signature = (machine, program, carrier, riders = Vec::new(), start = None))]
+    fn nc_dry_run(
+        &self,
+        machine: &str,
+        program: &str,
+        carrier: &str,
+        riders: Vec<String>,
+        start: Option<Vec<f64>>,
+    ) -> PyResult<SequenceTimeline> {
+        let (timeline, scene) = self
+            .hub
+            .nc_dry_run(machine, program, carrier, &riders, start.as_deref())
+            .map_err(PyValueError::new_err)?;
+        Ok(SequenceTimeline {
+            inner: timeline,
+            scene,
+        })
+    }
+
+    /// `SequenceTimeline.machine_stock` with the picture: the stock is
+    /// shown as it is cut — a display mesh of the whole stock per stage,
+    /// riding the stock's own track, so it is machined on the table that
+    /// carries it and leaves in the gripper as the part — and, with
+    /// `show_tools`, each tool with a body stands in the spindle while it
+    /// is the one in it. The stock itself goes on being what is collided
+    /// and gripped, unseen; everything added is display, out of collision
+    /// (`{stock}_cut/…`, `{machine}/tool/T<n>/…`). Returns the timeline
+    /// with the display injected, and the same report `machine_stock`
+    /// gives.
+    #[pyo3(signature = (timeline, stock, machine, spindle_link, fixtures = Vec::new(), design = None, tolerance = 5e-5, chord_tolerance = 1e-5, max_deviation = 1e-5, tile_size = None, dt = 0.01, stage_period = 2.0, max_stages = 40, show_tools = true))]
+    #[allow(clippy::too_many_arguments)]
+    fn animate_machining<'py>(
+        &self,
+        py: Python<'py>,
+        timeline: PyRef<'_, SequenceTimeline>,
+        stock: &str,
+        machine: &str,
+        spindle_link: &str,
+        fixtures: Vec<String>,
+        design: Option<PathBuf>,
+        tolerance: f64,
+        chord_tolerance: f64,
+        max_deviation: f64,
+        tile_size: Option<f64>,
+        dt: f64,
+        stage_period: f64,
+        max_stages: usize,
+        show_tools: bool,
+    ) -> PyResult<(SequenceTimeline, Bound<'py, PyDict>)> {
+        use botrail_scene::rollout::{ObjectTrack, TrackSpan};
+        use botrail_scene::stages::StageWindow;
+        let args = MachiningArgs {
+            tolerance,
+            chord_tolerance,
+            max_deviation,
+            tile_size,
+            dt,
+            stage_period,
+            max_stages,
+        };
+        let (robot, spindle, result) = run_machining(
+            &timeline.scene,
+            &timeline.inner,
+            stock,
+            machine,
+            spindle_link,
+            &fixtures,
+            design.as_deref(),
+            args,
+        )?;
+        let report = machining_report(py, &result)?;
+        let end = timeline.inner.duration;
+        let mut snapshot = timeline.scene.clone();
+        let mut augmented = timeline.inner.clone();
+
+        // The stock as it is cut: the uncut picture until the first
+        // stage, then each stage until the next, the last one to the end.
+        if !result.stages.is_empty() {
+            let dir = cache_base().join("carve");
+            let material = botrail_scene::Material::new(0.75, 0.35);
+            let mut frames: Vec<(String, &botrail_mesh::MeshData, f64)> =
+                vec![(format!("{stock}_cut/raw"), &result.raw, 0.0)];
+            for (k, stage) in result.stages.iter().enumerate() {
+                frames.push((format!("{stock}_cut/s{k:03}"), &stage.mesh, stage.time));
+            }
+            let mut entries = Vec::new();
+            let mut spans: Vec<(usize, f64, f64)> = Vec::new();
+            for (k, (name, mesh, from)) in frames.iter().enumerate() {
+                let to = frames.get(k + 1).map_or(end, |next| next.2);
+                // Cut away entirely: nothing to show for this stretch.
+                if mesh.indices.is_empty() || to <= *from {
+                    continue;
+                }
+                entries.push((
+                    name.clone(),
+                    botrail_model::Geometry::Mesh {
+                        path: write_cached_obj(&dir, mesh)?,
+                        scale: nalgebra::Vector3::new(1.0, 1.0, 1.0),
+                    },
+                    botrail_scene::ObstacleCollider::cuboid(mesh_half_extents(mesh)),
+                ));
+                spans.push((entries.len() - 1, *from, to));
+            }
+            let pose = result.carve.pose;
+            for (name, geometry, collider) in &entries {
+                let _ = snapshot.remove_obstacle(name);
+                let made = snapshot.add_obstacle_with_collider(
+                    name,
+                    geometry.clone(),
+                    pose,
+                    collider.clone(),
+                );
+                let _ = snapshot.set_obstacle_enabled(&made, false);
+                let _ = snapshot.set_obstacle_material(&made, Some(material));
+            }
+            let _ = snapshot.set_obstacle_visible(stock, false);
+            let names = self.hub.add_carve_stages(entries, pose, material);
+            self.hub
+                .set_obstacle_visible(stock, false)
+                .map_err(scene_err)?;
+            let windows: Vec<StageWindow> = spans
+                .into_iter()
+                .map(|(i, from, to)| StageWindow {
+                    name: names[i].clone(),
+                    from,
+                    to,
+                })
+                .collect();
+            augmented =
+                botrail_scene::stages::staged_timeline_riding(&augmented, stock, pose, &windows);
+        }
+
+        // The tools: each one's holder, shank and flutes as cylinders on
+        // the spindle nose for as long as it is the one in the spindle.
+        if show_tools {
+            let control = timeline.scene.nc_machine(machine).cloned();
+            let nose = timeline
+                .scene
+                .fk_for(robot, timeline.scene.robots()[robot].joint_positions())
+                .map_err(scene_err)?[spindle];
+            // Where the machine has a tool changer, a tool that is not in
+            // the spindle is in its pocket: on the carousel, where the
+            // spindle nose stands from it with the head at the top, the
+            // shuttle in and that pocket turned to the spindle — so a tool
+            // goes from the one to the other without a jump.
+            let nc_err = |e: botrail_scene::nc::NcError| PyValueError::new_err(e.to_string());
+            let mut pockets: Option<(botrail_scene::nc::NcChanger, usize, Vec<f64>, usize)> = None;
+            if let Some(control) = &control {
+                let resolved = timeline.scene.nc_changer(control).map_err(nc_err)?;
+                if let (Some(changer), Some((shuttle, carousel, reach))) =
+                    (&control.changer, resolved)
+                {
+                    let (_, index, axes) = timeline.scene.nc_axes(control).map_err(nc_err)?;
+                    let model = &timeline.scene.robots()[robot].model;
+                    let link = model
+                        .joint_index(&changer.carousel)
+                        .map(|joint| model.joints[joint].child_link)
+                        .expect("the carousel's joint was resolved");
+                    let mut q = timeline.scene.robots()[robot].joint_positions().to_vec();
+                    q[index[2]] = axes.upper[2];
+                    q[shuttle] = reach[1];
+                    pockets = Some((changer.clone(), link, q, carousel));
+                }
+            }
+            let pocket = |tool: u32| -> PyResult<Option<(usize, nalgebra::Isometry3<f64>)>> {
+                let Some((changer, link, q, carousel)) = &pockets else {
+                    return Ok(None);
+                };
+                let Some(turn) = changer.pocket_turn(tool, 0.0) else {
+                    return Ok(None);
+                };
+                let mut q = q.clone();
+                q[*carousel] = turn;
+                let links = timeline.scene.fk_for(robot, &q).map_err(scene_err)?;
+                Ok(Some((*link, links[*link].inverse() * links[spindle])))
+            };
+            let here = timeline
+                .scene
+                .fk_for(robot, timeline.scene.robots()[robot].joint_positions())
+                .map_err(scene_err)?;
+            // The tools to draw: with pockets to keep them in, every one
+            // that has a body; without, the ones that stood in the spindle.
+            let mut shown: Vec<u32> = Vec::new();
+            if pockets.is_some() {
+                if let Some(control) = &control {
+                    shown.extend(
+                        control
+                            .tools
+                            .iter()
+                            .filter(|(_, tool)| tool.body.is_some())
+                            .map(|(number, _)| *number),
+                    );
+                }
+            }
+            for span in &result.tools {
+                if !shown.contains(&span.tool) {
+                    shown.push(span.tool);
+                }
+            }
+            for number in shown {
+                let Some(body) = control
+                    .as_ref()
+                    .and_then(|c| c.tools.get(&number))
+                    .and_then(|t| t.body.as_ref())
+                else {
+                    continue;
+                };
+                let pocket = pocket(number)?;
+                // In the spindle for every stretch this tool has it; with
+                // a changer, from the moment its shuttle starts back out
+                // to the moment it is in again for the next change.
+                let mut held: Vec<[f64; 2]> = Vec::new();
+                for stretch in result.tools.iter().filter(|s| s.tool == number) {
+                    let (mut from, mut to) = (stretch.from, stretch.to);
+                    if pocket.is_some() {
+                        let ends_at = |t: f64| {
+                            result
+                                .changes
+                                .iter()
+                                .find(move |change| (change.end - t).abs() < 1e-6)
+                        };
+                        if let Some(change) = ends_at(from).filter(|change| change.tool == number) {
+                            from = change.handover()[1];
+                        }
+                        if let Some(change) = ends_at(to).filter(|change| change.tool != number) {
+                            to = change.handover()[0];
+                        }
+                    }
+                    match held.last_mut() {
+                        Some(last) if from <= last[1] + 1e-9 => last[1] = to,
+                        _ => held.push([from, to]),
+                    }
+                }
+                let holder = body.holder.map_or(0.0, |h| h[1]);
+                let shank = body.length - body.flute_length - holder;
+                // (piece, diameter, bottom and top above the tip, colour, metalness, roughness)
+                let mut pieces = vec![(
+                    "cutter",
+                    body.diameter,
+                    0.0,
+                    body.flute_length,
+                    [0.80f32, 0.80, 0.82],
+                    0.9,
+                    0.25,
+                )];
+                if shank > 1e-9 {
+                    pieces.push((
+                        "shank",
+                        body.shank_diameter.unwrap_or(body.diameter),
+                        body.flute_length,
+                        body.flute_length + shank,
+                        [0.55, 0.56, 0.58],
+                        0.9,
+                        0.35,
+                    ));
+                }
+                if let Some([diameter, _]) = body.holder {
+                    pieces.push((
+                        "holder",
+                        diameter,
+                        body.length - holder,
+                        body.length,
+                        [0.16, 0.17, 0.19],
+                        0.8,
+                        0.45,
+                    ));
+                }
+                for (piece, diameter, low, high, color, metalness, roughness) in pieces {
+                    let name = format!("{machine}/tool/T{number}/{piece}");
+                    // The cylinder's middle, from the nose: the tip is
+                    // `length` down the spindle's -Z.
+                    let offset = nalgebra::Isometry3::translation(
+                        0.0,
+                        0.0,
+                        -body.length + (low + high) / 2.0,
+                    );
+                    let geometry = botrail_model::Geometry::Cylinder {
+                        radius: diameter / 2.0,
+                        length: high - low,
+                    };
+                    let collider = botrail_scene::ObstacleCollider::cuboid(nalgebra::Vector3::new(
+                        diameter / 2.0,
+                        diameter / 2.0,
+                        (high - low) / 2.0,
+                    ));
+                    let material = botrail_scene::Material::new(metalness, roughness);
+                    // Where it waits: in its pocket, or — a machine drawn
+                    // without a changer — out of sight at the spindle.
+                    let rest = match &pocket {
+                        Some((link, seat)) => here[*link] * seat * offset,
+                        None => nose * offset,
+                    };
+                    let away = |t0: f64, t1: f64| match &pocket {
+                        Some((link, seat)) => TrackSpan::Follow {
+                            t0,
+                            t1,
+                            robot,
+                            link: *link,
+                            offset: seat * offset,
+                        },
+                        None => TrackSpan::Stowed { t0, t1, pose: rest },
+                    };
+                    let _ = snapshot.remove_obstacle(&name);
+                    let made = snapshot.add_obstacle_with_collider(
+                        &name,
+                        geometry.clone(),
+                        rest,
+                        collider.clone(),
+                    );
+                    let _ = snapshot.set_obstacle_enabled(&made, false);
+                    let _ = snapshot.set_obstacle_material(&made, Some(material));
+                    let _ = snapshot.set_obstacle_color(&made, Some(color));
+                    let live = self
+                        .hub
+                        .add_carve_stages(vec![(name, geometry, collider)], rest, material)
+                        .remove(0);
+                    self.hub
+                        .set_obstacle_color(&live, Some(color))
+                        .map_err(scene_err)?;
+                    let mut spans = Vec::new();
+                    let mut at = 0.0;
+                    for [from, to] in &held {
+                        if *from > at {
+                            spans.push(away(at, *from));
+                        }
+                        spans.push(TrackSpan::Follow {
+                            t0: *from,
+                            t1: *to,
+                            robot,
+                            link: spindle,
+                            offset,
+                        });
+                        at = *to;
+                    }
+                    if at < end {
+                        spans.push(away(at, end));
+                    }
+                    augmented.objects.retain(|track| track.name != made);
+                    augmented.objects.push(ObjectTrack { name: made, spans });
+                }
+            }
+        }
+
+        self.hub.emit_timeline(&snapshot, &augmented);
+        Ok((
+            SequenceTimeline {
+                inner: augmented,
+                scene: snapshot,
+            },
+            report,
+        ))
     }
 
     /// Wraps a planned trajectory as a single-robot `SequenceTimeline` so
@@ -9928,6 +10865,69 @@ impl SequenceTimeline {
                     self.cloths()
                 ))
             })
+    }
+
+    /// What the part programs of the NC machine `machine` cut out of
+    /// `stock` over this cycle, and what went wrong while they did. Every
+    /// program run on the machine's track is read again from where its
+    /// axes stood; the tool then in the spindle — its **body** out of the
+    /// tool table, as long as it really is — is swept from the spindle
+    /// nose (`spindle_link`: the link whose frame is on the nose, +Z up
+    /// the tool) through the stock wherever the stock's own track has it.
+    /// `fixtures` are obstacles a tool must not touch (the vise and its
+    /// jaws). `design` is the finished part as designed — a closed mesh
+    /// file in the stock's own frame — compared within `tolerance` (m).
+    ///
+    /// Returns a dict: `carve` (the machined part: mesh and volumes),
+    /// `initial_volume` / `removed_volume` / `remaining_volume` (m³);
+    /// `issues` — `(kind, program, line, tool, time, volume, what)` with
+    /// `kind` one of `"rapid_into_stock"`, `"spindle_stopped"`,
+    /// `"holder_into_stock"`, `"into_fixture"`; `lines` — `(program, line,
+    /// tool, volume)`, the material each source line removed; `cut_span`
+    /// (first and last cut, s); `tools` — `(tool, from, to)`, what stood
+    /// in the spindle when; `unbodied` (tools called that have no body
+    /// and so cut nothing); `stages` (how many states of the stock were
+    /// kept); and `design` — `tolerance`, `excess_volume` (left outside
+    /// the design), `gouge_volume` (missing inside it) and the box of
+    /// each — or `None`.
+    #[pyo3(signature = (stock, machine, spindle_link, fixtures = Vec::new(), design = None, tolerance = 5e-5, chord_tolerance = 1e-5, max_deviation = 1e-5, tile_size = None, dt = 0.01, stage_period = 2.0, max_stages = 40))]
+    #[allow(clippy::too_many_arguments)]
+    fn machine_stock<'py>(
+        &self,
+        py: Python<'py>,
+        stock: &str,
+        machine: &str,
+        spindle_link: &str,
+        fixtures: Vec<String>,
+        design: Option<PathBuf>,
+        tolerance: f64,
+        chord_tolerance: f64,
+        max_deviation: f64,
+        tile_size: Option<f64>,
+        dt: f64,
+        stage_period: f64,
+        max_stages: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let args = MachiningArgs {
+            tolerance,
+            chord_tolerance,
+            max_deviation,
+            tile_size,
+            dt,
+            stage_period,
+            max_stages,
+        };
+        let (_, _, result) = run_machining(
+            &self.scene,
+            &self.inner,
+            stock,
+            machine,
+            spindle_link,
+            &fixtures,
+            design.as_deref(),
+            args,
+        )?;
+        machining_report(py, &result)
     }
 
     /// Carves `stock` with the cutter swept along this cycle: the cutter's

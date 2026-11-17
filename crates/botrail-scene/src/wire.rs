@@ -343,6 +343,66 @@ pub struct RouteFindingMsg {
     pub sample: Option<usize>,
 }
 
+/// A machine tool's control as the studio shows it: which joints are its
+/// axes, and the tables an operator fills in — the page a control's
+/// OFFSET key brings up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct NcMachineMsg {
+    /// The robot whose joints are the axes (the machine's name).
+    pub robot: String,
+    /// Where X, Y and Z are in that robot's joint vector.
+    pub axes: [usize; 3],
+    /// Each axis's travel `[low, high]`, machine coordinates (m).
+    pub travel: [[f64; 2]; 3],
+    pub work_offsets: Vec<NcWorkOffsetMsg>,
+    pub tools: Vec<NcToolMsg>,
+    pub m_codes: Vec<NcMCodeMsg>,
+}
+
+/// One work offset: its name (`G54`, `G154 P1`) and the machine
+/// coordinates of the work zero (m).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct NcWorkOffsetMsg {
+    pub name: String,
+    pub xyz: [f64; 3],
+}
+
+/// One pocket of the tool table: what `H<number>` adds to Z, and the tool
+/// that is in it where it was entered as a body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct NcToolMsg {
+    pub number: u32,
+    /// The table's entry: gauge line to tip (m).
+    pub length: f64,
+    pub diameter: Option<f64>,
+    /// The cutter of the body in the pocket: `flat`, `ball`, `bull_nose`
+    /// or `drill`.
+    pub cutter: Option<String>,
+    /// The body's own length (m) — the entry's, unless somebody measured
+    /// wrong.
+    pub body_length: Option<f64>,
+}
+
+/// One row of the machine's M-code table: a code that is the machine's to
+/// carry out, and what it does in words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct NcMCodeMsg {
+    pub code: u32,
+    pub what: String,
+}
+
+/// A part program: its name and its text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct NcProgramMsg {
+    pub name: String,
+    pub text: String,
+}
+
 /// One toolpath's display overlay: world-resolved polylines, split into
 /// cutting (feed) and rapid strokes. The part frame is resolved server
 /// side, so moving the frame re-sends the overlay.
@@ -1768,6 +1828,16 @@ pub enum ActionMsg {
         robot: Option<String>,
         toolpath: String,
     },
+    /// Run an NC part program on a machine tool's axes (`robot`, an NC
+    /// machine); await with `done`. `block` runs one block of it — what
+    /// the control runs between two machine functions.
+    RunProgram {
+        #[serde(default)]
+        robot: Option<String>,
+        program: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<usize>,
+    },
     /// Linearly ramp joints (gripper open/close); await with `done`.
     /// `check`: the straight joint line is checked against the world when
     /// the ramp starts.
@@ -2108,6 +2178,12 @@ pub enum ServerMessage {
     /// part frame changes.
     Toolpaths {
         toolpaths: Vec<ToolpathOverlayMsg>,
+    },
+    /// The machine tools' controls and the part programs; resent whenever
+    /// a table entry or a program changes.
+    Nc {
+        machines: Vec<NcMachineMsg>,
+        programs: Vec<NcProgramMsg>,
     },
     State {
         /// One entry per robot, in `SceneDescriptionMsg::robots` order.
@@ -2917,6 +2993,15 @@ pub fn action_msg(action: &Action) -> ActionMsg {
             robot: robot.clone(),
             toolpath: toolpath.clone(),
         },
+        Action::RunProgram {
+            robot,
+            program,
+            block,
+        } => ActionMsg::RunProgram {
+            robot: robot.clone(),
+            program: program.clone(),
+            block: *block,
+        },
         Action::StartRamp {
             robot,
             targets,
@@ -3028,6 +3113,15 @@ pub fn action_from_msg(msg: &ActionMsg) -> Action {
         ActionMsg::StartToolpath { robot, toolpath } => Action::StartToolpath {
             robot: robot.clone(),
             toolpath: toolpath.clone(),
+        },
+        ActionMsg::RunProgram {
+            robot,
+            program,
+            block,
+        } => Action::RunProgram {
+            robot: robot.clone(),
+            program: program.clone(),
+            block: *block,
         },
         ActionMsg::StartRamp {
             robot,
@@ -4513,6 +4607,69 @@ pub fn bom_message(scene: &Scene) -> ServerMessage {
     ServerMessage::Bom {
         lines: bom.rows.iter().map(bom_line_msg).collect(),
         totals,
+    }
+}
+
+/// The machine tools' controls and the part programs as an `nc` message.
+/// A machine whose robot or axes no longer resolve is left out.
+pub fn nc_message(scene: &Scene) -> ServerMessage {
+    let cutter = |body: &crate::nc::NcToolBody| {
+        match body.cutter {
+            crate::nc::NcCutter::Flat => "flat",
+            crate::nc::NcCutter::Ball => "ball",
+            crate::nc::NcCutter::BullNose => "bull_nose",
+            crate::nc::NcCutter::Drill => "drill",
+        }
+        .to_string()
+    };
+    ServerMessage::Nc {
+        machines: scene
+            .nc_machines()
+            .iter()
+            .filter_map(|machine| {
+                let (_, axes, resolved) = scene.nc_axes(machine).ok()?;
+                Some(NcMachineMsg {
+                    robot: machine.robot.clone(),
+                    axes,
+                    travel: [0, 1, 2].map(|i| [resolved.lower[i], resolved.upper[i]]),
+                    work_offsets: machine
+                        .work_offsets
+                        .iter()
+                        .map(|(name, xyz)| NcWorkOffsetMsg {
+                            name: name.clone(),
+                            xyz: *xyz,
+                        })
+                        .collect(),
+                    tools: machine
+                        .tools
+                        .iter()
+                        .map(|(number, tool)| NcToolMsg {
+                            number: *number,
+                            length: tool.length,
+                            diameter: tool.diameter,
+                            cutter: tool.body.as_ref().map(cutter),
+                            body_length: tool.body.as_ref().map(|body| body.length),
+                        })
+                        .collect(),
+                    m_codes: machine
+                        .m_codes
+                        .iter()
+                        .map(|(code, what)| NcMCodeMsg {
+                            code: *code,
+                            what: what.clone(),
+                        })
+                        .collect(),
+                })
+            })
+            .collect(),
+        programs: scene
+            .nc_programs()
+            .iter()
+            .map(|program| NcProgramMsg {
+                name: program.name.clone(),
+                text: program.text.clone(),
+            })
+            .collect(),
     }
 }
 

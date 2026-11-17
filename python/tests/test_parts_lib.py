@@ -459,6 +459,86 @@ def test_machine_tool_refuses_what_does_not_fit() -> None:
     assert scene.obstacle_names == []
 
 
+def test_machine_tool_side_window_lifts_and_the_enclosure_stands_open_on_top() -> None:
+    scene = scene_()
+    scene.set_robot_base_pose((4.0, 0.0, 0.0))
+    # A Haas VF-2 by its drawing: a 2724 mm machine whose enclosure stops
+    # at 1818 mm and is open above, a side window 676 x 749 on an 819 mm
+    # sill, 50 mm rearward of the chamber's centre, that lifts 595 mm.
+    vf2 = bt.parts.machine_tool(
+        scene, "vf2", size=(2.316, 1.984, 2.724), enclosure_height=1.818, chamber=1.139,
+        aperture=(0.676, 0.749, 0.819), door="air", door_slide="up", door_travel=0.595, door_offset=0.050,
+        front_door=(0.939, 0.954, 0.816), table=(0.914, 0.368, 0.853), exchange=(0.381, 0.050),
+        head_clearance=0.610,
+    )
+    # The walls stop at the enclosure's edge and no roof is built; the
+    # column and the spindle head rise to the machine's height.
+    assert "vf2/shell/top" not in scene.obstacle_names
+    assert scene.obstacle_bounds("vf2/shell/far")[1][2] == pytest.approx(1.818)
+    assert scene.obstacle_bounds("vf2/shell/near_head")[1][2] == pytest.approx(1.818)
+    assert scene.obstacle_bounds("vf2/column")[1][2] == pytest.approx(2.724)
+    lo, hi = scene.obstacle_bounds("vf2/head")
+    assert (lo[2], hi[2]) == pytest.approx((0.853 + 0.610, 2.724))
+    # Open on top, an opening may run to within the lintel of the edge:
+    # the front one leaves 48 mm, which a roof's thickness would refuse.
+    lo, hi = scene.obstacle_bounds("vf2/shell/front_head")
+    assert (lo[2], hi[2]) == pytest.approx((1.770, 1.818))
+    # The window stands off the chamber's centre: 341.5 mm of wall ahead
+    # of it, 181.5 mm behind — and the table is parked in line with it.
+    front, rear = scene.obstacle_bounds("vf2/shell/near_front"), scene.obstacle_bounds("vf2/shell/near_rear")
+    assert front[1][1] - front[0][1] == pytest.approx(0.3415) and rear[1][1] - rear[0][1] == pytest.approx(0.1815)
+    assert rear[0][1] - front[1][1] == pytest.approx(0.676)
+    centre = (front[1][1] + rear[0][1]) / 2
+    assert scene.frame("vf2/table")[0][1] == pytest.approx(centre)
+    # The leaf rests on the sill and rises: the axis points up, and
+    # `entry` is the centre of what the raised leaf leaves clear — 595 of
+    # the opening's 749 mm.
+    lo, hi = scene.obstacle_bounds("vf2/side_door/leaf")
+    assert (lo[2], hi[2]) == pytest.approx((0.819, 0.819 + 0.749 + 0.05))
+    assert vf2.door_axis == pytest.approx((0.0, 0.0, 1.0)) and vf2.door_travel == pytest.approx(0.595)
+    (_, ey, ez), _ = scene.frame("vf2/entry")
+    assert (ey, ez) == pytest.approx((centre, 0.819 + 0.595 / 2))
+    rest = scene.obstacle_pose("vf2/side_door/leaf")[0][2]
+    sq = scene.sequence("window")
+    sq.step("open", actions=[bt.seq.move_to(vf2.door, "open")], transition=bt.seq.device_done(vf2.door))
+    sq.step("hold", transition=bt.seq.elapsed(0.1))
+    tl = scene.simulate_sequence("window")
+    assert tl.signal("vf2/side_door/open").rising_edges()[0] == pytest.approx(0.595 / 0.4, abs=0.02)
+    assert tl.object_pose("vf2/side_door/leaf", tl.duration)[0][2] - rest == pytest.approx(0.595)
+    door = rows(scene)["vf2/side_door"]
+    assert (door["attributes"]["slide"], door["attributes"]["stroke_mm"]) == ("up", 595)
+    vf2.remove(scene)
+    assert scene.obstacle_names == [] and scene.device_names == []
+
+    # Lifted by hand: two switches read the loose leaf, at its lower edge
+    # where it stands shut and at its upper edge where it stands raised.
+    loose = bt.parts.machine_tool(scene, "vf2", door="manual", door_slide="up", door_travel=0.5)
+    assert loose.door is None and loose.door_lanes == ("vf2/side_door/closed", "vf2/side_door/open")
+    sq = scene.sequence("look")
+    sq.step("hold", transition=bt.seq.elapsed(0.05))
+    tl = scene.simulate_sequence("look")
+    assert tl.signal("vf2/side_door/closed").value_at(0.0) and not tl.signal("vf2/side_door/open").value_at(0.0)
+    for name in loose.door_objects:
+        (x, y, z), qq = scene.obstacle_pose(name)
+        scene.set_obstacle_pose(name, (x, y, z + loose.door_travel), qq)
+    tl = scene.simulate_sequence("look")
+    assert tl.signal("vf2/side_door/open").value_at(0.0) and not tl.signal("vf2/side_door/closed").value_at(0.0)
+    loose.remove(scene)
+    # Without a stroke a lifting leaf clears its opening, and nothing of
+    # the body is in its way — where a sliding one is refused.
+    tall = bt.parts.machine_tool(scene, "vf2", door_slide="up")
+    assert tall.door_travel == pytest.approx(0.869)
+    tall.remove(scene)
+    bt.parts.machine_tool(scene, "vf2", door_slide="up", door_travel=1.2).remove(scene)
+    with pytest.raises(ValueError, match="door_slide is 'rear' or 'up'"):
+        bt.parts.machine_tool(scene, "vf2", door_slide="sideways")
+    with pytest.raises(ValueError, match="enclosure does not fit"):
+        bt.parts.machine_tool(scene, "vf2", enclosure_height=3.0)
+    with pytest.raises(ValueError, match="through a 1500 mm body"):
+        bt.parts.machine_tool(scene, "vf2", enclosure_height=1.5)
+    assert scene.obstacle_names == []
+
+
 def test_operator_panel_button_reads_a_press_and_only_that_button() -> None:
     scene = scene_()
     # Three buttons in a row facing the arm; the arm's tool tip is a

@@ -119,3 +119,75 @@ pub(crate) const GRIPPER_URDF: &str = r#"<?xml version="1.0"?>
     <origin xyz="0 0 0.07"/>
   </joint>
 </robot>"#;
+
+/// A machine tool's three axes as a mechanism, the way `bt.parts.machine_tool`
+/// builds one: a saddle on Y, a table on X over it, a head on Z — prismatic
+/// joints whose values are the machine coordinates, each running from zero
+/// at home to the negative side (300 x 200 x 250 mm), with 0.4 m/s rapids.
+pub(crate) const AXES_URDF: &str = r#"<?xml version="1.0"?>
+<robot name="axes">
+  <link name="base"/>
+  <link name="saddle">
+    <collision><origin xyz="0 0 0.25"/><geometry><box size="0.3 0.3 0.1"/></geometry></collision>
+  </link>
+  <link name="table">
+    <collision><origin xyz="0 0 -0.02"/><geometry><box size="0.5 0.25 0.04"/></geometry></collision>
+  </link>
+  <link name="head">
+    <collision><origin xyz="0 0 0.3"/><geometry><box size="0.2 0.2 0.6"/></geometry></collision>
+  </link>
+  <joint name="y" type="prismatic">
+    <parent link="base"/><child link="saddle"/><origin xyz="0 -0.1 0"/><axis xyz="0 -1 0"/>
+    <limit lower="-0.2" upper="0" velocity="0.4" effort="0"/>
+  </joint>
+  <joint name="x" type="prismatic">
+    <parent link="saddle"/><child link="table"/><origin xyz="-0.15 0 0.34"/><axis xyz="-1 0 0"/>
+    <limit lower="-0.3" upper="0" velocity="0.4" effort="0"/>
+  </joint>
+  <joint name="z" type="prismatic">
+    <parent link="base"/><child link="head"/><origin xyz="0 0 0.74"/><axis xyz="0 0 1"/>
+    <limit lower="-0.25" upper="0" velocity="0.4" effort="0"/>
+  </joint>
+</robot>
+"#;
+
+/// [`AXES_URDF`] with an umbrella tool changer: a carousel that turns
+/// freely on a shuttle, 450 mm left of the spindle line at the height of
+/// the spindle nose at home, 200 mm of travel — so a pocket 250 mm out
+/// stands under the spindle with the shuttle in.
+pub(crate) const AXES_CHANGER_URDF: &str = r#"<?xml version="1.0"?>
+<robot name="axes">
+  <link name="base"/>
+  <link name="saddle">
+    <collision><origin xyz="0 0 0.25"/><geometry><box size="0.3 0.3 0.1"/></geometry></collision>
+  </link>
+  <link name="table">
+    <collision><origin xyz="0 0 -0.02"/><geometry><box size="0.5 0.25 0.04"/></geometry></collision>
+  </link>
+  <link name="head">
+    <collision><origin xyz="0 0 0.3"/><geometry><box size="0.2 0.2 0.6"/></geometry></collision>
+  </link>
+  <link name="tool_shuttle"/>
+  <link name="tool_carousel"/>
+  <joint name="y" type="prismatic">
+    <parent link="base"/><child link="saddle"/><origin xyz="0 -0.1 0"/><axis xyz="0 -1 0"/>
+    <limit lower="-0.2" upper="0" velocity="0.4" effort="0"/>
+  </joint>
+  <joint name="x" type="prismatic">
+    <parent link="saddle"/><child link="table"/><origin xyz="-0.15 0 0.34"/><axis xyz="-1 0 0"/>
+    <limit lower="-0.3" upper="0" velocity="0.4" effort="0"/>
+  </joint>
+  <joint name="z" type="prismatic">
+    <parent link="base"/><child link="head"/><origin xyz="0 0 0.74"/><axis xyz="0 0 1"/>
+    <limit lower="-0.25" upper="0" velocity="0.4" effort="0"/>
+  </joint>
+  <joint name="tool_shuttle" type="prismatic">
+    <parent link="base"/><child link="tool_shuttle"/><origin xyz="-0.45 0 0.74"/><axis xyz="1 0 0"/>
+    <limit lower="0" upper="0.2" velocity="0.3" effort="0"/>
+  </joint>
+  <joint name="tool_carousel" type="continuous">
+    <parent link="tool_shuttle"/><child link="tool_carousel"/><origin xyz="0 0 0"/><axis xyz="0 0 1"/>
+    <limit velocity="3" effort="0"/>
+  </joint>
+</robot>
+"#;

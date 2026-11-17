@@ -9,6 +9,7 @@
 import * as THREE from "three";
 import { MaterialCreator, MTLLoader, OBJLoader, STLLoader } from "three-stdlib";
 
+import { creasedNormals } from "./creasedNormals.ts";
 import { adoptMtlPbr } from "./meshAppearance.ts";
 
 export type LoadedMesh =
@@ -18,6 +19,13 @@ export type LoadedMesh =
   | { kind: "object"; object: THREE.Object3D; shaded: boolean };
 
 const cache = new Map<string, Promise<LoadedMesh | null>>();
+
+/** Faces of an STL that meet at less than this share a normal across the
+ * edge between them (rad). */
+export const STL_CREASE = Math.PI / 4;
+/** An STL denser than this is shaded a normal a face: its facets are too
+ * small to see, and it is not worth matching a million corners up. */
+const STL_DENSE = 300_000;
 
 export function loadMesh(
   url: string,
@@ -39,9 +47,20 @@ async function doLoad(url: string, ext: string): Promise<LoadedMesh | null> {
   const e = ext.toLowerCase();
   if (e === "stl") {
     const buffer = await fetchArrayBuffer(url);
+    // An STL is loose triangles, a normal apiece: shaded as it comes, every
+    // facet shows, and a maker's simplified model — a few hundred triangles
+    // a link — reads as cut glass. The normals are recomputed from the
+    // faces (some exporters write zeros, which shade black) and shared
+    // across every edge shallower than the crease angle, so a turned
+    // surface shades round and a corner stays a corner.
     const geometry = new STLLoader().parse(buffer);
-    // Some exporters write zero normals, which shade flat black.
-    geometry.computeVertexNormals();
+    const position = geometry.getAttribute("position");
+    if (position.count / 3 > STL_DENSE) {
+      geometry.computeVertexNormals();
+    } else {
+      const normals = creasedNormals(position.array as Float32Array, STL_CREASE);
+      geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    }
     return { kind: "geometry", geometry };
   }
   if (e === "obj") {

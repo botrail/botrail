@@ -18,6 +18,12 @@ export function wordExprText(v: WordExprMsg): string {
     : operandText(v.left);
 }
 
+/** An NC run's name: the program, and its block where it runs by block
+ * (the name the run has on its machine's lane). */
+export function ncRun(action: { program: string; block?: number | null }): string {
+  return action.block == null ? action.program : `${action.program}#${action.block}`;
+}
+
 /** Compact label for an action chip (step rows, SFC chart boxes). */
 export function actionLabel(action: ActionMsg): string {
   const short = (name: string) => name.split("/").filter(Boolean).pop() ?? name;
@@ -26,6 +32,8 @@ export function actionLabel(action: ActionMsg): string {
       return `▶ ${action.motion}`;
     case "start_toolpath":
       return `⟿ ${action.toolpath}`;
+    case "run_program":
+      return `NC ${ncRun(action)}`;
     case "start_ramp":
       return `ramp ${action.targets.length}j`;
     case "policy":

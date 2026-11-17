@@ -11,7 +11,7 @@ import { addressOf, contactPoint, leafKey, pointKey } from "./ioLinks.ts";
 import { exitConditions, flattenSteps, standingAt, truth, type Truth } from "./sfc.ts";
 
 export { standingAt };
-import { conditionLabel } from "./seqLabels.ts";
+import { conditionLabel, ncRun } from "./seqLabels.ts";
 
 /**
  * What the programs wait on — the dock's line under the step bar, and the
@@ -74,6 +74,8 @@ export function leafText(tr: Truth, step: StepMsg): string {
         ? [`▶${a.motion}`]
         : a.type === "start_toolpath"
           ? [`⟿${a.toolpath}`]
+          : a.type === "run_program"
+            ? [`NC ${ncRun(a)}`]
           : a.type === "start_ramp"
             ? ["ramp"]
             : a.type === "policy"

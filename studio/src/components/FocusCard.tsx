@@ -53,7 +53,7 @@ export function FocusCard() {
   const mode = useStudioStore((s) => s.focusCard);
   const setFocusCard = useStudioStore((s) => s.setFocusCard);
   const revealPart = useStudioStore((s) => s.revealPart);
-  const overlayOpen = useStudioStore((s) => s.sfcOpen || s.ldOpen || s.ioOpen || s.topoOpen);
+  const overlayOpen = useStudioStore((s) => s.sfcOpen || s.ldOpen || s.ioOpen || s.topoOpen || s.ncOpen);
   const docked = useStudioStore((s) => s.playback !== null);
   const base = useStudioStore((s) => selectionLabel(s.selection, s.robots));
   const [el, setEl] = useState<HTMLDivElement | null>(null);

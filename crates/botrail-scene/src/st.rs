@@ -897,7 +897,7 @@ impl<'a> Writer<'a> {
                         .iter()
                         .find(|e| e.robot == robot && e.key == key)
                     else {
-                        if self.scene.io_map().robot_controller_host(&robot) == self.xc.host {
+                        if self.scene.is_own_controller(r, &self.xc.host) {
                             // The host is the robot's own controller: the
                             // command is its own program, not a wire.
                             st.push(format!(

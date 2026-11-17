@@ -1062,6 +1062,13 @@ pub struct ProjectFile {
     /// Toolpaths — Cartesian process paths (absent in older files).
     #[serde(default)]
     pub toolpaths: Vec<crate::toolpath::ToolpathMsg>,
+    /// Machine tools' controls — the robots whose joints are NC axes, with
+    /// their work-offset and tool tables (absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nc_machines: Vec<crate::nc::NcMachine>,
+    /// NC part programs, by name (absent in older files).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nc_programs: Vec<crate::nc::NcProgram>,
     /// Process-contact exemptions, by names (absent in older files).
     #[serde(default)]
     pub allowed_contacts: Vec<AllowedContactMsg>,
@@ -1221,6 +1228,8 @@ impl ProjectFile {
                     grasps: Vec::new(),
                     scenarios: Vec::new(),
                     toolpaths: Vec::new(),
+                    nc_machines: Vec::new(),
+                    nc_programs: Vec::new(),
                     allowed_contacts: Vec::new(),
                     allowed_object_contacts: Vec::new(),
                     applicators: Vec::new(),
@@ -1429,6 +1438,8 @@ impl Scene {
                 .iter()
                 .map(crate::toolpath::toolpath_msg)
                 .collect(),
+            nc_machines: self.nc_machines().to_vec(),
+            nc_programs: self.nc_programs().to_vec(),
             allowed_contacts: self
                 .allowed_contacts()
                 .iter()
@@ -1641,6 +1652,13 @@ impl Scene {
             })?);
         }
         self.set_toolpaths(toolpaths);
+        self.set_nc_machines(Vec::new());
+        for machine in &project.nc_machines {
+            self.define_nc_machine(machine.clone()).map_err(|e| {
+                ProjectError::Incompatible(format!("NC machine `{}`: {e}", machine.robot))
+            })?;
+        }
+        self.set_nc_programs(project.nc_programs.clone());
         for a in &project.applicators {
             a.applicator
                 .validate()
@@ -3014,6 +3032,70 @@ fn generate_python_impl(project: &ProjectFile, embed_catalog: bool) -> String {
         }
         out.push_str(&format!("scene.add_toolpath({:?}, _tp.build())\n", tp.name));
     }
+    for machine in &project.nc_machines {
+        out.push('\n');
+        let mut kwargs = format!(
+            "axes=({:?}, {:?}, {:?}), max_feed={}, acceleration={}, junction_deviation={}, \
+             tool_change_s={}",
+            machine.axes[0],
+            machine.axes[1],
+            machine.axes[2],
+            machine.max_feed,
+            py_tuple(&machine.acceleration),
+            machine.junction_deviation,
+            machine.tool_change_s,
+        );
+        if let Some(rpm) = machine.spindle_max_rpm {
+            kwargs.push_str(&format!(", spindle_max_rpm={rpm}"));
+        }
+        if let Some(changer) = &machine.changer {
+            kwargs.push_str(&format!(
+                ", changer=({:?}, {:?}, {})",
+                changer.shuttle, changer.carousel, changer.pockets
+            ));
+        }
+        out.push_str(&format!(
+            "scene.define_nc_machine({:?}, {kwargs})\n",
+            machine.robot
+        ));
+        for (name, xyz) in &machine.work_offsets {
+            out.push_str(&format!(
+                "scene.set_work_offset({:?}, {name:?}, {})\n",
+                machine.robot,
+                py_tuple(xyz)
+            ));
+        }
+        for (number, tool) in &machine.tools {
+            let diameter = match tool.diameter {
+                Some(d) => format!(", diameter={d}"),
+                None => String::new(),
+            };
+            // The tool's body goes as the JSON the table stores it in.
+            let body = match &tool.body {
+                Some(body) => format!(
+                    ", body={:?}",
+                    serde_json::to_string(body).expect("a tool body serializes")
+                ),
+                None => String::new(),
+            };
+            out.push_str(&format!(
+                "scene.set_nc_tool({:?}, {number}, length={}{diameter}{body})\n",
+                machine.robot, tool.length
+            ));
+        }
+        for (code, what) in &machine.m_codes {
+            out.push_str(&format!(
+                "scene.set_nc_m_code({:?}, {code}, {what:?})\n",
+                machine.robot
+            ));
+        }
+    }
+    for program in &project.nc_programs {
+        out.push_str(&format!(
+            "scene.add_nc_program({:?}, {:?})\n",
+            program.name, program.text
+        ));
+    }
     for contact in &project.allowed_contacts {
         out.push_str(&format!(
             "scene.allow_link_obstacle_contact({:?}, {:?}{})\n",
@@ -3459,6 +3541,17 @@ fn py_action(action: &ActionMsg) -> String {
         ActionMsg::StartToolpath { robot, toolpath } => {
             format!("bt.seq.toolpath({toolpath:?}{})", robot_kwarg(robot))
         }
+        ActionMsg::RunProgram {
+            robot,
+            program,
+            block,
+        } => {
+            format!(
+                "bt.seq.run_program({:?}, {program:?}{})",
+                robot.as_deref().unwrap_or_default(),
+                block.map(|k| format!(", block={k}")).unwrap_or_default()
+            )
+        }
         ActionMsg::StartRamp {
             robot,
             targets,
@@ -3684,6 +3777,663 @@ mod tests {
             )
             .unwrap();
         scene
+    }
+
+    /// `sample_scene` plus a machine tool's axes declared as an NC
+    /// machine, with a work offset, two tools and a part program.
+    fn nc_scene() -> Scene {
+        nc_scene_on(crate::testdata::AXES_URDF, None)
+    }
+
+    /// The same on the machine `urdf` describes, its control working
+    /// `changer`.
+    fn nc_scene_on(urdf: &str, changer: Option<crate::nc::NcChanger>) -> Scene {
+        use crate::nc::{NcMachine, NcProgram, NcTool};
+        let mut scene = sample_scene();
+        let model = std::sync::Arc::new(RobotModel::from_urdf_str(urdf).unwrap());
+        scene.add_robot(
+            model,
+            Some("vmc/axes"),
+            Isometry3::translation(2.0, 0.0, 0.0),
+        );
+        scene
+            .define_nc_machine(NcMachine {
+                robot: "vmc/axes".into(),
+                axes: ["x".into(), "y".into(), "z".into()],
+                max_feed: 0.2,
+                acceleration: [5.0; 3],
+                junction_deviation: 5e-5,
+                tool_change_s: 3.0,
+                spindle_max_rpm: Some(8000.0),
+                work_offsets: Default::default(),
+                tools: Default::default(),
+                m_codes: Default::default(),
+                changer,
+            })
+            .unwrap();
+        scene
+            .set_work_offset("vmc/axes", "g54", Some([-0.15, -0.10, -0.20]))
+            .unwrap();
+        for (number, length) in [(1, 0.08), (2, 0.10)] {
+            let tool = NcTool {
+                length,
+                diameter: Some(0.01),
+                body: None,
+            };
+            scene.set_nc_tool("vmc/axes", number, Some(tool)).unwrap();
+        }
+        scene.add_nc_program(NcProgram {
+            name: "op10".into(),
+            text: "G90 G21 G53 G0 Z0.\nT1 M6\nS3000 M3\nG54 G0 X-20. Y0.\nG43 Z5. H1\n\
+                   G1 Z-1. F300.\nX20. F600.\nG0 Z5.\nM5\nG53 G0 Z0.\nG53 G0 X-300. Y-100.\nM30\n"
+                .into(),
+        });
+        scene
+    }
+
+    /// `nc_scene` — the machine without a changer — with `program` out
+    /// of `from`.
+    fn nc_scene_with_program(from: &Scene, program: &str) -> Scene {
+        let mut scene = nc_scene();
+        scene.add_nc_program(from.nc_program(program).unwrap().clone());
+        scene
+    }
+
+    fn run_program_step(program: &str) -> crate::seq::Sequence {
+        crate::seq::Sequence {
+            name: "vmc".into(),
+            steps: vec![crate::seq::Step {
+                name: "machining".into(),
+                actions: vec![crate::seq::Action::RunProgram {
+                    robot: Some("vmc/axes".into()),
+                    program: program.into(),
+                    block: None,
+                }],
+                transition: crate::seq::Condition::Done,
+                select: vec![],
+            }],
+        }
+    }
+
+    #[test]
+    fn an_nc_program_runs_on_its_machines_axes_and_round_trips() {
+        let mut scene = nc_scene();
+        scene.upsert_sequence(run_program_step("op10"));
+        // The dry run and the bake are the same motion: the step takes as
+        // long as the program, and the axes end where it parks them.
+        let planned = scene
+            .plan_nc_program("vmc/axes", "op10", None, None)
+            .unwrap();
+        assert_eq!(planned.run.tool_changes, 1);
+        assert!(planned.run.cutting_time > 0.0 && planned.run.rapid_time > 0.0);
+        let options = crate::rollout::RolloutOptions::default();
+        let tl = scene.simulate_sequence("vmc", &options).unwrap();
+        assert!(
+            (tl.duration - planned.run.duration()).abs() < 0.02,
+            "{} vs {}",
+            tl.duration,
+            planned.run.duration()
+        );
+        let track = tl.robots.iter().find(|r| r.name == "vmc/axes").unwrap();
+        let model = &scene.robots()[scene.robot_index("vmc/axes").unwrap()].model;
+        let q = |name: &str| {
+            model.joints[model.joint_index(name).unwrap()]
+                .q_index
+                .unwrap()
+        };
+        let end = track.trajectory.positions.last().unwrap();
+        assert!((end[q("x")] + 0.300).abs() < 1e-9 && (end[q("y")] + 0.100).abs() < 1e-9);
+        assert!(end[q("z")].abs() < 1e-9);
+        // Mid-cut the tool tip is 1 mm into the work: Z = -200 - 1 + 80.
+        let cut = planned.run.spans.iter().find(|s| s.line == 7).unwrap();
+        let mid = track.trajectory.sample((cut.start + cut.end) / 2.0);
+        assert!((mid[q("z")] + 0.121).abs() < 1e-6, "{mid:?}");
+        assert_eq!(track.moves.len(), 1);
+        assert_eq!(track.moves[0].name, "op10");
+
+        // The machine is not an arm: no line of its own on the bill, no
+        // controller, no mark on the layout sheet.
+        let bom = scene.bom();
+        assert!(!bom
+            .rows
+            .iter()
+            .any(|r| r.names.iter().any(|n| n.starts_with("vmc/axes"))));
+        let arm = scene.robots()[0].name.clone();
+        let controllers: Vec<&String> = bom
+            .rows
+            .iter()
+            .flat_map(|r| &r.names)
+            .filter(|n| n.ends_with("/controller"))
+            .collect();
+        assert_eq!(controllers, vec![&format!("{arm}/controller")]);
+
+        // Round trip: the control, its two tables and the program.
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.nc_machines(), scene.nc_machines());
+        assert_eq!(reloaded.nc_programs(), scene.nc_programs());
+        let again = reloaded.simulate_sequence("vmc", &options).unwrap();
+        assert!((again.duration - tl.duration).abs() < 1e-9);
+        let python = generate_python(&scene.to_project());
+        for needle in [
+            "scene.define_nc_machine(\"vmc/axes\", axes=(\"x\", \"y\", \"z\"), max_feed=0.2",
+            "scene.set_work_offset(\"vmc/axes\", \"G54\", (-0.15, -0.1, -0.2))",
+            "scene.set_nc_tool(\"vmc/axes\", 2, length=0.1, diameter=0.01)",
+            "scene.add_nc_program(\"op10\", \"G90 G21 G53 G0 Z0.\\nT1 M6",
+            "bt.seq.run_program(\"vmc/axes\", \"op10\")",
+        ] {
+            assert!(python.contains(needle), "missing `{needle}` in:\n{python}");
+        }
+        // A file from before NC machines existed loads with none.
+        let mut legacy = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+        legacy.as_object_mut().unwrap().remove("nc_machines");
+        legacy.as_object_mut().unwrap().remove("nc_programs");
+        let project = ProjectFile::from_json(&legacy.to_string()).unwrap();
+        assert!(project.nc_machines.is_empty() && project.nc_programs.is_empty());
+    }
+
+    /// `nc_scene` on a machine whose model has an umbrella tool changer,
+    /// declared to the control, and a program that uses two tools.
+    fn changer_scene() -> Scene {
+        use crate::nc::{NcChanger, NcProgram};
+        let mut scene = nc_scene_on(
+            crate::testdata::AXES_CHANGER_URDF,
+            Some(NcChanger {
+                shuttle: "tool_shuttle".into(),
+                carousel: "tool_carousel".into(),
+                pockets: 20,
+            }),
+        );
+        scene.add_nc_program(NcProgram {
+            name: "two_tools".into(),
+            text: "G90 G21 G53 G0 Z0.\nT1 M6\nG54 G0 X-20. Y0.\nG43 Z5. H1\nG1 Z-1. F300.\n\
+                   G0 Z5.\nT2 M6\nG43 Z5. H2\nG1 Z-1. F300.\nG0 Z5.\nG53 G0 Z0.\nM30\n"
+                .into(),
+        });
+        scene
+    }
+
+    #[test]
+    fn a_tool_changer_is_worked_at_each_tool_change_and_round_trips() {
+        let mut scene = changer_scene();
+        let model = scene.robots()[scene.robot_index("vmc/axes").unwrap()]
+            .model
+            .clone();
+        let q = |name: &str| {
+            model.joints[model.joint_index(name).unwrap()]
+                .q_index
+                .unwrap()
+        };
+        let (shuttle, carousel) = (q("tool_shuttle"), q("tool_carousel"));
+        let planned = scene
+            .plan_nc_program("vmc/axes", "two_tools", None, None)
+            .unwrap();
+        let changes = planned.run.changes.clone();
+        assert_eq!(changes.iter().map(|c| c.tool).collect::<Vec<_>>(), [1, 2]);
+        let step = std::f64::consts::TAU / 20.0;
+        let near = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        // Tool 1 is pocket 1, which stands at the spindle already: the
+        // shuttle runs in and out. For tool 2 the carousel turns a pocket
+        // in between, and stays there to the program's end.
+        for (change, from, to) in [(&changes[0], 0.0, 0.0), (&changes[1], 0.0, -step)] {
+            let [t_in, t_out] = change.handover();
+            for (t, reach, turn) in [
+                (change.start, 0.0, from),
+                (t_in, 0.2, from),
+                (t_out, 0.2, to),
+                (change.end, 0.0, to),
+            ] {
+                let at = planned.trajectory.sample(t);
+                near(at[shuttle], reach);
+                near(at[carousel], turn);
+                // The head stands at the top for all of it.
+                near(at[q("z")], 0.0);
+            }
+        }
+        let end = planned.trajectory.positions.last().unwrap();
+        near(end[shuttle], 0.0);
+        near(end[carousel], -step);
+        // The changer takes no time of its own: the program is as long,
+        // and its axes are where they are, as on the machine without one.
+        let plain = nc_scene_with_program(&scene, "two_tools")
+            .plan_nc_program("vmc/axes", "two_tools", None, None)
+            .unwrap();
+        near(plain.run.duration(), planned.run.duration());
+        assert_eq!(
+            plain.run.trajectory.positions,
+            planned.run.trajectory.positions
+        );
+
+        // Baked, the robot's own track has it; and a second run starts
+        // from where the first left the carousel — at pocket 2 — so tool
+        // 1's change now turns it back.
+        scene.upsert_sequence(run_program_step("two_tools"));
+        let options = crate::rollout::RolloutOptions::default();
+        let tl = scene.simulate_sequence("vmc", &options).unwrap();
+        let track = tl.robots.iter().find(|r| r.name == "vmc/axes").unwrap();
+        let [t_in, t_out] = changes[1].handover();
+        near(track.trajectory.sample((t_in + t_out) / 2.0)[shuttle], 0.2);
+        near(
+            track.trajectory.sample((t_in + t_out) / 2.0)[carousel],
+            -step / 2.0,
+        );
+        near(track.trajectory.positions.last().unwrap()[carousel], -step);
+        let again = scene
+            .plan_nc_program(
+                "vmc/axes",
+                "two_tools",
+                Some(track.trajectory.positions.last().unwrap()),
+                None,
+            )
+            .unwrap();
+        let first = &again.run.changes[0];
+        near(again.trajectory.sample(first.start)[carousel], -step);
+        near(again.trajectory.sample(first.end)[carousel], 0.0);
+
+        // Round trip: the changer is the control's, in the file and in
+        // the generated script.
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.nc_machines(), scene.nc_machines());
+        let baked = reloaded.simulate_sequence("vmc", &options).unwrap();
+        let other = baked.robots.iter().find(|r| r.name == "vmc/axes").unwrap();
+        assert_eq!(other.trajectory.positions, track.trajectory.positions);
+        let python = generate_python(&scene.to_project());
+        assert!(
+            python.contains(
+                "spindle_max_rpm=8000, changer=(\"tool_shuttle\", \"tool_carousel\", 20))\n"
+            ),
+            "{python}"
+        );
+        // A file from before changers existed has none.
+        assert!(!nc_scene().to_project().to_json().contains("changer"));
+    }
+
+    #[test]
+    fn a_tool_changer_is_two_more_joints_of_the_right_kind() {
+        use crate::nc::{NcChanger, NcMachine};
+        let mut scene = changer_scene();
+        let control = scene.nc_machines()[0].clone();
+        let mut refused = |shuttle: &str, carousel: &str, pockets: u32| {
+            scene
+                .define_nc_machine(NcMachine {
+                    changer: Some(NcChanger {
+                        shuttle: shuttle.into(),
+                        carousel: carousel.into(),
+                        pockets,
+                    }),
+                    ..control.clone()
+                })
+                .unwrap_err()
+                .to_string()
+        };
+        for (shuttle, carousel, pockets, why) in [
+            (
+                "slide",
+                "tool_carousel",
+                20,
+                "has no joint `slide` for its tool changer's shuttle",
+            ),
+            (
+                "tool_shuttle",
+                "turret",
+                20,
+                "has no joint `turret` for its tool changer's carousel",
+            ),
+            // The shuttle slides between two ends; the carousel turns, and freely.
+            (
+                "tool_carousel",
+                "tool_carousel",
+                20,
+                "cannot be the tool changer's shuttle",
+            ),
+            (
+                "tool_shuttle",
+                "tool_shuttle",
+                20,
+                "cannot be the tool changer's carousel",
+            ),
+            ("tool_shuttle", "tool_carousel", 1, "at least two pockets"),
+            // An axis is not also the changer's.
+            (
+                "x",
+                "tool_carousel",
+                20,
+                "names one joint for two parts of its control",
+            ),
+        ] {
+            let message = refused(shuttle, carousel, pockets);
+            assert!(
+                message.contains(why),
+                "{shuttle}/{carousel}/{pockets}: {message}"
+            );
+        }
+        // Nothing was replaced by a refusal.
+        assert_eq!(scene.nc_machines()[0], control);
+    }
+
+    /// A program that calls the cell: the control runs it block by block,
+    /// and between two blocks the machine's own steps answer the M code.
+    #[test]
+    fn a_program_with_machine_functions_runs_block_by_block() {
+        use crate::nc::NcProgram;
+        use crate::seq::{Action, Condition, Logic, Sequence, Step};
+        let mut scene = nc_scene();
+        scene
+            .set_nc_m_code("vmc/axes", 21, Some("call the cell".into()))
+            .unwrap();
+        // The control's own codes are not the machine's to take.
+        let err = scene
+            .set_nc_m_code("vmc/axes", 6, Some("tool change".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("M6 is the control's own"), "{err}");
+        scene.add_nc_program(NcProgram {
+            name: "cell".into(),
+            text: "G90 G21 G53 G0 Z0.\nT1 M6\nS3000 M3\nG54 G0 X-20. Y0.\nG43 Z5. H1\n\
+                   G1 Z-1. F300.\nX20. F600.\nG0 Z5.\nM5\nG53 G0 Z0.\n\
+                   G53 G0 X-300. Y-100.\nM21\nG0 X0.\nM99\n"
+                .into(),
+        });
+        for signal in ["vmc/m21", "vmc/m_fin"] {
+            scene.define_signal(signal, false);
+        }
+        let step = |name: &str, actions: Vec<Action>, transition: Condition| Step {
+            name: name.into(),
+            actions,
+            transition,
+            select: vec![],
+        };
+        let block = |k: usize| Action::RunProgram {
+            robot: Some("vmc/axes".into()),
+            program: "cell".into(),
+            block: Some(k),
+        };
+        let set = |signal: &str, value: bool| Action::Set {
+            signal: signal.into(),
+            value,
+        };
+        let high = |name: &str, value: bool| Condition::Signal {
+            name: name.into(),
+            value,
+        };
+        // The machine: the cut, the relay and its M-FIN, the move after
+        // it, and over again.
+        scene.upsert_sequence(Sequence {
+            name: "vmc".into(),
+            steps: vec![
+                step("L1-L11", vec![block(0)], Condition::Done),
+                step(
+                    "L12 M21",
+                    vec![set("vmc/m21", true)],
+                    high("vmc/m_fin", true),
+                ),
+                step(
+                    "L12 M21 done",
+                    vec![set("vmc/m21", false)],
+                    high("vmc/m_fin", false),
+                ),
+                step("L13", vec![block(1)], Condition::Done),
+            ],
+        });
+        scene.upsert_logic(Logic {
+            name: "vmc".into(),
+            cycle: true,
+            ..Logic::default()
+        });
+        // The cell: answers the relay a second after it comes on, and
+        // watches the machine get back to its cut.
+        scene.upsert_sequence(Sequence {
+            name: "cell".into(),
+            steps: vec![
+                step("wait", vec![], high("vmc/m21", true)),
+                step("work", vec![], Condition::Elapsed { seconds: 1.0 }),
+                step("fin", vec![set("vmc/m_fin", true)], high("vmc/m21", false)),
+                step(
+                    "clear",
+                    vec![set("vmc/m_fin", false)],
+                    Condition::Elapsed { seconds: 6.0 },
+                ),
+            ],
+        });
+        let options = crate::rollout::RolloutOptions::default();
+        let tl = scene
+            .simulate_sequences(&["cell", "vmc"], &options)
+            .unwrap();
+        let track = tl.robots.iter().find(|r| r.name == "vmc/axes").unwrap();
+        let names: Vec<&str> = track.moves.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(&names[..3], ["cell#0", "cell#1", "cell#0"], "{names:?}");
+
+        // The cut is the block read on its own, and the axes then stand
+        // parked for as long as the cell takes.
+        let robot = scene.robot_index("vmc/axes").unwrap();
+        let cut = scene
+            .plan_nc_program("vmc/axes", "cell", None, Some(0))
+            .unwrap();
+        assert!((track.moves[0].end - cut.run.duration()).abs() < 1e-9);
+        assert!(
+            track.moves[1].start > track.moves[0].end + 1.0,
+            "{:?}",
+            track.moves
+        );
+        let model = &scene.robots()[robot].model;
+        let x = model.joints[model.joint_index("x").unwrap()]
+            .q_index
+            .unwrap();
+        let waiting = track.trajectory.sample(track.moves[0].end + 0.5);
+        assert!((waiting[x] + 0.300).abs() < 1e-9, "{waiting:?}");
+        // The block after the call is read in the offset the cut called:
+        // work X0 is machine X-150.
+        let after = track.trajectory.sample(track.moves[1].end);
+        assert!((after[x] + 0.150).abs() < 1e-9, "{after:?}");
+
+        // The control's lanes: the spindle from its M3 to its M5, the tool
+        // once it is in, and the line it runs — none while it waits for
+        // the cell at its M21.
+        let lane = |name: &str| tl.signals.iter().find(|s| s.name == name).unwrap();
+        let word = |name: &str| tl.words.iter().find(|w| w.name == name).unwrap();
+        let on = cut
+            .run
+            .events
+            .iter()
+            .find(|e| matches!(e.event, crate::nc::NcEvent::Spindle { .. }))
+            .unwrap()
+            .t;
+        let off = cut.run.spans.iter().find(|s| s.line == 10).unwrap().start;
+        let spindle = lane("vmc/axes.spindle");
+        assert!(!spindle.value_at(on - 0.05) && spindle.value_at(on + 0.05));
+        assert!(spindle.value_at(off - 0.05) && !spindle.value_at(off + 0.05));
+        assert_eq!(word("vmc/axes.rpm").value_at(on + 0.05), 3000.0);
+        assert_eq!(word("vmc/axes.rpm").value_at(off + 0.05), 0.0);
+        assert_eq!(word("vmc/axes.tool").value_at(0.0), 0.0);
+        assert_eq!(word("vmc/axes.tool").value_at(on), 1.0);
+        let feed = cut.run.spans.iter().find(|s| s.line == 7).unwrap();
+        assert_eq!(
+            word("vmc/axes.line").value_at((feed.start + feed.end) / 2.0),
+            7.0
+        );
+        assert_eq!(
+            word("vmc/axes.line").value_at(track.moves[0].end + 0.5),
+            0.0
+        );
+        assert!(!lane("vmc/axes.coolant").value_at(tl.duration));
+
+        // Run whole, the same program has nobody to answer its M21.
+        scene.upsert_sequence(run_program_step("cell"));
+        scene.upsert_logic(Logic {
+            name: "vmc".into(),
+            ..Logic::default()
+        });
+        let err = scene
+            .simulate_sequence("vmc", &options)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("line 12: M21 is a machine function") && err.contains("bt.nc.sequence"),
+            "{err}"
+        );
+        // The dry run reads it whole: the call is an event, and takes no
+        // time.
+        let dry = scene
+            .plan_nc_program("vmc/axes", "cell", None, None)
+            .unwrap();
+        assert!(dry
+            .run
+            .events
+            .iter()
+            .any(|e| e.event == crate::nc::NcEvent::Function(21) && e.line == 12));
+        assert_eq!(dry.ends, crate::nc::NcEnd::Repeat { line: 14 });
+        let outline = scene.nc_outline("vmc/axes", "cell", None).unwrap();
+        assert_eq!(outline.len(), 2);
+        // (Line 1 retracts a head that is already up: it does nothing.)
+        assert_eq!(outline[0].lines, Some([2, 11]));
+
+        // What a studio is told of the control: its axes in the robot's
+        // joint vector, the three tables, and the programs' text.
+        let crate::wire::ServerMessage::Nc { machines, programs } = crate::wire::nc_message(&scene)
+        else {
+            panic!("an nc message");
+        };
+        assert_eq!(machines.len(), 1);
+        let control = &machines[0];
+        assert_eq!(control.robot, "vmc/axes");
+        let axes = scene.robots()[robot].model.clone();
+        let joint = |name: &str| {
+            axes.joints[axes.joint_index(name).unwrap()]
+                .q_index
+                .unwrap()
+        };
+        assert_eq!(control.axes, [joint("x"), joint("y"), joint("z")]);
+        assert!(control.travel[0][0] < control.travel[0][1]);
+        assert_eq!(
+            control
+                .work_offsets
+                .iter()
+                .map(|o| (o.name.as_str(), o.xyz))
+                .collect::<Vec<_>>(),
+            vec![("G54", [-0.15, -0.10, -0.20])]
+        );
+        assert_eq!(
+            control
+                .tools
+                .iter()
+                .map(|t| (t.number, t.length, t.cutter.clone(), t.body_length))
+                .collect::<Vec<_>>(),
+            vec![(1, 0.08, None, None), (2, 0.10, None, None)]
+        );
+        assert_eq!(
+            control
+                .m_codes
+                .iter()
+                .map(|m| (m.code, m.what.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(21, "call the cell")]
+        );
+        let cell = programs.iter().find(|p| p.name == "cell").unwrap();
+        assert!(cell.text.contains("M21") && programs.iter().any(|p| p.name == "op10"));
+
+        // The table and the block numbers are the project's.
+        let json = scene.to_project().to_json();
+        let reloaded = Scene::from_project(&ProjectFile::from_json(&json).unwrap()).unwrap();
+        assert_eq!(reloaded.nc_machines(), scene.nc_machines());
+        scene.upsert_sequence(Sequence {
+            name: "vmc".into(),
+            steps: vec![step("L13", vec![block(1)], Condition::Done)],
+        });
+        let python = generate_python(&scene.to_project());
+        for needle in [
+            "scene.set_nc_m_code(\"vmc/axes\", 21, \"call the cell\")",
+            "bt.seq.run_program(\"vmc/axes\", \"cell\", block=1)",
+        ] {
+            assert!(python.contains(needle), "missing `{needle}` in:\n{python}");
+        }
+    }
+
+    #[test]
+    fn what_the_control_cannot_read_fails_the_bake_by_step_and_line() {
+        use crate::nc::NcProgram;
+        let options = crate::rollout::RolloutOptions::default();
+        let mut scene = nc_scene();
+        // Past the Y travel on line 2; a tool nobody entered on line 3.
+        for (text, needle) in [
+            (
+                "G54 G90 G0 X0. Y0.\nG0 Y150.\n",
+                "line 2: Y 50.000 mm is past the Y travel",
+            ),
+            (
+                "G54 G90 G0 X0. Y0.\nT3 M6\nG43 Z5. H3\n",
+                "line 3: tool length H3 is not in the tool table",
+            ),
+        ] {
+            scene.add_nc_program(NcProgram {
+                name: "bad".into(),
+                text: text.into(),
+            });
+            scene.upsert_sequence(run_program_step("bad"));
+            let err = scene
+                .simulate_sequence("vmc", &options)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("machining") && err.contains("NC program `bad` on `vmc/axes`"),
+                "{err}"
+            );
+            assert!(err.contains(needle), "{err}");
+        }
+        // A program is run on a machine, and only on one.
+        let arm = scene.robots()[0].name.clone();
+        scene.upsert_sequence(crate::seq::Sequence {
+            name: "vmc".into(),
+            steps: vec![crate::seq::Step {
+                name: "machining".into(),
+                actions: vec![crate::seq::Action::RunProgram {
+                    robot: Some(arm.clone()),
+                    program: "op10".into(),
+                    block: None,
+                }],
+                transition: crate::seq::Condition::Done,
+                select: vec![],
+            }],
+        });
+        let err = scene
+            .simulate_sequence("vmc", &options)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("`{arm}` is not an NC machine")),
+            "{err}"
+        );
+        scene.upsert_sequence(run_program_step("op99"));
+        let err = scene
+            .simulate_sequence("vmc", &options)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown NC program `op99`"), "{err}");
+        // An axis is a prismatic joint with travel limits: an arm's are not.
+        let joints: Vec<String> = {
+            let model = &scene.robots()[0].model;
+            model
+                .actuated_joints
+                .iter()
+                .take(3)
+                .map(|&j| model.joints[j].name.clone())
+                .collect()
+        };
+        let err = scene
+            .define_nc_machine(crate::nc::NcMachine {
+                robot: arm.clone(),
+                axes: [joints[0].clone(), joints[1].clone(), joints[2].clone()],
+                ..scene.nc_machines()[0].clone()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cannot be the X axis: an axis is a prismatic joint"),
+            "{err}"
+        );
+        assert!(scene
+            .set_work_offset("vmc/axes", "G60", Some([0.0; 3]))
+            .is_err());
     }
 
     #[test]

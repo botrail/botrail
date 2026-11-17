@@ -39,6 +39,8 @@ pub enum OutputKind {
     Ramp,
     /// A toolpath started.
     Toolpath,
+    /// An NC part program started on a machine tool.
+    Program,
     /// A grasp (attach) or a conveyor track.
     Grasp,
     /// A release (detach) or the end of a track.
@@ -53,6 +55,7 @@ impl OutputKind {
             OutputKind::Motion => "motion",
             OutputKind::Ramp => "ramp",
             OutputKind::Toolpath => "toolpath",
+            OutputKind::Program => "program",
             OutputKind::Grasp => "grasp",
             OutputKind::Release => "release",
         }
@@ -188,6 +191,9 @@ fn condition_text(c: &Condition, after: Option<&Step>) -> String {
                                 robot.as_ref().map(|r| format!(" {r}")).unwrap_or_default()
                             )),
                             Action::StartToolpath { toolpath, .. } => Some(toolpath.clone()),
+                            Action::RunProgram { program, block, .. } => {
+                                Some(format!("program {}", crate::nc::run_name(program, *block)))
+                            }
                             Action::Policy { policy, .. } => Some(format!("policy {policy}")),
                             Action::Crouch { robot, .. } => Some(format!(
                                 "crouch{}",
@@ -381,16 +387,25 @@ fn merge_pins(into: &mut Vec<(String, bool)>, more: Vec<(String, bool)>) -> Resu
     Ok(())
 }
 
+/// Whether a condition can never hold: `NOT TRUE`, the way a step that is
+/// a dead end is written (an alarm nothing in the program clears).
+fn never(c: &Condition) -> bool {
+    matches!(c, Condition::Not(inner) if matches!(**inner, Condition::Immediately))
+}
+
 /// The last transition(s) of a run of steps: the last step's own
 /// transition, or — when the last step is a select — the rejoin of its
 /// arms (each arm's last transition, or the arm condition for an empty
-/// arm).
+/// arm). A step nothing leaves (its transition never holds) leads
+/// nowhere, so it is no way into what follows.
 fn exits<'a>(steps: &'a [Step], out: &mut Vec<(&'a Condition, &'a Step)>) {
     let Some(last) = steps.last() else {
         return;
     };
     if last.select.is_empty() {
-        out.push((&last.transition, last));
+        if !never(&last.transition) {
+            out.push((&last.transition, last));
+        }
     } else {
         for arm in &last.select {
             if arm.steps.is_empty() {
@@ -534,6 +549,18 @@ fn outputs(scene: &Scene, step: &Step) -> Vec<(OutputKind, String, String)> {
                 toolpath.clone(),
                 format!("toolpath {toolpath}{}", with_robot(robot)),
             )),
+            Action::RunProgram {
+                robot,
+                program,
+                block,
+            } => {
+                let run = crate::nc::run_name(program, *block);
+                out.push((
+                    OutputKind::Program,
+                    run.clone(),
+                    format!("program {run}{}", with_robot(robot)),
+                ));
+            }
             Action::Policy { robot, policy, .. } => out.push((
                 OutputKind::Motion,
                 policy.clone(),
@@ -1130,6 +1157,59 @@ mod tests {
             scene.interlock_table(Some(&["nope"])).unwrap_err(),
             InterlockError::UnknownSequence("nope".to_string())
         );
+    }
+
+    /// An alarm is an arm that ends in a step nothing leaves: the step
+    /// after the branch is entered through the other arm alone.
+    #[test]
+    fn a_dead_end_is_no_way_into_what_follows() {
+        let mut scene = arm();
+        for signal in ["safe", "open", "alarm"] {
+            scene.define_signal(signal, false);
+        }
+        let set = |signal: &str| Action::Set {
+            signal: signal.to_string(),
+            value: true,
+        };
+        let mut door = step("door?", vec![], Condition::Immediately);
+        door.select = vec![
+            SelectArm {
+                condition: sig("safe"),
+                steps: vec![step(
+                    "door",
+                    vec![set("open")],
+                    Condition::Elapsed { seconds: 1.0 },
+                )],
+            },
+            SelectArm {
+                condition: Condition::Not(Box::new(sig("safe"))),
+                steps: vec![step(
+                    "door ALARM",
+                    vec![set("alarm")],
+                    Condition::Not(Box::new(Condition::Immediately)),
+                )],
+            },
+        ];
+        scene.set_sequences(vec![Sequence {
+            name: "p".to_string(),
+            steps: vec![
+                door,
+                step(
+                    "call",
+                    vec![Action::Set {
+                        signal: "open".to_string(),
+                        value: false,
+                    }],
+                    Condition::Elapsed { seconds: 2.0 },
+                ),
+            ],
+        }]);
+        let table = scene.interlock_table(Some(&["p"])).unwrap();
+        let by_step = |name: &str| table.rows.iter().find(|r| r.step == name).unwrap();
+        assert_eq!(by_step("door").condition, "safe");
+        assert_eq!(by_step("door ALARM").condition, "NOT safe");
+        assert_eq!(by_step("call").condition, "T >= 1 s");
+        assert_eq!(by_step("call").after, vec!["door".to_string()]);
     }
 
     #[test]

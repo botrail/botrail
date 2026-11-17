@@ -159,7 +159,7 @@ pub trait SessionHost {
 
 /// The connection handshake, in order: scene_init, obstacles, motions,
 /// sequences, sensors, devices, cameras, lidars, scenarios, effects, frames,
-/// scenery joints, toolpaths, io, parts, state. Mesh
+/// scenery joints, toolpaths, nc, routes, io, parts, state. Mesh
 /// visuals are mapped to URLs through the host's
 /// [`mesh_url`](SessionHost::mesh_url). This is the single definition of
 /// the handshake — hosts must not hand-roll it.
@@ -171,7 +171,7 @@ pub fn initial_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
 
 /// Every scene-content message except `scene_init`, in handshake order:
 /// obstacles, motions, sequences, sensors, devices, cameras, lidars, scenarios,
-/// effects, frames, scenery joints, toolpaths, routes, io, parts, state. Re-sent wholesale after
+/// effects, frames, scenery joints, toolpaths, nc, routes, io, parts, state. Re-sent wholesale after
 /// bulk changes (project load),
 /// where the robot — and therefore `scene_init` — cannot change.
 pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
@@ -189,6 +189,7 @@ pub fn refresh_messages(host: &impl SessionHost) -> Vec<ServerMessage> {
             wire::frames_message(scene),
             wire::scenery_joints_message(scene),
             wire::toolpaths_message(scene),
+            wire::nc_message(scene),
             wire::routes_message(scene),
             wire::io_message(scene),
             wire::bom_message(scene),
@@ -1169,6 +1170,16 @@ fn emit_toolpaths(host: &impl SessionHost) {
         return;
     }
     let msg = host.with_scene(|scene| wire::toolpaths_message(scene));
+    host.emit(&msg);
+}
+
+/// Rebroadcasts the machine tools' controls and the part programs: after
+/// a table entry, an M code or a program changed.
+pub fn emit_nc(host: &impl SessionHost) {
+    if !host.has_listeners() {
+        return;
+    }
+    let msg = host.with_scene(|scene| wire::nc_message(scene));
     host.emit(&msg);
 }
 
@@ -2988,6 +2999,7 @@ mod tests {
                     ServerMessage::Routes { .. } => "routes",
                     ServerMessage::RouteCandidates { .. } => "route_candidates",
                     ServerMessage::Toolpaths { .. } => "toolpaths",
+                    ServerMessage::Nc { .. } => "nc",
                     ServerMessage::MotionResult { .. } => "motion_result",
                     ServerMessage::Sequences { .. } => "sequences",
                     ServerMessage::BakeChunk { .. } => "bake_chunk",
@@ -3730,10 +3742,11 @@ mod tests {
         assert!(matches!(msgs[10], ServerMessage::Frames { .. }));
         assert!(matches!(msgs[11], ServerMessage::SceneryJoints { .. }));
         assert!(matches!(msgs[12], ServerMessage::Toolpaths { .. }));
-        assert!(matches!(msgs[13], ServerMessage::Routes { .. }));
-        assert!(matches!(msgs[14], ServerMessage::Io { .. }));
-        assert!(matches!(msgs[15], ServerMessage::Bom { .. }));
-        assert!(matches!(msgs[16], ServerMessage::State { .. }));
+        assert!(matches!(msgs[13], ServerMessage::Nc { .. }));
+        assert!(matches!(msgs[14], ServerMessage::Routes { .. }));
+        assert!(matches!(msgs[15], ServerMessage::Io { .. }));
+        assert!(matches!(msgs[16], ServerMessage::Bom { .. }));
+        assert!(matches!(msgs[17], ServerMessage::State { .. }));
     }
 
     #[test]

@@ -11,6 +11,8 @@ import type { IoMap } from "./IoMap";
 import type { IoPointMsg } from "./IoPointMsg";
 import type { LidarMsg } from "./LidarMsg";
 import type { MotionMsg } from "./MotionMsg";
+import type { NcMachineMsg } from "./NcMachineMsg";
+import type { NcProgramMsg } from "./NcProgramMsg";
 import type { ObstacleMsg } from "./ObstacleMsg";
 import type { PlanStatsMsg } from "./PlanStatsMsg";
 import type { PlantStatusMsg } from "./PlantStatusMsg";
@@ -34,7 +36,7 @@ export type ServerMessage = { "type": "scene_init", scene: SceneDescriptionMsg, 
 /**
  * The ducts, clamps and carriers a way may pass.
  */
-supports: Array<RouteSupportMsg>, } | { "type": "route_candidates", route: string, candidates: Array<RouteCandidate>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "state", 
+supports: Array<RouteSupportMsg>, } | { "type": "route_candidates", route: string, candidates: Array<RouteCandidate>, } | { "type": "toolpaths", toolpaths: Array<ToolpathOverlayMsg>, } | { "type": "nc", machines: Array<NcMachineMsg>, programs: Array<NcProgramMsg>, } | { "type": "state", 
 /**
  * One entry per robot, in `SceneDescriptionMsg::robots` order.
  */

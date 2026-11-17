@@ -725,6 +725,14 @@ impl<'a> Lowering<'a> {
                     local_q.clone_from(q);
                 }
             }
+            // A part program is the machine tool's own, run by its
+            // control: there is no arm controller to write it for.
+            Action::RunProgram { program, .. } => {
+                return Err(format!(
+                    "{label}: NC program `{program}` runs on a machine tool's control, \
+                     not an arm controller's"
+                ));
+            }
             // Only a walking robot crouches, and its program is refused
             // before any step is lowered (its legs are a gait).
             Action::Crouch { .. } => {
@@ -943,6 +951,7 @@ fn driven_robot(scene: &Scene, seq: &Sequence) -> Result<usize, String> {
             | Action::Track { robot, .. }
             | Action::Untrack { robot, .. }
             | Action::StartToolpath { robot, .. }
+            | Action::RunProgram { robot, .. }
             | Action::Crouch { robot, .. } => scene.resolve_seq_robot(robot)?,
             _ => return Ok(()),
         };

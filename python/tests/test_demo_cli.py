@@ -54,6 +54,7 @@ CELL_DEMOS = [
     "machining/machine_tending_demo.py",
     "machining/machining_demo.py",
     "machining/two_machine_cell_demo.py",
+    "machining/vf2_tending_demo.py",
     "multi_robot/dual_arm_demo.py",
     "multi_robot/dual_cell_demo.py",
     "painting/painting_demo.py",

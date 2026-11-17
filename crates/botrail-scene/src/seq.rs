@@ -1490,6 +1490,23 @@ pub enum Action {
         robot: Option<String>,
         toolpath: String,
     },
+    /// Run an NC part program on a machine tool's axes — `robot` is an NC
+    /// machine (see [`crate::nc`]): read against the machine's work
+    /// offsets and tool table and timed by its rates at this moment, from
+    /// where the axes stand. Await it with [`Condition::Done`].
+    ///
+    /// `block` runs one block of it: what the control runs on its own
+    /// between two machine functions (the M codes of the machine's table,
+    /// [`crate::nc::NcMachine::m_codes`]), from where the axes stand. A
+    /// program that calls machine functions runs block by block, with a
+    /// step of the machine's own between two blocks — the door, the vise,
+    /// the wait for a robot. `None` runs the program whole, and refuses
+    /// one that calls a machine function nothing here would answer.
+    RunProgram {
+        robot: Option<String>,
+        program: String,
+        block: Option<usize>,
+    },
     /// Lower a parked walker's body while it stands: over `duration` the
     /// body (its root link) goes from the crouch it is in to `depth`
     /// metres below its standing height, pitched nose-down by `lean`
@@ -1697,6 +1714,7 @@ impl Action {
             | Action::Track { robot, .. }
             | Action::Untrack { robot, .. }
             | Action::StartToolpath { robot, .. }
+            | Action::RunProgram { robot, .. }
             | Action::Crouch { robot, .. } => robot.as_mut(),
             _ => None,
         }
@@ -3039,7 +3057,7 @@ impl Scene {
                     .collect();
                 Ok(Some((r, joints)))
             }
-            Action::StartToolpath { robot, .. } => {
+            Action::StartToolpath { robot, .. } | Action::RunProgram { robot, .. } => {
                 let r = self.resolve_seq_robot(robot)?;
                 Ok(Some((r, (0..self.robots()[r].model.dof()).collect())))
             }
@@ -3193,7 +3211,9 @@ impl Scene {
                             claim_robot(&mut owners, r, group.clone(), index)?;
                         }
                     }
-                    Action::StartToolpath { robot, .. } | Action::Crouch { robot, .. } => {
+                    Action::StartToolpath { robot, .. }
+                    | Action::RunProgram { robot, .. }
+                    | Action::Crouch { robot, .. } => {
                         if let Ok(r) = self.resolve_seq_robot(robot) {
                             claim_robot(&mut owners, r, None, index)?;
                         }
@@ -4053,6 +4073,19 @@ impl Scene {
                     .ok_or_else(|| format!("unknown toolpath `{toolpath}`"))?;
                 if found.target_count() == 0 {
                     return Err(format!("toolpath `{toolpath}` has no targets"));
+                }
+                Ok(())
+            }
+            Action::RunProgram { robot, program, .. } => {
+                let r = self.resolve_seq_robot(robot)?;
+                if !self.is_nc_machine(r) {
+                    return Err(format!(
+                        "`{}` is not an NC machine: a part program runs on a machine tool's axes",
+                        self.robots()[r].name
+                    ));
+                }
+                if self.nc_program(program).is_none() {
+                    return Err(format!("unknown NC program `{program}`"));
                 }
                 Ok(())
             }

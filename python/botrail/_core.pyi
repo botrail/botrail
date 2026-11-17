@@ -53,6 +53,10 @@ class Robot:
     def joint_values(self, positions: list[float]) -> dict[str, float]: ...
     @property
     def link_names(self) -> list[str]: ...
+    def link_poses(
+        self, positions: Optional[list[float]] = None
+    ) -> dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]]: ...
+    def visuals(self, positions: Optional[list[float]] = None) -> list[dict[str, Any]]: ...
     @property
     def tcp_link(self) -> str: ...
     @property
@@ -561,6 +565,73 @@ class Scene:
     def remove_toolpath(self, name: str) -> None: ...
     @property
     def toolpath_names(self) -> list[str]: ...
+    def define_nc_machine(
+        self,
+        robot: str,
+        axes: tuple[str, str, str],
+        max_feed: float,
+        acceleration: Union[float, tuple[float, float, float]],
+        tool_change_s: float = 0.0,
+        junction_deviation: float = 5e-5,
+        spindle_max_rpm: Optional[float] = None,
+        changer: Optional[tuple[str, str, int]] = None,
+    ) -> None: ...
+    def remove_nc_machine(self, robot: str) -> None: ...
+    @property
+    def nc_machine_names(self) -> list[str]: ...
+    def nc_machine(self, robot: str) -> dict[str, Any]: ...
+    def set_work_offset(
+        self, machine: str, name: str, xyz: Optional[tuple[float, float, float]]
+    ) -> None: ...
+    def set_nc_tool(
+        self,
+        machine: str,
+        number: int,
+        length: Optional[float] = None,
+        diameter: Optional[float] = None,
+        body: Optional[str] = None,
+    ) -> None: ...
+    def nc_dry_run(
+        self,
+        machine: str,
+        program: str,
+        carrier: str,
+        riders: list[str] = ...,
+        start: Optional[list[float]] = None,
+    ) -> "SequenceTimeline": ...
+    def animate_machining(
+        self,
+        timeline: "SequenceTimeline",
+        stock: str,
+        machine: str,
+        spindle_link: str,
+        fixtures: list[str] = ...,
+        design: Optional[Union[str, Path]] = None,
+        tolerance: float = 5e-5,
+        chord_tolerance: float = 1e-5,
+        max_deviation: float = 1e-5,
+        tile_size: Optional[float] = None,
+        dt: float = 0.01,
+        stage_period: float = 2.0,
+        max_stages: int = 40,
+        show_tools: bool = True,
+    ) -> tuple["SequenceTimeline", dict[str, Any]]: ...
+    def add_nc_program(self, name: str, text: str) -> None: ...
+    def remove_nc_program(self, name: str) -> None: ...
+    @property
+    def nc_program_names(self) -> list[str]: ...
+    def nc_program(self, name: str) -> str: ...
+    def plan_nc_program(
+        self,
+        machine: str,
+        program: str,
+        start: Optional[list[float]] = None,
+        block: Optional[int] = None,
+    ) -> dict[str, Any]: ...
+    def set_nc_m_code(self, machine: str, code: int, what: Optional[str]) -> None: ...
+    def nc_blocks(
+        self, machine: str, program: str, start: Optional[list[float]] = None
+    ) -> list[dict[str, Any]]: ...
     def plan_toolpath(
         self,
         name: str,
@@ -1387,6 +1458,21 @@ class SequenceTimeline:
     @property
     def ropes(self) -> list[str]: ...
     def _rope_track_json(self, name: str) -> str: ...
+    def machine_stock(
+        self,
+        stock: str,
+        machine: str,
+        spindle_link: str,
+        fixtures: list[str] = ...,
+        design: Optional[Union[str, Path]] = None,
+        tolerance: float = 5e-5,
+        chord_tolerance: float = 1e-5,
+        max_deviation: float = 1e-5,
+        tile_size: Optional[float] = None,
+        dt: float = 0.01,
+        stage_period: float = 2.0,
+        max_stages: int = 40,
+    ) -> dict[str, Any]: ...
     def carve_stock(
         self,
         stock: str,

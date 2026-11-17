@@ -621,6 +621,11 @@ fn controller_row_names(scene: &Scene) -> Vec<String> {
 /// hand loaded on its own is driven by someone else's, and a frames-only
 /// body is not a machine at all — none of those get a line.
 fn needs_controller(scene: &Scene, robot: &crate::SceneRobot) -> bool {
+    // A machine tool's axes are driven by the machine's own control,
+    // which is part of the machine.
+    if scene.nc_machine(&robot.name).is_some() {
+        return false;
+    }
     // The vehicle rule of `bom`: legs (a gait mount), running gear (a
     // wheel mount) or the whole airframe (a rigid mount on a vehicle with
     // no body of its own) *are* the vehicle.
@@ -1203,6 +1208,15 @@ impl Scene {
         };
 
         for robot in &self.robots {
+            // A machine tool's axes are not an article of their own: the
+            // machine is one line (the part pinned to its body), and the
+            // mechanism inside it is how that line moves — unless a part
+            // is pinned to the mechanism itself.
+            if self.nc_machine(&robot.name).is_some()
+                && explicit(PartTargetKind::Robot, &robot.name).is_none()
+            {
+                continue;
+            }
             let mut robot_rows = Vec::new();
             let mut tools = 0;
             robot_lines(

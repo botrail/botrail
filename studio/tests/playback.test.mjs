@@ -95,6 +95,42 @@ test("streamed physics windows append on the shared lattice, padding late tracks
   assert.ok(late.stowed.has("lid"));
 });
 
+test("an object is drawn where it is, not part-way to where it waits stowed", () => {
+  // Two stages of a part being cut on a table that moves (x: 1, 2, 3, 4).
+  // Each waits at its rest (x = 9) while it is not the one shown; the
+  // first hands over to the second between the second sample and the third.
+  const tracks = appendTracks(
+    null,
+    {
+      duration: 4 / 30,
+      robots: [],
+      objects: [
+        { name: "table", poses: [pose(1), pose(2), pose(3), pose(4)] },
+        { name: "cut/0", poses: [pose(1), pose(2), pose(9), pose(9)], visible: [true, true, false, false] },
+        { name: "cut/1", poses: [pose(9), pose(9), pose(3), pose(4)], visible: [false, false, true, true] },
+      ],
+      step_spans: [],
+      signals: [],
+    },
+    0,
+  );
+  const at = (k) => samplePlayback(tracks, k / 30);
+  // While a stage is shown it rides between its samples like the table.
+  assert.ok(Math.abs(at(1.5).objects["cut/0"].position[0] - 1.5) < 1e-9);
+  assert.ok(Math.abs(at(3.5).objects["cut/1"].position[0] - 3.5) < 1e-9);
+  // Across the hand-over the outgoing stage stays on its last shown
+  // sample — it does not set off for x = 9 — and the incoming one, not
+  // yet shown, already stands where it will appear.
+  for (const k of [2.25, 2.5, 2.9]) {
+    const sample = at(k);
+    assert.ok(!sample.stowed.has("cut/0") && sample.stowed.has("cut/1"));
+    assert.equal(sample.objects["cut/0"].position[0], 2);
+    assert.equal(sample.objects["cut/1"].position[0], 3);
+    assert.ok(Math.abs(sample.objects.table.position[0] - k) < 1e-9);
+  }
+  assert.ok(at(3).stowed.has("cut/0") && !at(3).stowed.has("cut/1"));
+});
+
 test("a stream's own tracks grow in place, window by window, and read like one long window", () => {
   const robot = (times, q) => ({
     name: "arm",

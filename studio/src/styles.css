@@ -2753,3 +2753,145 @@ button.danger:hover:not(:disabled) {
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
+
+/* ---- the machine tool's control (NcOverlay) ---------------------------- */
+.nc-overlay {
+  max-width: min(72%, 980px);
+}
+
+.nc-machine {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.nc-body {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 14px;
+  padding: 8px 10px 10px;
+}
+
+.nc-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 320px;
+  min-height: 0;
+  flex: 1;
+}
+
+.nc-position {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.nc-axes {
+  display: flex;
+  gap: 16px;
+  font-size: 15px;
+}
+
+.nc-axis b {
+  color: var(--muted);
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.nc-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.nc-on {
+  color: #7fd3a0;
+}
+
+.nc-alarm {
+  color: #ff8a80;
+}
+
+.nc-programs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.nc-listing {
+  flex: 1;
+  min-height: 120px;
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.nc-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 8px 0 0;
+  white-space: pre;
+  border-left: 3px solid transparent;
+}
+
+.nc-no {
+  width: 30px;
+  text-align: right;
+  color: #5b6474;
+  user-select: none;
+  flex: none;
+}
+
+.nc-text {
+  flex: 1;
+}
+
+.nc-call {
+  color: var(--muted);
+  font-family: inherit;
+  font-style: italic;
+}
+
+/* The line the control runs; the one it stands at waiting; an alarm. */
+.nc-run {
+  background: rgba(127, 211, 160, 0.16);
+  border-left-color: #7fd3a0;
+}
+
+.nc-wait {
+  background: rgba(240, 190, 90, 0.14);
+  border-left-color: #f0be5a;
+}
+
+.nc-stop {
+  background: rgba(255, 138, 128, 0.16);
+  border-left-color: #ff8a80;
+}
+
+.nc-tables {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  min-width: 250px;
+}
+
+.nc-num {
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.nc-in-spindle td:first-child {
+  color: #7fd3a0;
+  font-weight: 600;
+}
